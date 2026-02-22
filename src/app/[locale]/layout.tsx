@@ -6,7 +6,7 @@ import { Header } from "@/components/layout/header";
 import { Footer } from "@/components/layout/footer";
 import { GTM, GTMNoScript } from "@/components/common/gtm";
 import { SITE_URL, AUTHOR, OG_IMAGE_PATH, TWITTER_SITE } from "@/lib/constants";
-import { locales, isValidLocale, getDictionary, type Locale } from "@/lib/i18n";
+import { locales, isValidLocale, getDictionary } from "@/lib/i18n";
 
 const ibmPlexSans = IBM_Plex_Sans({
   variable: "--font-ibm-plex-sans",

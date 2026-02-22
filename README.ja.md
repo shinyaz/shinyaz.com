@@ -190,7 +190,7 @@ descriptionJa: プログラミングに関する記事
 
 ```
 src/
-  middleware.ts                # ロケール検出 & リダイレクト
+  proxy.ts                    # ロケール検出 & リダイレクト
   app/
     layout.tsx                 # ルートレイアウト (パススルー)
     not-found.tsx              # ルート 404 -> /en にリダイレクト

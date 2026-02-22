@@ -6,7 +6,6 @@ import { MdxContent } from "@/components/mdx/mdx-content";
 import { CategoryBadge } from "@/components/blog/category-badge";
 import { SITE_URL, AUTHOR } from "@/lib/constants";
 import { locales, isValidLocale, getDictionary } from "@/lib/i18n";
-import { buildAlternateLanguages } from "@/lib/seo";
 
 interface PostPageProps {
   params: Promise<{ locale: string; year: string; month: string; day: string; slug: string }>;

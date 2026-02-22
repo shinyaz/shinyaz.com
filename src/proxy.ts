@@ -3,7 +3,7 @@ import { locales, defaultLocale, isValidLocale } from "@/lib/i18n";
 
 const SKIP_PREFIXES = ["/_next", "/api", "/static", "/icons", "/favicon.ico", "/sw.js", "/sitemap.xml", "/robots.txt", "/manifest.webmanifest"];
 
-export function middleware(request: NextRequest) {
+export function proxy(request: NextRequest) {
   const { pathname } = request.nextUrl;
 
   // Skip static files, APIs, and service worker

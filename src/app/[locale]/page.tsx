@@ -1,7 +1,7 @@
 import type { Metadata } from "next";
 import { getPublishedPosts } from "@/lib/posts";
 import { PostList } from "@/components/blog/post-list";
-import { getDictionary, isValidLocale, type Locale } from "@/lib/i18n";
+import { getDictionary, isValidLocale } from "@/lib/i18n";
 import { SITE_URL } from "@/lib/constants";
 import { buildAlternateLanguages } from "@/lib/seo";
 import Link from "next/link";

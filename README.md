@@ -190,7 +190,7 @@ descriptionJa: プログラミングに関する記事
 
 ```
 src/
-  middleware.ts                # Locale detection & redirect
+  proxy.ts                    # Locale detection & redirect
   app/
     layout.tsx                 # Root layout (passthrough)
     not-found.tsx              # Root 404 -> redirect to /en

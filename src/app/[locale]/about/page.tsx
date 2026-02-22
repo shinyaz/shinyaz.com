@@ -3,7 +3,7 @@ import { notFound } from "next/navigation";
 import { getPageBySlug } from "@/lib/posts";
 import { MdxContent } from "@/components/mdx/mdx-content";
 import { SITE_URL } from "@/lib/constants";
-import { locales, isValidLocale, getDictionary } from "@/lib/i18n";
+import { locales, isValidLocale } from "@/lib/i18n";
 import { buildAlternateLanguages } from "@/lib/seo";
 
 interface AboutPageProps {
