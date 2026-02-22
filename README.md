@@ -112,6 +112,8 @@ title: "Post Title"
 description: "A short description."
 date: 2026-01-01
 published: true
+updated: 2026-01-15          # optional: last updated date
+cover: "/images/cover.png"   # optional: cover image
 categories:
   - programming
 tags:
@@ -122,6 +124,21 @@ Your content here. Supports **Markdown**, code blocks with syntax highlighting, 
 ```
 
 The filename becomes the URL slug (e.g., `hello-world.mdx` -> `/en/blog/2026/01/01/hello-world`). To create a translated version, place a file with the same name in the other locale directory.
+
+### Writing Pages
+
+Static pages (e.g., About) are managed in `content/pages/en/` or `content/pages/ja/`. Pages use a simpler frontmatter schema than posts:
+
+```markdown
+---
+title: "About"
+description: "About this site."
+---
+
+Page content here.
+```
+
+The filename becomes the URL slug (e.g., `about.mdx` -> `/en/about`).
 
 ### Adding Categories
 

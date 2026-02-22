@@ -112,6 +112,8 @@ title: "記事タイトル"
 description: "記事の簡単な説明。"
 date: 2026-01-01
 published: true
+updated: 2026-01-15          # 任意: 最終更新日
+cover: "/images/cover.png"   # 任意: カバー画像
 categories:
   - programming
 tags:
@@ -122,6 +124,21 @@ tags:
 ```
 
 ファイル名が URL スラッグになります (例: `hello-world.mdx` -> `/ja/blog/2026/01/01/hello-world`)。翻訳版を作成するには、もう一方のロケールディレクトリに同名ファイルを配置します。
+
+### 固定ページの書き方
+
+About などの固定ページは `content/pages/en/` または `content/pages/ja/` で管理します。記事よりシンプルなフロントマターを使用します:
+
+```markdown
+---
+title: "About"
+description: "このサイトについて。"
+---
+
+ページの本文をここに書きます。
+```
+
+ファイル名が URL スラッグになります (例: `about.mdx` -> `/ja/about`)。
 
 ### カテゴリの追加
 
