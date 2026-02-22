@@ -50,6 +50,21 @@ export function getCategoryDescription(category: { description?: string; descrip
   return locale === "ja" && category.descriptionJa ? category.descriptionJa : category.description;
 }
 
+export function getAllTags(locale?: Locale) {
+  const publishedPosts = getPublishedPosts(locale);
+  const tagSet = new Set<string>();
+  for (const post of publishedPosts) {
+    for (const tag of post.tags) {
+      tagSet.add(tag);
+    }
+  }
+  return Array.from(tagSet).sort();
+}
+
+export function getPostsByTag(tag: string, locale?: Locale) {
+  return getPublishedPosts(locale).filter((post) => post.tags.includes(tag));
+}
+
 export function getPageBySlug(slug: string, locale?: Locale) {
   return pages.find(
     (page) =>

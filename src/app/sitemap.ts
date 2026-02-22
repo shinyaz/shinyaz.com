@@ -1,5 +1,5 @@
 import type { MetadataRoute } from "next";
-import { getPublishedPosts, getAllCategories } from "@/lib/posts";
+import { getPublishedPosts, getAllCategories, getAllTags } from "@/lib/posts";
 import { SITE_URL } from "@/lib/constants";
 import { locales } from "@/lib/i18n";
 
@@ -98,6 +98,23 @@ export default function sitemap(): MetadataRoute.Sitemap {
         changeFrequency: "weekly",
         priority: 0.5,
         alternates: { languages: catAlternates },
+      });
+    }
+  }
+
+  // Tag entries for each locale
+  const tags = getAllTags();
+  for (const locale of locales) {
+    for (const tag of tags) {
+      const tagAlternates: Record<string, string> = {};
+      for (const l of locales) {
+        tagAlternates[l] = `${SITE_URL}/${l}/tag/${tag}`;
+      }
+      entries.push({
+        url: `${SITE_URL}/${locale}/tag/${tag}`,
+        changeFrequency: "weekly",
+        priority: 0.5,
+        alternates: { languages: tagAlternates },
       });
     }
   }

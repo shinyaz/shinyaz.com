@@ -61,6 +61,8 @@ npm start
 - `/ja/uses` - 日本語 Uses ページ
 - `/en/about` - 英語 About ページ
 - `/ja/about` - 日本語 About ページ
+- `/en/tag/nextjs` - 英語タグ別一覧
+- `/ja/tag/nextjs` - 日本語タグ別一覧
 
 ロケールプレフィックスなしで `/` にアクセスすると `/en` にリダイレクトされます (ブラウザの `Accept-Language` ヘッダーに `ja` が含まれる場合は `/ja`)。
 
@@ -215,12 +217,14 @@ src/
           page.tsx             # 記事詳細 (SSG, JSON-LD に inLanguage 含む)
       category/[slug]/
         page.tsx               # カテゴリ別一覧 (ページネーション付き)
+      tag/[slug]/
+        page.tsx               # タグ別一覧 (ページネーション付き)
       ~offline/
         page.tsx               # オフラインフォールバック
   components/
     layout/                    # Header, Footer, LanguageSwitcher
     theme/                     # ThemeProvider, ThemeToggle
-    blog/                      # PostCard, PostList, Pagination, CategoryBadge
+    blog/                      # PostCard, PostList, Pagination, CategoryBadge, TagBadge
     projects/                  # ProjectCard
     mdx/                       # MdxContent, MdxComponents
     common/                    # GTM

@@ -4,6 +4,7 @@ import { getPublishedPosts, getPostBySlug } from "@/lib/posts";
 import { formatDate } from "@/lib/utils";
 import { MdxContent } from "@/components/mdx/mdx-content";
 import { CategoryBadge } from "@/components/blog/category-badge";
+import { TagBadge } from "@/components/blog/tag-badge";
 import { SITE_URL, AUTHOR } from "@/lib/constants";
 import { locales, isValidLocale, getDictionary } from "@/lib/i18n";
 
@@ -90,6 +91,7 @@ export default async function PostPage({ params }: PostPageProps) {
       "@id": `${SITE_URL}${post.permalink}`,
     },
     ...(post.cover ? { image: `${SITE_URL}${post.cover}` } : {}),
+    ...(post.tags.length > 0 ? { keywords: post.tags.join(", ") } : {}),
   };
 
   const breadcrumbJsonLd = {
@@ -138,6 +140,13 @@ export default async function PostPage({ params }: PostPageProps) {
               <div className="flex gap-1.5">
                 {post.categories.map((cat) => (
                   <CategoryBadge key={cat} slug={cat} locale={locale} />
+                ))}
+              </div>
+            )}
+            {post.tags.length > 0 && (
+              <div className="flex gap-1.5">
+                {post.tags.map((tag) => (
+                  <TagBadge key={tag} slug={tag} locale={locale} />
                 ))}
               </div>
             )}

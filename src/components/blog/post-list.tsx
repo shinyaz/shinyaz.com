@@ -7,6 +7,7 @@ interface Post {
   date: string;
   permalink: string;
   categories: string[];
+  tags: string[];
 }
 
 interface PostListProps {

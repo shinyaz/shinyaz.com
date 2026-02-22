@@ -31,6 +31,10 @@ const dictionaries = {
     projects: {
       description: "個人プロジェクトやオープンソースの取り組み",
     },
+    tag: {
+      title: "タグ",
+      description: "「{tag}」タグが付いた記事一覧",
+    },
     pagination: {
       prev: "Prev",
       next: "Next",
@@ -70,6 +74,10 @@ const dictionaries = {
     },
     projects: {
       description: "Personal projects and open-source work",
+    },
+    tag: {
+      title: "Tag",
+      description: "Posts tagged with \"{tag}\"",
     },
     pagination: {
       prev: "Prev",

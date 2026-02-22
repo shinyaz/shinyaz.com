@@ -61,6 +61,8 @@ All pages are served under a locale prefix:
 - `/ja/uses` - Japanese uses page
 - `/en/about` - English about page
 - `/ja/about` - Japanese about page
+- `/en/tag/nextjs` - English tag listing
+- `/ja/tag/nextjs` - Japanese tag listing
 
 Accessing `/` without a locale prefix redirects to `/en` (or `/ja` if the browser's `Accept-Language` header contains `ja`).
 
@@ -215,12 +217,14 @@ src/
           page.tsx             # Post detail (SSG, JSON-LD with inLanguage)
       category/[slug]/
         page.tsx               # Category listing with pagination
+      tag/[slug]/
+        page.tsx               # Tag listing with pagination
       ~offline/
         page.tsx               # Offline fallback
   components/
     layout/                    # Header, Footer, LanguageSwitcher
     theme/                     # ThemeProvider, ThemeToggle
-    blog/                      # PostCard, PostList, Pagination, CategoryBadge
+    blog/                      # PostCard, PostList, Pagination, CategoryBadge, TagBadge
     projects/                  # ProjectCard
     mdx/                       # MdxContent, MdxComponents
     common/                    # GTM

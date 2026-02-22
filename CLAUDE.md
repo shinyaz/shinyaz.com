@@ -65,6 +65,7 @@ content/categories/*.yml
 - Client components: `ThemeToggle`, `ThemeProvider`, `LanguageSwitcher`
 - `cn()` from `src/lib/utils.ts` (clsx + tailwind-merge) for className composition
 - Category names/descriptions have bilingual support (`nameJa`, `descriptionJa` fields in YAML)
+- Tags are free-form strings from post frontmatter; tag pages live at `/{locale}/tag/{slug}`
 
 ### PWA
 
