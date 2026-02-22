@@ -24,6 +24,7 @@ const dictionaries = {
     },
     nav: {
       blog: "Blog",
+      about: "About",
     },
     pagination: {
       prev: "Prev",
@@ -58,6 +59,7 @@ const dictionaries = {
     },
     nav: {
       blog: "Blog",
+      about: "About",
     },
     pagination: {
       prev: "Prev",

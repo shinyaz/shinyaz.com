@@ -1,4 +1,4 @@
-import { posts, categories } from "#site/content";
+import { posts, categories, pages } from "#site/content";
 import { POSTS_PER_PAGE } from "./constants";
 import type { Locale } from "./i18n";
 
@@ -48,4 +48,12 @@ export function getCategoryName(category: { name: string; nameJa?: string }, loc
 
 export function getCategoryDescription(category: { description?: string; descriptionJa?: string }, locale: Locale) {
   return locale === "ja" && category.descriptionJa ? category.descriptionJa : category.description;
+}
+
+export function getPageBySlug(slug: string, locale?: Locale) {
+  return pages.find(
+    (page) =>
+      page.slugName === slug &&
+      (locale == null || page.locale === locale)
+  );
 }

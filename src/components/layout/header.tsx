@@ -20,6 +20,9 @@ export function Header({ locale }: HeaderProps) {
           <Link href={`/${locale}/blog`} className="text-sm text-muted-foreground hover:text-foreground transition-colors">
             {t.nav.blog}
           </Link>
+          <Link href={`/${locale}/about`} className="text-sm text-muted-foreground hover:text-foreground transition-colors">
+            {t.nav.about}
+          </Link>
           <LanguageSwitcher locale={locale} />
           <ThemeToggle />
         </nav>

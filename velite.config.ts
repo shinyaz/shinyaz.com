@@ -42,6 +42,29 @@ const posts = defineCollection({
     }),
 });
 
+const pages = defineCollection({
+  name: "Page",
+  pattern: "pages/**/*.mdx",
+  schema: s
+    .object({
+      title: s.string().max(200),
+      description: s.string().max(500).optional(),
+      filePath: s.path(),
+      body: s.mdx(),
+    })
+    .transform((data) => {
+      const pathSegments = data.filePath.split("/");
+      const locale = pathSegments[1] as "ja" | "en";
+      const slugName = pathSegments[pathSegments.length - 1];
+      return {
+        ...data,
+        locale,
+        slugName,
+        permalink: `/${locale}/${slugName}`,
+      };
+    }),
+});
+
 const categories = defineCollection({
   name: "Category",
   pattern: "categories/**/*.yml",
@@ -63,7 +86,7 @@ export default defineConfig({
     name: "[name]-[hash:6].[ext]",
     clean: true,
   },
-  collections: { posts, categories },
+  collections: { posts, categories, pages },
   mdx: {
     remarkPlugins: [remarkMath],
     rehypePlugins: [
