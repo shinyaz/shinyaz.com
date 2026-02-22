@@ -224,7 +224,7 @@ src/
   components/
     layout/                    # Header, Footer, LanguageSwitcher
     theme/                     # ThemeProvider, ThemeToggle
-    blog/                      # PostCard, PostList, Pagination, CategoryBadge, TagBadge
+    blog/                      # PostCard, PostList, Pagination, CategoryBadge, TagBadge, SocialShare
     projects/                  # ProjectCard
     mdx/                       # MdxContent, MdxComponents
     common/                    # GTM

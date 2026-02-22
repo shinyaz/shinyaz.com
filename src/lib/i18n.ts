@@ -35,6 +35,11 @@ const dictionaries = {
       title: "タグ",
       description: "「{tag}」タグが付いた記事一覧",
     },
+    share: {
+      label: "共有する",
+      copyLink: "リンクをコピー",
+      copied: "コピーしました",
+    },
     pagination: {
       prev: "Prev",
       next: "Next",
@@ -78,6 +83,11 @@ const dictionaries = {
     tag: {
       title: "Tag",
       description: "Posts tagged with \"{tag}\"",
+    },
+    share: {
+      label: "Share this post",
+      copyLink: "Copy link",
+      copied: "Copied!",
     },
     pagination: {
       prev: "Prev",

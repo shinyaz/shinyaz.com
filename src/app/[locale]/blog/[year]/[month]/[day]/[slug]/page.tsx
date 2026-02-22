@@ -5,6 +5,7 @@ import { formatDate } from "@/lib/utils";
 import { MdxContent } from "@/components/mdx/mdx-content";
 import { CategoryBadge } from "@/components/blog/category-badge";
 import { TagBadge } from "@/components/blog/tag-badge";
+import { SocialShare } from "@/components/blog/social-share";
 import { SITE_URL, AUTHOR } from "@/lib/constants";
 import { locales, isValidLocale, getDictionary } from "@/lib/i18n";
 
@@ -155,6 +156,11 @@ export default async function PostPage({ params }: PostPageProps) {
         <div className="prose">
           <MdxContent code={post.body} />
         </div>
+        <SocialShare
+          url={`${SITE_URL}${post.permalink}`}
+          title={post.title}
+          locale={locale}
+        />
       </article>
     </div>
   );
