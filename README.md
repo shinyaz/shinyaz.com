@@ -230,7 +230,7 @@ src/
     common/                    # GTM
   lib/
     i18n.ts                    # Locale types, dictionaries, getDictionary()
-    constants.ts               # Site URL, author, posts per page, OG image path
+    constants.ts               # Site URL, author, posts per page, OG image path, social links
     posts.ts                   # Content query utilities (locale-aware)
     seo.ts                     # SEO helpers (hreflang alternate builder)
     utils.ts                   # cn(), formatDate(date, locale)

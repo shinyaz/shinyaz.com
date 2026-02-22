@@ -230,7 +230,7 @@ src/
     common/                    # GTM
   lib/
     i18n.ts                    # ロケール型, 辞書, getDictionary()
-    constants.ts               # サイト URL, 著者名, 1ページあたり記事数, OG 画像パス
+    constants.ts               # サイト URL, 著者名, 1ページあたり記事数, OG 画像パス, ソーシャルリンク
     posts.ts                   # コンテンツクエリユーティリティ (ロケール対応)
     seo.ts                     # SEO ヘルパー (hreflang alternate ビルダー)
     utils.ts                   # cn(), formatDate(date, locale)
