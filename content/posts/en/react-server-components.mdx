@@ -1,0 +1,23 @@
+---
+title: "Understanding React Server Components"
+description: "How RSC works and when to use Server Components vs Client Components."
+date: 2026-02-08
+published: true
+categories:
+  - programming
+tags:
+  - react
+  - rsc
+---
+
+## Server Components vs Client Components
+
+Server Components are rendered only on the server and don't affect the client bundle size.
+
+```tsx
+// Server Component (default)
+export default async function Page() {
+  const data = await fetchData();
+  return <div>{data.title}</div>;
+}
+```

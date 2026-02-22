@@ -1,0 +1,24 @@
+---
+title: "Building a CI/CD Pipeline with GitHub Actions"
+description: "How to set up automated testing and deployment with GitHub Actions."
+date: 2026-02-10
+published: true
+categories:
+  - devops
+tags:
+  - github-actions
+  - cicd
+---
+
+## Workflow Basics
+
+```yaml
+name: CI
+on: [push, pull_request]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: npm test
+```

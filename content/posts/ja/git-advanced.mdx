@@ -1,0 +1,22 @@
+---
+title: "Git上級テクニック - rebase, cherry-pick, bisect"
+description: "日常開発で役立つGitの上級コマンドを紹介します。"
+date: 2026-02-03
+published: true
+categories:
+  - programming
+tags:
+  - git
+---
+
+## Interactive Rebase
+
+```bash
+git rebase -i HEAD~3
+```
+
+コミット履歴を整理する強力なツールです。
+
+## Git Bisect
+
+バグが混入したコミットを二分探索で特定できます。

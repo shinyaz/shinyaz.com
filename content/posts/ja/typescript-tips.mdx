@@ -1,0 +1,22 @@
+---
+title: "TypeScript実践Tips集"
+description: "日常的に使えるTypeScriptのテクニックをまとめました。"
+date: 2026-02-18
+published: true
+categories:
+  - programming
+tags:
+  - typescript
+---
+
+## 型ガード
+
+```typescript
+function isString(value: unknown): value is string {
+  return typeof value === "string";
+}
+```
+
+## Utility Types
+
+`Partial<T>`, `Required<T>`, `Pick<T, K>` などを活用しましょう。

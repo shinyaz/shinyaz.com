@@ -1,0 +1,22 @@
+---
+title: "Practical TypeScript Tips"
+description: "A collection of useful TypeScript techniques for everyday development."
+date: 2026-02-18
+published: true
+categories:
+  - programming
+tags:
+  - typescript
+---
+
+## Type Guards
+
+```typescript
+function isString(value: unknown): value is string {
+  return typeof value === "string";
+}
+```
+
+## Utility Types
+
+Make the most of `Partial<T>`, `Required<T>`, `Pick<T, K>`, and more.

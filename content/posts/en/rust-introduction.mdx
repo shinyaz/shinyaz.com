@@ -1,0 +1,27 @@
+---
+title: "Introduction to Rust - Ownership and Lifetimes"
+description: "An explanation of Rust's core concept: the ownership system."
+date: 2026-01-20
+published: true
+categories:
+  - programming
+tags:
+  - rust
+---
+
+## Ownership
+
+In Rust, each value has exactly one owner.
+
+```rust
+fn main() {
+    let s1 = String::from("hello");
+    let s2 = s1; // Ownership of s1 moves to s2
+    // println!("{}", s1); // Compile error
+    println!("{}", s2);
+}
+```
+
+## Borrowing
+
+You can pass references without transferring ownership.

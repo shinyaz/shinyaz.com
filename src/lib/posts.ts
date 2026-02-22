@@ -1,0 +1,51 @@
+import { posts, categories } from "#site/content";
+import { POSTS_PER_PAGE } from "./constants";
+import type { Locale } from "./i18n";
+
+export function getPublishedPosts(locale?: Locale) {
+  return posts
+    .filter((post) => post.published && (locale == null || post.locale === locale))
+    .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+}
+
+export function getPostBySlug(year: string, month: string, day: string, slug: string, locale?: Locale) {
+  return posts.find(
+    (post) =>
+      post.published &&
+      post.year === year &&
+      post.month === month &&
+      post.day === day &&
+      post.slugName === slug &&
+      (locale == null || post.locale === locale)
+  );
+}
+
+export function getPostsByCategory(categorySlug: string, locale?: Locale) {
+  return getPublishedPosts(locale).filter((post) =>
+    post.categories.includes(categorySlug)
+  );
+}
+
+export function getPaginatedPosts(page: number, allPosts?: ReturnType<typeof getPublishedPosts>) {
+  const source = allPosts ?? getPublishedPosts();
+  const totalPages = Math.ceil(source.length / POSTS_PER_PAGE);
+  const start = (page - 1) * POSTS_PER_PAGE;
+  const paginatedPosts = source.slice(start, start + POSTS_PER_PAGE);
+  return { posts: paginatedPosts, totalPages, currentPage: page };
+}
+
+export function getAllCategories() {
+  return categories;
+}
+
+export function getCategoryBySlug(slug: string) {
+  return categories.find((c) => c.slug === slug);
+}
+
+export function getCategoryName(category: { name: string; nameJa?: string }, locale: Locale) {
+  return locale === "ja" && category.nameJa ? category.nameJa : category.name;
+}
+
+export function getCategoryDescription(category: { description?: string; descriptionJa?: string }, locale: Locale) {
+  return locale === "ja" && category.descriptionJa ? category.descriptionJa : category.description;
+}

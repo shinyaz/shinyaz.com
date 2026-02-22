@@ -1,0 +1,25 @@
+---
+title: "Getting Started with Frontend Testing Using Vitest"
+description: "How to write unit tests and component tests with Vitest."
+date: 2026-01-28
+published: true
+categories:
+  - programming
+tags:
+  - testing
+  - vitest
+---
+
+## What is Vitest?
+
+Vitest is a fast testing framework built on Vite.
+
+```typescript
+import { describe, it, expect } from "vitest";
+
+describe("add", () => {
+  it("should add two numbers", () => {
+    expect(1 + 2).toBe(3);
+  });
+});
+```

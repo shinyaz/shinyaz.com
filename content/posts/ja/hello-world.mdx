@@ -1,0 +1,83 @@
+---
+title: "Hello World - shinyaz Blogへようこそ"
+description: "shinyaz Blogの最初の記事です。MDXによるコードハイライトや数式レンダリングのデモを紹介します。"
+date: 2026-02-22
+published: true
+categories:
+  - programming
+tags:
+  - nextjs
+  - mdx
+  - blog
+---
+
+## はじめに
+
+shinyaz Blog へようこそ！このブログは Next.js と MDX で構築された個人技術ブログです。
+
+この記事では、ブログの機能をいくつか紹介します。
+
+## コードハイライト
+
+`rehype-pretty-code` と `shiki` によるシンタックスハイライトのデモです。
+
+```typescript title="hello.ts"
+function greet(name: string): string {
+  return `Hello, ${name}! Welcome to shinyaz Blog.`;
+}
+
+const message = greet("World");
+console.log(message);
+```
+
+インラインコードも使えます: `const x: number = 42;`
+
+```python title="fibonacci.py"
+def fibonacci(n: int) -> list[int]:
+    """Generate Fibonacci sequence up to n terms."""
+    if n <= 0:
+        return []
+    fib = [0, 1]
+    for _ in range(2, n):
+        fib.append(fib[-1] + fib[-2])
+    return fib[:n]
+
+print(fibonacci(10))
+```
+
+## 数式レンダリング
+
+`remark-math` と `rehype-katex` による数式レンダリングのデモです。
+
+インライン数式: $E = mc^2$
+
+ブロック数式:
+
+$$
+\int_{-\infty}^{\infty} e^{-x^2} dx = \sqrt{\pi}
+$$
+
+二次方程式の解の公式:
+
+$$
+x = \frac{-b \pm \sqrt{b^2 - 4ac}}{2a}
+$$
+
+## リスト
+
+- Next.js 16 (App Router)
+- Tailwind CSS v4
+- Velite (コンテンツ管理)
+- MDX (記事執筆)
+
+1. 記事を書く
+2. ビルドする
+3. デプロイする
+
+## 引用
+
+> 技術ブログは、学んだことを整理し共有するための素晴らしい手段です。
+
+## まとめ
+
+これで shinyaz Blog の基本機能の紹介は以上です。今後も技術に関する記事を投稿していきます。

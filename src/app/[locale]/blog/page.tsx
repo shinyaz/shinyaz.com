@@ -1,0 +1,39 @@
+import type { Metadata } from "next";
+import { notFound } from "next/navigation";
+import { getPublishedPosts, getPaginatedPosts } from "@/lib/posts";
+import { PostList } from "@/components/blog/post-list";
+import { Pagination } from "@/components/blog/pagination";
+import { getDictionary, isValidLocale } from "@/lib/i18n";
+
+interface BlogPageProps {
+  params: Promise<{ locale: string }>;
+  searchParams: Promise<{ page?: string }>;
+}
+
+export async function generateMetadata({ params }: BlogPageProps): Promise<Metadata> {
+  const { locale } = await params;
+  if (!isValidLocale(locale)) return {};
+  const t = getDictionary(locale);
+  return {
+    title: t.blog.title,
+    description: t.blog.description,
+  };
+}
+
+export default async function BlogPage({ params, searchParams }: BlogPageProps) {
+  const { locale } = await params;
+  if (!isValidLocale(locale)) notFound();
+  const t = getDictionary(locale);
+  const { page: pageParam } = await searchParams;
+  const page = Math.max(1, Number(pageParam) || 1);
+  const allPosts = getPublishedPosts(locale);
+  const { posts, totalPages, currentPage } = getPaginatedPosts(page, allPosts);
+
+  return (
+    <div className="mx-auto max-w-3xl px-4 py-12">
+      <h1 className="text-2xl font-bold tracking-tight mb-8">{t.blog.title}</h1>
+      <PostList posts={posts} locale={locale} />
+      <Pagination currentPage={currentPage} totalPages={totalPages} basePath={`/${locale}/blog`} locale={locale} />
+    </div>
+  );
+}

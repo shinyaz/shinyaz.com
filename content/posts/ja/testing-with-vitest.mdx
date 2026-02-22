@@ -1,0 +1,25 @@
+---
+title: "Vitestで始めるフロントエンドテスト"
+description: "Vitestを使ったユニットテストとコンポーネントテストの書き方。"
+date: 2026-01-28
+published: true
+categories:
+  - programming
+tags:
+  - testing
+  - vitest
+---
+
+## Vitestとは
+
+Viteベースの高速テストフレームワークです。
+
+```typescript
+import { describe, it, expect } from "vitest";
+
+describe("add", () => {
+  it("should add two numbers", () => {
+    expect(1 + 2).toBe(3);
+  });
+});
+```

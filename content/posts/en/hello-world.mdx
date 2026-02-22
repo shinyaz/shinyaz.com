@@ -1,0 +1,83 @@
+---
+title: "Hello World - Welcome to shinyaz Blog"
+description: "The first post on shinyaz Blog. A demo of code highlighting and math rendering with MDX."
+date: 2026-02-22
+published: true
+categories:
+  - programming
+tags:
+  - nextjs
+  - mdx
+  - blog
+---
+
+## Introduction
+
+Welcome to shinyaz Blog! This is a personal tech blog built with Next.js and MDX.
+
+In this post, I'll introduce some of the blog's features.
+
+## Code Highlighting
+
+Here's a demo of syntax highlighting powered by `rehype-pretty-code` and `shiki`.
+
+```typescript title="hello.ts"
+function greet(name: string): string {
+  return `Hello, ${name}! Welcome to shinyaz Blog.`;
+}
+
+const message = greet("World");
+console.log(message);
+```
+
+Inline code works too: `const x: number = 42;`
+
+```python title="fibonacci.py"
+def fibonacci(n: int) -> list[int]:
+    """Generate Fibonacci sequence up to n terms."""
+    if n <= 0:
+        return []
+    fib = [0, 1]
+    for _ in range(2, n):
+        fib.append(fib[-1] + fib[-2])
+    return fib[:n]
+
+print(fibonacci(10))
+```
+
+## Math Rendering
+
+Here's a demo of math rendering powered by `remark-math` and `rehype-katex`.
+
+Inline math: $E = mc^2$
+
+Block math:
+
+$$
+\int_{-\infty}^{\infty} e^{-x^2} dx = \sqrt{\pi}
+$$
+
+The quadratic formula:
+
+$$
+x = \frac{-b \pm \sqrt{b^2 - 4ac}}{2a}
+$$
+
+## Lists
+
+- Next.js 16 (App Router)
+- Tailwind CSS v4
+- Velite (content management)
+- MDX (writing posts)
+
+1. Write a post
+2. Build the site
+3. Deploy
+
+## Blockquote
+
+> A tech blog is a great way to organize and share what you've learned.
+
+## Summary
+
+That's an overview of the core features of shinyaz Blog. I'll continue posting articles about technology.
