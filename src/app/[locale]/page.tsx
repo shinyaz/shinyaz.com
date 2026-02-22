@@ -1,11 +1,26 @@
+import type { Metadata } from "next";
 import { getPublishedPosts } from "@/lib/posts";
 import { PostList } from "@/components/blog/post-list";
 import { getDictionary, isValidLocale, type Locale } from "@/lib/i18n";
+import { SITE_URL } from "@/lib/constants";
+import { buildAlternateLanguages } from "@/lib/seo";
 import Link from "next/link";
 import { notFound } from "next/navigation";
 
 interface HomePageProps {
   params: Promise<{ locale: string }>;
+}
+
+export async function generateMetadata({ params }: HomePageProps): Promise<Metadata> {
+  const { locale } = await params;
+  if (!isValidLocale(locale)) return {};
+
+  return {
+    alternates: {
+      canonical: `${SITE_URL}/${locale}`,
+      languages: buildAlternateLanguages((l) => `/${l}`),
+    },
+  };
 }
 
 export default async function HomePage({ params }: HomePageProps) {

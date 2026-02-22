@@ -4,6 +4,7 @@ import { getPageBySlug } from "@/lib/posts";
 import { MdxContent } from "@/components/mdx/mdx-content";
 import { SITE_URL } from "@/lib/constants";
 import { locales, isValidLocale, getDictionary } from "@/lib/i18n";
+import { buildAlternateLanguages } from "@/lib/seo";
 
 interface AboutPageProps {
   params: Promise<{ locale: string }>;
@@ -27,6 +28,10 @@ export async function generateMetadata({ params }: AboutPageProps): Promise<Meta
       description: page.description,
       type: "profile",
       url: `${SITE_URL}/${locale}/about`,
+    },
+    alternates: {
+      canonical: `${SITE_URL}/${locale}/about`,
+      languages: buildAlternateLanguages((l) => `/${l}/about`),
     },
   };
 }

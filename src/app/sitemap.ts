@@ -31,15 +31,56 @@ export default function sitemap(): MetadataRoute.Sitemap {
     });
   }
 
-  // Post entries for each locale
+  // Static pages: About, Projects, Uses
+  const staticPages = ["about", "projects", "uses"];
+  for (const page of staticPages) {
+    for (const locale of locales) {
+      const pageAlternates: Record<string, string> = {};
+      for (const l of locales) {
+        pageAlternates[l] = `${SITE_URL}/${l}/${page}`;
+      }
+      entries.push({
+        url: `${SITE_URL}/${locale}/${page}`,
+        changeFrequency: "monthly",
+        priority: 0.6,
+        alternates: { languages: pageAlternates },
+      });
+    }
+  }
+
+  // Post entries for each locale, with hreflang alternates
+  // Group posts by slugName + date to find cross-locale translations
+  const postsByKey = new Map<string, Map<string, string>>();
   for (const locale of locales) {
     const posts = getPublishedPosts(locale);
     for (const post of posts) {
+      const key = `${post.year}-${post.month}-${post.day}-${post.slugName}`;
+      if (!postsByKey.has(key)) {
+        postsByKey.set(key, new Map());
+      }
+      postsByKey.get(key)!.set(locale, `${SITE_URL}${post.permalink}`);
+    }
+  }
+
+  for (const locale of locales) {
+    const posts = getPublishedPosts(locale);
+    for (const post of posts) {
+      const key = `${post.year}-${post.month}-${post.day}-${post.slugName}`;
+      const translations = postsByKey.get(key);
+      const alternates: Record<string, string> = {};
+      if (translations) {
+        for (const [l, url] of translations) {
+          alternates[l] = url;
+        }
+      }
       entries.push({
         url: `${SITE_URL}${post.permalink}`,
         lastModified: new Date(post.updated ?? post.date),
         changeFrequency: "weekly",
         priority: 0.7,
+        ...(Object.keys(alternates).length > 1
+          ? { alternates: { languages: alternates } }
+          : {}),
       });
     }
   }

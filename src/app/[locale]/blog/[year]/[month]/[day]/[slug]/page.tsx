@@ -6,6 +6,7 @@ import { MdxContent } from "@/components/mdx/mdx-content";
 import { CategoryBadge } from "@/components/blog/category-badge";
 import { SITE_URL, AUTHOR } from "@/lib/constants";
 import { locales, isValidLocale, getDictionary } from "@/lib/i18n";
+import { buildAlternateLanguages } from "@/lib/seo";
 
 interface PostPageProps {
   params: Promise<{ locale: string; year: string; month: string; day: string; slug: string }>;
@@ -34,6 +35,14 @@ export async function generateMetadata({ params }: PostPageProps): Promise<Metad
   const post = getPostBySlug(year, month, day, slug, locale);
   if (!post) return {};
 
+  const languages: Record<string, string> = {};
+  for (const l of locales) {
+    const translated = getPostBySlug(year, month, day, slug, l);
+    if (translated) {
+      languages[l] = `${SITE_URL}${translated.permalink}`;
+    }
+  }
+
   return {
     title: post.title,
     description: post.description,
@@ -44,6 +53,11 @@ export async function generateMetadata({ params }: PostPageProps): Promise<Metad
       publishedTime: post.date,
       modifiedTime: post.updated,
       url: `${SITE_URL}${post.permalink}`,
+      authors: [AUTHOR],
+    },
+    alternates: {
+      canonical: `${SITE_URL}${post.permalink}`,
+      languages,
     },
   };
 }
@@ -55,7 +69,7 @@ export default async function PostPage({ params }: PostPageProps) {
   const post = getPostBySlug(year, month, day, slug, locale);
   if (!post) notFound();
 
-  const jsonLd = {
+  const blogPostingJsonLd = {
     "@context": "https://schema.org",
     "@type": "BlogPosting",
     headline: post.title,
@@ -72,13 +86,47 @@ export default async function PostPage({ params }: PostPageProps) {
       name: t.site.name,
     },
     url: `${SITE_URL}${post.permalink}`,
+    mainEntityOfPage: {
+      "@type": "WebPage",
+      "@id": `${SITE_URL}${post.permalink}`,
+    },
+    ...(post.cover ? { image: `${SITE_URL}${post.cover}` } : {}),
+  };
+
+  const breadcrumbJsonLd = {
+    "@context": "https://schema.org",
+    "@type": "BreadcrumbList",
+    itemListElement: [
+      {
+        "@type": "ListItem",
+        position: 1,
+        name: t.site.name,
+        item: `${SITE_URL}/${locale}`,
+      },
+      {
+        "@type": "ListItem",
+        position: 2,
+        name: t.blog.title,
+        item: `${SITE_URL}/${locale}/blog`,
+      },
+      {
+        "@type": "ListItem",
+        position: 3,
+        name: post.title,
+        item: `${SITE_URL}${post.permalink}`,
+      },
+    ],
   };
 
   return (
     <div className="mx-auto max-w-3xl px-4 py-12">
       <script
         type="application/ld+json"
-        dangerouslySetInnerHTML={{ __html: JSON.stringify(jsonLd) }}
+        dangerouslySetInnerHTML={{ __html: JSON.stringify(blogPostingJsonLd) }}
+      />
+      <script
+        type="application/ld+json"
+        dangerouslySetInnerHTML={{ __html: JSON.stringify(breadcrumbJsonLd) }}
       />
       <article>
         <header className="mb-8">

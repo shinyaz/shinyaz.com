@@ -3,6 +3,7 @@ import { getAllProjects } from "@/lib/posts";
 import { ProjectCard } from "@/components/projects/project-card";
 import { SITE_URL } from "@/lib/constants";
 import { locales, isValidLocale, getDictionary } from "@/lib/i18n";
+import { buildAlternateLanguages } from "@/lib/seo";
 import { notFound } from "next/navigation";
 
 interface ProjectsPageProps {
@@ -26,6 +27,10 @@ export async function generateMetadata({ params }: ProjectsPageProps): Promise<M
       description: t.projects.description,
       type: "website",
       url: `${SITE_URL}/${locale}/projects`,
+    },
+    alternates: {
+      canonical: `${SITE_URL}/${locale}/projects`,
+      languages: buildAlternateLanguages((l) => `/${l}/projects`),
     },
   };
 }

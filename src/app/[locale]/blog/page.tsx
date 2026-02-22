@@ -4,6 +4,8 @@ import { getPublishedPosts, getPaginatedPosts } from "@/lib/posts";
 import { PostList } from "@/components/blog/post-list";
 import { Pagination } from "@/components/blog/pagination";
 import { getDictionary, isValidLocale } from "@/lib/i18n";
+import { SITE_URL } from "@/lib/constants";
+import { buildAlternateLanguages } from "@/lib/seo";
 
 interface BlogPageProps {
   params: Promise<{ locale: string }>;
@@ -17,6 +19,16 @@ export async function generateMetadata({ params }: BlogPageProps): Promise<Metad
   return {
     title: t.blog.title,
     description: t.blog.description,
+    openGraph: {
+      title: t.blog.title,
+      description: t.blog.description,
+      url: `${SITE_URL}/${locale}/blog`,
+      type: "website",
+    },
+    alternates: {
+      canonical: `${SITE_URL}/${locale}/blog`,
+      languages: buildAlternateLanguages((l) => `/${l}/blog`),
+    },
   };
 }
 

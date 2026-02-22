@@ -179,6 +179,13 @@ nameJa: プログラミング
 descriptionJa: プログラミングに関する記事
 ```
 
+## SEO
+
+- **OG image**: A default Open Graph image (`public/icons/og-default.png`, 1200×630) is applied to all pages via the layout. Individual posts with a `cover` field use that as the image in BlogPosting JSON-LD.
+- **Structured data**: WebSite JSON-LD on the layout, BlogPosting + BreadcrumbList JSON-LD on each post.
+- **hreflang / canonical**: Every page emits `<link rel="canonical">` and `<link rel="alternate" hreflang="...">` tags. The sitemap also includes hreflang alternates for cross-locale translation pairs.
+- **Twitter cards**: `twitter:site` and `twitter:creator` are set globally.
+
 ## Project Structure
 
 ```
@@ -219,8 +226,9 @@ src/
     common/                    # GTM
   lib/
     i18n.ts                    # Locale types, dictionaries, getDictionary()
-    constants.ts               # Site URL, author, posts per page
+    constants.ts               # Site URL, author, posts per page, OG image path
     posts.ts                   # Content query utilities (locale-aware)
+    seo.ts                     # SEO helpers (hreflang alternate builder)
     utils.ts                   # cn(), formatDate(date, locale)
 content/
   posts/

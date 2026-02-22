@@ -5,7 +5,7 @@ import { ThemeProvider } from "@/components/theme/theme-provider";
 import { Header } from "@/components/layout/header";
 import { Footer } from "@/components/layout/footer";
 import { GTM, GTMNoScript } from "@/components/common/gtm";
-import { SITE_URL } from "@/lib/constants";
+import { SITE_URL, AUTHOR, OG_IMAGE_PATH, TWITTER_SITE } from "@/lib/constants";
 import { locales, isValidLocale, getDictionary, type Locale } from "@/lib/i18n";
 
 const ibmPlexSans = IBM_Plex_Sans({
@@ -58,9 +58,19 @@ export async function generateMetadata({
       siteName: t.site.name,
       locale: locale === "ja" ? "ja_JP" : "en_US",
       type: "website",
+      images: [
+        {
+          url: OG_IMAGE_PATH,
+          width: 1200,
+          height: 630,
+          alt: t.site.name,
+        },
+      ],
     },
     twitter: {
       card: "summary_large_image",
+      site: TWITTER_SITE,
+      creator: TWITTER_SITE,
     },
     alternates: {
       canonical: `${SITE_URL}/${locale}`,
@@ -77,11 +87,28 @@ interface LocaleLayoutProps {
 export default async function LocaleLayout({ children, params }: LocaleLayoutProps) {
   const { locale } = await params;
   if (!isValidLocale(locale)) notFound();
+  const t = getDictionary(locale);
+
+  const webSiteJsonLd = {
+    "@context": "https://schema.org",
+    "@type": "WebSite",
+    name: t.site.name,
+    url: `${SITE_URL}/${locale}`,
+    inLanguage: locale,
+    publisher: {
+      "@type": "Person",
+      name: AUTHOR,
+    },
+  };
 
   return (
     <html lang={locale} suppressHydrationWarning>
       <head>
         <GTM />
+        <script
+          type="application/ld+json"
+          dangerouslySetInnerHTML={{ __html: JSON.stringify(webSiteJsonLd) }}
+        />
       </head>
       <body
         className={`${ibmPlexSans.variable} ${ibmPlexMono.variable} ${ibmPlexSansJP.variable} antialiased min-h-dvh flex flex-col`}

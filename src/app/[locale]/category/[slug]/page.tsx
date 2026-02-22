@@ -4,6 +4,8 @@ import { getPostsByCategory, getAllCategories, getCategoryBySlug, getPaginatedPo
 import { PostList } from "@/components/blog/post-list";
 import { Pagination } from "@/components/blog/pagination";
 import { locales, isValidLocale } from "@/lib/i18n";
+import { SITE_URL } from "@/lib/constants";
+import { buildAlternateLanguages } from "@/lib/seo";
 
 interface CategoryPageProps {
   params: Promise<{ locale: string; slug: string }>;
@@ -33,6 +35,16 @@ export async function generateMetadata({ params }: CategoryPageProps): Promise<M
   return {
     title: name,
     description: description ?? `${name}`,
+    openGraph: {
+      title: name,
+      description: description ?? `${name}`,
+      url: `${SITE_URL}/${locale}/category/${slug}`,
+      type: "website",
+    },
+    alternates: {
+      canonical: `${SITE_URL}/${locale}/category/${slug}`,
+      languages: buildAlternateLanguages((l) => `/${l}/category/${slug}`),
+    },
   };
 }
 

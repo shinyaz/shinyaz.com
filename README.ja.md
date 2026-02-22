@@ -179,6 +179,13 @@ nameJa: プログラミング
 descriptionJa: プログラミングに関する記事
 ```
 
+## SEO
+
+- **OG 画像**: デフォルトの Open Graph 画像 (`public/icons/og-default.png`, 1200×630) がレイアウト経由で全ページに適用されます。`cover` フィールドを持つ記事は BlogPosting JSON-LD でその画像を使用します。
+- **構造化データ**: レイアウトに WebSite JSON-LD、各記事に BlogPosting + BreadcrumbList JSON-LD を出力します。
+- **hreflang / canonical**: 全ページで `<link rel="canonical">` と `<link rel="alternate" hreflang="...">` タグを出力します。サイトマップにもロケール間の対訳ペアに hreflang alternates を含みます。
+- **Twitter カード**: `twitter:site` と `twitter:creator` をグローバルに設定しています。
+
 ## ディレクトリ構成
 
 ```
@@ -219,8 +226,9 @@ src/
     common/                    # GTM
   lib/
     i18n.ts                    # ロケール型, 辞書, getDictionary()
-    constants.ts               # サイト URL, 著者名, 1ページあたり記事数
+    constants.ts               # サイト URL, 著者名, 1ページあたり記事数, OG 画像パス
     posts.ts                   # コンテンツクエリユーティリティ (ロケール対応)
+    seo.ts                     # SEO ヘルパー (hreflang alternate ビルダー)
     utils.ts                   # cn(), formatDate(date, locale)
 content/
   posts/
