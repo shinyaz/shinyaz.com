@@ -55,6 +55,8 @@ All pages are served under a locale prefix:
 - `/ja/` - Japanese home
 - `/en/blog` - English blog listing
 - `/ja/blog/2026/02/22/hello-world` - Japanese blog post
+- `/en/about` - English about page
+- `/ja/about` - Japanese about page
 
 Accessing `/` without a locale prefix redirects to `/en` (or `/ja` if the browser's `Accept-Language` header contains `ja`).
 
@@ -64,7 +66,7 @@ UI strings are managed via a lightweight dictionary object in `src/lib/i18n.ts`.
 
 ### Content Translations
 
-Blog posts are organized by locale in the content directory:
+Blog posts and pages are organized by locale in the content directory:
 
 ```
 content/posts/
@@ -76,9 +78,14 @@ content/posts/
     hello-world.mdx
     docker-basics.mdx
     ...
+content/pages/
+  en/
+    about.mdx
+  ja/
+    about.mdx
 ```
 
-The locale is automatically derived from the directory name. Posts with the same filename across locales are treated as translations of each other.
+The locale is automatically derived from the directory name. Files with the same name across locales are treated as translations of each other.
 
 ### Category Translations
 
@@ -145,6 +152,8 @@ src/
       layout.tsx               # Locale layout (html, body, Header, Footer, metadata)
       page.tsx                 # Home page (latest posts)
       not-found.tsx            # 404 page
+      about/
+        page.tsx               # About page (MDX)
       blog/
         page.tsx               # Blog listing with pagination
         [year]/[month]/[day]/[slug]/
@@ -168,6 +177,9 @@ content/
   posts/
     en/                        # English articles (MDX)
     ja/                        # Japanese articles (MDX)
+  pages/
+    en/                        # English pages (MDX)
+    ja/                        # Japanese pages (MDX)
   categories/                  # Category definitions (YAML)
 velite.config.ts               # Velite collection schemas & MDX plugins
 ```
