@@ -1,0 +1,14 @@
+name: ML Pipeline Orchestrator
+slug: sample-project
+description: "A serverless ML pipeline orchestration framework built on AWS Step Functions and SageMaker. Simplifies training, evaluation, and deployment workflows."
+nameJa: ML パイプラインオーケストレーター
+descriptionJa: "AWS Step Functions と SageMaker を活用したサーバーレス ML パイプライン基盤。学習・評価・デプロイのワークフローを簡素化。"
+github: https://github.com/shinyaz/ml-pipeline-orchestrator
+techStack:
+  - Python
+  - AWS CDK
+  - Step Functions
+  - SageMaker
+  - Lambda
+featured: true
+order: 2

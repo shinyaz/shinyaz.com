@@ -55,6 +55,10 @@ All pages are served under a locale prefix:
 - `/ja/` - Japanese home
 - `/en/blog` - English blog listing
 - `/ja/blog/2026/02/22/hello-world` - Japanese blog post
+- `/en/projects` - English projects page
+- `/ja/projects` - Japanese projects page
+- `/en/uses` - English uses page
+- `/ja/uses` - Japanese uses page
 - `/en/about` - English about page
 - `/ja/about` - Japanese about page
 
@@ -81,8 +85,10 @@ content/posts/
 content/pages/
   en/
     about.mdx
+    uses.mdx
   ja/
     about.mdx
+    uses.mdx
 ```
 
 The locale is automatically derived from the directory name. Files with the same name across locales are treated as translations of each other.
@@ -140,6 +146,27 @@ Page content here.
 
 The filename becomes the URL slug (e.g., `about.mdx` -> `/en/about`).
 
+### Adding Projects
+
+Create a `.yml` file in `content/projects/`:
+
+```yaml
+name: My Project
+slug: my-project
+description: A short description of the project.
+nameJa: 私のプロジェクト
+descriptionJa: プロジェクトの簡単な説明。
+url: https://example.com
+github: https://github.com/user/repo
+techStack:
+  - TypeScript
+  - Next.js
+featured: true
+order: 1
+```
+
+Fields: `name` and `description` are required. `nameJa`, `descriptionJa`, `url`, `github`, `techStack`, `featured`, and `order` are optional. Projects are sorted by `order` (ascending).
+
 ### Adding Categories
 
 Create a `.yml` file in `content/categories/`:
@@ -171,6 +198,10 @@ src/
       not-found.tsx            # 404 page
       about/
         page.tsx               # About page (MDX)
+      projects/
+        page.tsx               # Projects page (YAML data)
+      uses/
+        page.tsx               # Uses page (MDX)
       blog/
         page.tsx               # Blog listing with pagination
         [year]/[month]/[day]/[slug]/
@@ -183,6 +214,7 @@ src/
     layout/                    # Header, Footer, LanguageSwitcher
     theme/                     # ThemeProvider, ThemeToggle
     blog/                      # PostCard, PostList, Pagination, CategoryBadge
+    projects/                  # ProjectCard
     mdx/                       # MdxContent, MdxComponents
     common/                    # GTM
   lib/
@@ -198,6 +230,7 @@ content/
     en/                        # English pages (MDX)
     ja/                        # Japanese pages (MDX)
   categories/                  # Category definitions (YAML)
+  projects/                    # Project definitions (YAML)
 velite.config.ts               # Velite collection schemas & MDX plugins
 ```
 

@@ -77,6 +77,23 @@ const categories = defineCollection({
   }),
 });
 
+const projects = defineCollection({
+  name: "Project",
+  pattern: "projects/**/*.yml",
+  schema: s.object({
+    name: s.string().max(100),
+    slug: s.slug("projects"),
+    description: s.string().max(500),
+    nameJa: s.string().max(100).optional(),
+    descriptionJa: s.string().max(500).optional(),
+    url: s.string().optional(),
+    github: s.string().optional(),
+    techStack: s.array(s.string()).default([]),
+    featured: s.boolean().default(false),
+    order: s.number().default(0),
+  }),
+});
+
 export default defineConfig({
   root: "content",
   output: {
@@ -86,7 +103,7 @@ export default defineConfig({
     name: "[name]-[hash:6].[ext]",
     clean: true,
   },
-  collections: { posts, categories, pages },
+  collections: { posts, categories, pages, projects },
   mdx: {
     remarkPlugins: [remarkMath],
     rehypePlugins: [

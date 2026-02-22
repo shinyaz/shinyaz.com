@@ -24,7 +24,12 @@ const dictionaries = {
     },
     nav: {
       blog: "Blog",
+      projects: "Projects",
+      uses: "Uses",
       about: "About",
+    },
+    projects: {
+      description: "個人プロジェクトやオープンソースの取り組み",
     },
     pagination: {
       prev: "Prev",
@@ -59,7 +64,12 @@ const dictionaries = {
     },
     nav: {
       blog: "Blog",
+      projects: "Projects",
+      uses: "Uses",
       about: "About",
+    },
+    projects: {
+      description: "Personal projects and open-source work",
     },
     pagination: {
       prev: "Prev",

@@ -55,6 +55,10 @@ npm start
 - `/ja/` - 日本語ホーム
 - `/en/blog` - 英語ブログ一覧
 - `/ja/blog/2026/02/22/hello-world` - 日本語ブログ記事
+- `/en/projects` - 英語 Projects ページ
+- `/ja/projects` - 日本語 Projects ページ
+- `/en/uses` - 英語 Uses ページ
+- `/ja/uses` - 日本語 Uses ページ
 - `/en/about` - 英語 About ページ
 - `/ja/about` - 日本語 About ページ
 
@@ -81,8 +85,10 @@ content/posts/
 content/pages/
   en/
     about.mdx
+    uses.mdx
   ja/
     about.mdx
+    uses.mdx
 ```
 
 ロケールはディレクトリ名から自動判定されます。同名ファイルは対訳として扱われます。
@@ -140,6 +146,27 @@ description: "このサイトについて。"
 
 ファイル名が URL スラッグになります (例: `about.mdx` -> `/ja/about`)。
 
+### プロジェクトの追加
+
+`content/projects/` に `.yml` ファイルを作成します:
+
+```yaml
+name: My Project
+slug: my-project
+description: A short description of the project.
+nameJa: 私のプロジェクト
+descriptionJa: プロジェクトの簡単な説明。
+url: https://example.com
+github: https://github.com/user/repo
+techStack:
+  - TypeScript
+  - Next.js
+featured: true
+order: 1
+```
+
+フィールド: `name` と `description` は必須です。`nameJa`、`descriptionJa`、`url`、`github`、`techStack`、`featured`、`order` は任意です。プロジェクトは `order` の昇順でソートされます。
+
 ### カテゴリの追加
 
 `content/categories/` に `.yml` ファイルを作成します:
@@ -171,6 +198,10 @@ src/
       not-found.tsx            # 404 ページ
       about/
         page.tsx               # About ページ (MDX)
+      projects/
+        page.tsx               # Projects ページ (YAML データ)
+      uses/
+        page.tsx               # Uses ページ (MDX)
       blog/
         page.tsx               # ブログ一覧 (ページネーション付き)
         [year]/[month]/[day]/[slug]/
@@ -183,6 +214,7 @@ src/
     layout/                    # Header, Footer, LanguageSwitcher
     theme/                     # ThemeProvider, ThemeToggle
     blog/                      # PostCard, PostList, Pagination, CategoryBadge
+    projects/                  # ProjectCard
     mdx/                       # MdxContent, MdxComponents
     common/                    # GTM
   lib/
@@ -198,6 +230,7 @@ content/
     en/                        # 英語固定ページ (MDX)
     ja/                        # 日本語固定ページ (MDX)
   categories/                  # カテゴリ定義 (YAML)
+  projects/                    # プロジェクト定義 (YAML)
 velite.config.ts               # Velite コレクションスキーマ & MDX プラグイン
 ```
 

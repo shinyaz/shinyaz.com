@@ -1,4 +1,4 @@
-import { posts, categories, pages } from "#site/content";
+import { posts, categories, pages, projects } from "#site/content";
 import { POSTS_PER_PAGE } from "./constants";
 import type { Locale } from "./i18n";
 
@@ -56,4 +56,16 @@ export function getPageBySlug(slug: string, locale?: Locale) {
       page.slugName === slug &&
       (locale == null || page.locale === locale)
   );
+}
+
+export function getAllProjects() {
+  return projects.slice().sort((a, b) => a.order - b.order);
+}
+
+export function getProjectName(project: { name: string; nameJa?: string }, locale: Locale) {
+  return locale === "ja" && project.nameJa ? project.nameJa : project.name;
+}
+
+export function getProjectDescription(project: { description: string; descriptionJa?: string }, locale: Locale) {
+  return locale === "ja" && project.descriptionJa ? project.descriptionJa : project.description;
 }
