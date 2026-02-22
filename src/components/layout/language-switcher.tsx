@@ -16,7 +16,7 @@ export function LanguageSwitcher({ locale }: LanguageSwitcherProps) {
   return (
     <Link
       href={targetPath}
-      className="rounded-md border border-border px-2 py-0.5 text-xs font-medium text-muted-foreground hover:bg-accent hover:text-accent-foreground transition-colors"
+      className="inline-flex h-9 w-9 items-center justify-center rounded-md border border-border text-xs font-medium text-muted-foreground hover:bg-accent hover:text-accent-foreground transition-colors"
     >
       {locale === "ja" ? "EN" : "JP"}
     </Link>
