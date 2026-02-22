@@ -1,6 +1,6 @@
 import type { Metadata } from "next";
 import { notFound } from "next/navigation";
-import { Geist, Geist_Mono, Zen_Kaku_Gothic_New } from "next/font/google";
+import { IBM_Plex_Sans, IBM_Plex_Mono, IBM_Plex_Sans_JP } from "next/font/google";
 import { ThemeProvider } from "@/components/theme/theme-provider";
 import { Header } from "@/components/layout/header";
 import { Footer } from "@/components/layout/footer";
@@ -8,19 +8,21 @@ import { GTM, GTMNoScript } from "@/components/common/gtm";
 import { SITE_URL } from "@/lib/constants";
 import { locales, isValidLocale, getDictionary, type Locale } from "@/lib/i18n";
 
-const geistSans = Geist({
-  variable: "--font-geist-sans",
+const ibmPlexSans = IBM_Plex_Sans({
+  variable: "--font-ibm-plex-sans",
+  weight: ["400", "500", "600", "700"],
   subsets: ["latin"],
 });
 
-const geistMono = Geist_Mono({
-  variable: "--font-geist-mono",
-  subsets: ["latin"],
-});
-
-const zenKakuGothicNew = Zen_Kaku_Gothic_New({
-  variable: "--font-zen-kaku-gothic-new",
+const ibmPlexMono = IBM_Plex_Mono({
+  variable: "--font-ibm-plex-mono",
   weight: ["400", "700"],
+  subsets: ["latin"],
+});
+
+const ibmPlexSansJP = IBM_Plex_Sans_JP({
+  variable: "--font-ibm-plex-sans-jp",
+  weight: ["400", "500", "700"],
   preload: false,
 });
 
@@ -82,7 +84,7 @@ export default async function LocaleLayout({ children, params }: LocaleLayoutPro
         <GTM />
       </head>
       <body
-        className={`${geistSans.variable} ${geistMono.variable} ${zenKakuGothicNew.variable} antialiased min-h-dvh flex flex-col`}
+        className={`${ibmPlexSans.variable} ${ibmPlexMono.variable} ${ibmPlexSansJP.variable} antialiased min-h-dvh flex flex-col`}
       >
         <GTMNoScript />
         <ThemeProvider>
