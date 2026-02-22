@@ -10,6 +10,7 @@ A minimal, monochrome personal tech blog built with Next.js and MDX. Supports Ja
 |---|---|
 | Framework | [Next.js](https://nextjs.org/) 16 (App Router) |
 | Language | TypeScript 5 |
+| Fonts | [Geist](https://vercel.com/font) (Latin) + [Zen Kaku Gothic New](https://fonts.google.com/specimen/Zen+Kaku+Gothic+New) (Japanese) |
 | Styling | Tailwind CSS v4 |
 | Content | MDX via [Velite](https://velite.js.org/) |
 | Code Highlighting | [Shiki](https://shiki.style/) + rehype-pretty-code (dual theme) |

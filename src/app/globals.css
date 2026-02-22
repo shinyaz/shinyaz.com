@@ -11,7 +11,7 @@
   --color-border: var(--border);
   --color-accent: var(--accent);
   --color-accent-foreground: var(--accent-foreground);
-  --font-sans: var(--font-geist-sans);
+  --font-sans: var(--font-geist-sans), var(--font-zen-kaku-gothic-new);
   --font-mono: var(--font-geist-mono);
 }
 

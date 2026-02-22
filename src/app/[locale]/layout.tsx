@@ -1,6 +1,6 @@
 import type { Metadata } from "next";
 import { notFound } from "next/navigation";
-import { Geist, Geist_Mono } from "next/font/google";
+import { Geist, Geist_Mono, Zen_Kaku_Gothic_New } from "next/font/google";
 import { ThemeProvider } from "@/components/theme/theme-provider";
 import { Header } from "@/components/layout/header";
 import { Footer } from "@/components/layout/footer";
@@ -16,6 +16,12 @@ const geistSans = Geist({
 const geistMono = Geist_Mono({
   variable: "--font-geist-mono",
   subsets: ["latin"],
+});
+
+const zenKakuGothicNew = Zen_Kaku_Gothic_New({
+  variable: "--font-zen-kaku-gothic-new",
+  weight: ["400", "700"],
+  preload: false,
 });
 
 export async function generateStaticParams() {
@@ -76,7 +82,7 @@ export default async function LocaleLayout({ children, params }: LocaleLayoutPro
         <GTM />
       </head>
       <body
-        className={`${geistSans.variable} ${geistMono.variable} antialiased min-h-dvh flex flex-col`}
+        className={`${geistSans.variable} ${geistMono.variable} ${zenKakuGothicNew.variable} antialiased min-h-dvh flex flex-col`}
       >
         <GTMNoScript />
         <ThemeProvider>
