@@ -1,0 +1,54 @@
+import { describe, it, expect } from "vitest";
+import { render, screen } from "@testing-library/react";
+import { mdxComponents } from "@/components/mdx/mdx-components";
+
+const MdxImg = mdxComponents.img!;
+const MdxA = mdxComponents.a!;
+
+describe("mdxComponents.img", () => {
+  it("renders image with src and alt", () => {
+    // @ts-expect-error -- MDX component props
+    render(<MdxImg src="/test.png" alt="Test image" />);
+    const img = screen.getByAltText("Test image");
+    expect(img).toBeDefined();
+    expect(img.getAttribute("src")).toContain("test.png");
+  });
+
+  it("defaults alt to empty string when not provided", () => {
+    // @ts-expect-error -- MDX component props
+    render(<MdxImg src="/test.png" />);
+    const img = screen.getByAltText("");
+    expect(img).toBeDefined();
+  });
+
+  it("returns null when src is not provided", () => {
+    // @ts-expect-error -- MDX component props
+    const { container } = render(<MdxImg />);
+    expect(container.innerHTML).toBe("");
+  });
+});
+
+describe("mdxComponents.a", () => {
+  it("renders external links with target=_blank", () => {
+    // @ts-expect-error -- MDX component props
+    render(<MdxA href="https://example.com">External</MdxA>);
+    const link = screen.getByText("External");
+    expect(link.getAttribute("target")).toBe("_blank");
+    expect(link.getAttribute("rel")).toBe("noopener noreferrer");
+  });
+
+  it("renders internal links without target=_blank", () => {
+    // @ts-expect-error -- MDX component props
+    render(<MdxA href="/en/about">Internal</MdxA>);
+    const link = screen.getByText("Internal");
+    expect(link.getAttribute("target")).toBeNull();
+    expect(link.getAttribute("rel")).toBeNull();
+  });
+
+  it("renders http links as external", () => {
+    // @ts-expect-error -- MDX component props
+    render(<MdxA href="http://example.com">HTTP Link</MdxA>);
+    const link = screen.getByText("HTTP Link");
+    expect(link.getAttribute("target")).toBe("_blank");
+  });
+});
