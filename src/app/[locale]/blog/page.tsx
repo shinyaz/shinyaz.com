@@ -43,7 +43,10 @@ export default async function BlogPage({ params, searchParams }: BlogPageProps) 
 
   return (
     <div className="mx-auto max-w-3xl px-4 py-12">
-      <h1 className="text-2xl font-bold tracking-tight mb-8">{t.blog.title}</h1>
+      <header className="mb-8">
+        <h1 className="text-2xl font-bold tracking-tight md:text-3xl">{t.blog.title}</h1>
+        <p className="mt-2 text-muted-foreground">{t.blog.description}</p>
+      </header>
       <PostList posts={posts} locale={locale} />
       <Pagination currentPage={currentPage} totalPages={totalPages} basePath={`/${locale}/blog`} locale={locale} />
     </div>

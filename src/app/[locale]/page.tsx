@@ -32,7 +32,7 @@ export default async function HomePage({ params }: HomePageProps) {
   return (
     <div className="mx-auto max-w-3xl px-4 py-12">
       <section className="mb-12">
-        <h1 className="text-3xl font-bold tracking-tight">{t.site.name}</h1>
+        <h1 className="text-2xl font-bold tracking-tight md:text-3xl">{t.site.name}</h1>
         <p className="mt-2 text-muted-foreground">
           {t.home.subtitle}
         </p>

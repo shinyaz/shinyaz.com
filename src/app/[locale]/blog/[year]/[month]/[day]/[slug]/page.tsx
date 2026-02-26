@@ -135,7 +135,7 @@ export default async function PostPage({ params }: PostPageProps) {
           <h1 className="text-2xl font-bold tracking-tight md:text-3xl">
             {post.title}
           </h1>
-          <div className="mt-3 flex items-center gap-3 text-sm text-muted-foreground">
+          <div className="mt-3 flex items-center gap-3 text-xs text-muted-foreground">
             <time dateTime={post.date}>{formatDate(post.date, locale)}</time>
             {post.categories.length > 0 && (
               <div className="flex gap-1.5">

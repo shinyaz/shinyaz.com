@@ -64,10 +64,12 @@ export default async function CategoryPage({ params, searchParams }: CategoryPag
 
   return (
     <div className="mx-auto max-w-3xl px-4 py-12">
-      <h1 className="text-2xl font-bold tracking-tight mb-2">{name}</h1>
-      {description && (
-        <p className="text-muted-foreground mb-8">{description}</p>
-      )}
+      <header className="mb-8">
+        <h1 className="text-2xl font-bold tracking-tight md:text-3xl">{name}</h1>
+        {description && (
+          <p className="mt-2 text-muted-foreground">{description}</p>
+        )}
+      </header>
       <PostList posts={posts} locale={locale} />
       <Pagination currentPage={currentPage} totalPages={totalPages} basePath={`/${locale}/category/${slug}`} locale={locale} />
     </div>

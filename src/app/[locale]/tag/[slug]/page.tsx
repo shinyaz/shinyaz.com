@@ -61,12 +61,14 @@ export default async function TagPage({ params, searchParams }: TagPageProps) {
 
   return (
     <div className="mx-auto max-w-3xl px-4 py-12">
-      <h1 className="text-2xl font-bold tracking-tight mb-2">
-        {t.tag.title}: #{slug}
-      </h1>
-      <p className="text-muted-foreground mb-8">
-        {t.tag.description.replace("{tag}", slug)}
-      </p>
+      <header className="mb-8">
+        <h1 className="text-2xl font-bold tracking-tight md:text-3xl">
+          {t.tag.title}: #{slug}
+        </h1>
+        <p className="mt-2 text-muted-foreground">
+          {t.tag.description.replace("{tag}", slug)}
+        </p>
+      </header>
       <PostList posts={posts} locale={locale} />
       <Pagination currentPage={currentPage} totalPages={totalPages} basePath={`/${locale}/tag/${slug}`} locale={locale} />
     </div>
