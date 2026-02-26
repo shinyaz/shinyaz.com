@@ -261,7 +261,13 @@ __tests__/
   __mocks__/
     velite.ts                  # ユニットテスト用の Velite モックデータ
   lib/                         # lib/ ユーティリティのユニットテスト
-  components/                  # コンポーネントテスト (Testing Library)
+  components/                  # コンポーネントテスト (src/components/ と同じ構造)
+    blog/                      # ブログコンポーネントテスト
+    layout/                    # レイアウトコンポーネントテスト
+    mdx/                       # MDX コンポーネントテスト
+    projects/                  # プロジェクトコンポーネントテスト
+    theme/                     # テーマコンポーネントテスト
+    common/                    # 共通コンポーネントテスト
 e2e/                           # E2E テスト (Playwright)
 ```
 

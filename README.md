@@ -261,7 +261,13 @@ __tests__/
   __mocks__/
     velite.ts                  # Mock Velite data for unit tests
   lib/                         # Unit tests for lib/ utilities
-  components/                  # Component tests (Testing Library)
+  components/                  # Component tests (mirrors src/components/ structure)
+    blog/                      # Blog component tests
+    layout/                    # Layout component tests
+    mdx/                       # MDX component tests
+    projects/                  # Projects component tests
+    theme/                     # Theme component tests
+    common/                    # Common component tests
 e2e/                           # E2E tests (Playwright)
 ```
 

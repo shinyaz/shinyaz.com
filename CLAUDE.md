@@ -29,15 +29,21 @@ When modifying code in this repository, you **must** perform the following steps
 __tests__/
   __mocks__/velite.ts          # Mock Velite data (used in place of #site/content during tests)
   lib/                         # Unit tests for src/lib/ (utils, i18n, posts, seo)
-  components/                  # Component tests for src/components/ (Testing Library)
-e2e/                           # Playwright E2E tests (navigation, blog, i18n)
+  components/                  # Mirrors src/components/ subdirectory structure
+    blog/                      # Tests for src/components/blog/
+    layout/                    # Tests for src/components/layout/
+    mdx/                       # Tests for src/components/mdx/
+    projects/                  # Tests for src/components/projects/
+    theme/                     # Tests for src/components/theme/
+    common/                    # Tests for src/components/common/
+e2e/                           # Playwright E2E tests (navigation, blog, i18n, offline)
 vitest.config.mts              # Vitest config (jsdom, path aliases, mock alias)
 playwright.config.ts           # Playwright config (Chromium, webServer)
 ```
 
 - Vitest resolves `#site/content` to `__tests__/__mocks__/velite.ts` so tests run without a Velite build.
 - When adding new exported functions to `src/lib/`, add corresponding tests in `__tests__/lib/`.
-- When adding or modifying components in `src/components/`, add corresponding tests in `__tests__/components/`.
+- When adding or modifying components in `src/components/`, add corresponding tests in `__tests__/components/<subdirectory>/` matching the source path.
 - When adding new pages or changing page behavior, add corresponding E2E tests in `e2e/`.
 
 ## Architecture
