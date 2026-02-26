@@ -8,16 +8,37 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **Production build:** `npm run build` (uses `next build --webpack`)
 - **Start production:** `npm start`
 - **Lint:** `npm run lint`
-
-No test framework is configured.
+- **Unit / component tests:** `npm test` (Vitest)
+- **E2E tests:** `npm run test:e2e` (Playwright — requires a production build)
 
 ## Required Checks After Code Changes
 
 When modifying code in this repository, you **must** perform the following steps before considering the task complete:
 
-1. **Lint:** Run `npm run lint` and fix all errors. Warnings in generated files (e.g., `public/sw.js`) can be ignored.
-2. **Build:** Run `npm run build` and confirm it succeeds with no errors or warnings.
-3. **README update:** If the change affects architecture, directory structure, commands, dependencies, or user-facing behavior, update both `README.md` and `README.ja.md` to reflect the change.
+1. **Tests — assess & update:**
+   - **Unit / component tests:** If the change touches `src/lib/` utilities or `src/components/` (non-page components), check whether existing tests in `__tests__/` still pass. Add or update tests to cover the new or changed behavior. Run `npm test` and fix all failures.
+   - **E2E tests:** If the change affects routing, page rendering, navigation, or i18n behavior, check whether existing tests in `e2e/` still pass. Add or update E2E tests as needed. Run `npm run test:e2e` and fix all failures.
+   - If the change is limited to content files (`content/`), styling only, or configuration that doesn't alter runtime logic, tests may be skipped.
+2. **Lint:** Run `npm run lint` and fix all errors. Warnings in generated files (e.g., `public/sw.js`) can be ignored.
+3. **Build:** Run `npm run build` and confirm it succeeds with no errors or warnings.
+4. **README update:** If the change affects architecture, directory structure, commands, dependencies, or user-facing behavior, update both `README.md` and `README.ja.md` to reflect the change.
+
+### Test Structure
+
+```
+__tests__/
+  __mocks__/velite.ts          # Mock Velite data (used in place of #site/content during tests)
+  lib/                         # Unit tests for src/lib/ (utils, i18n, posts, seo)
+  components/                  # Component tests for src/components/ (Testing Library)
+e2e/                           # Playwright E2E tests (navigation, blog, i18n)
+vitest.config.mts              # Vitest config (jsdom, path aliases, mock alias)
+playwright.config.ts           # Playwright config (Chromium, webServer)
+```
+
+- Vitest resolves `#site/content` to `__tests__/__mocks__/velite.ts` so tests run without a Velite build.
+- When adding new exported functions to `src/lib/`, add corresponding tests in `__tests__/lib/`.
+- When adding or modifying components in `src/components/`, add corresponding tests in `__tests__/components/`.
+- When adding new pages or changing page behavior, add corresponding E2E tests in `e2e/`.
 
 ## Architecture
 

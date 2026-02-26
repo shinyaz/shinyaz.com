@@ -14,6 +14,8 @@ const eslintConfig = defineConfig([
     "next-env.d.ts",
     // Build artifacts
     "public/sw.js",
+    // Velite output
+    ".velite/**",
   ]),
 ]);
 

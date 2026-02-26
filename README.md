@@ -18,6 +18,7 @@ A minimal, monochrome personal tech blog built with Next.js and MDX. Supports Ja
 | Dark Mode | [next-themes](https://github.com/pacocoursey/next-themes) (class-based) |
 | PWA | [Serwist](https://serwist.pages.dev/) |
 | i18n | Custom dictionary-based (no external library) |
+| Testing | [Vitest](https://vitest.dev/) + [Playwright](https://playwright.dev/) |
 | Deployment | [Vercel](https://vercel.com/) |
 
 ## Getting Started
@@ -41,6 +42,16 @@ Open [http://localhost:3000](http://localhost:3000) in your browser. You will be
 ```bash
 npm run build
 npm start
+```
+
+### Testing
+
+```bash
+# Unit & component tests (Vitest)
+npm test
+
+# E2E tests (Playwright, requires a production build)
+npm run test:e2e
 ```
 
 ## i18n Architecture
@@ -244,6 +255,14 @@ content/
   categories/                  # Category definitions (YAML)
   projects/                    # Project definitions (YAML)
 velite.config.ts               # Velite collection schemas & MDX plugins
+vitest.config.mts              # Vitest configuration
+playwright.config.ts           # Playwright E2E configuration
+__tests__/
+  __mocks__/
+    velite.ts                  # Mock Velite data for unit tests
+  lib/                         # Unit tests for lib/ utilities
+  components/                  # Component tests (Testing Library)
+e2e/                           # E2E tests (Playwright)
 ```
 
 ## Environment Variables
