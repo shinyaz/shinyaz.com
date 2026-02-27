@@ -1,5 +1,6 @@
 import { defineConfig, defineCollection, s } from "velite";
 import rehypePrettyCode from "rehype-pretty-code";
+import rehypeSlug from "rehype-slug";
 import remarkMath from "remark-math";
 import rehypeKatex from "rehype-katex";
 
@@ -104,9 +105,13 @@ export default defineConfig({
     clean: true,
   },
   collections: { posts, categories, pages, projects },
+  markdown: {
+    rehypePlugins: [rehypeSlug],
+  },
   mdx: {
     remarkPlugins: [remarkMath],
     rehypePlugins: [
+      rehypeSlug,
       rehypeKatex,
       [
         rehypePrettyCode,

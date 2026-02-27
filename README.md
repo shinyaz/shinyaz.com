@@ -14,6 +14,7 @@ A minimal, monochrome personal tech blog built with Next.js and MDX. Supports Ja
 | Styling | Tailwind CSS v4 |
 | Content | MDX via [Velite](https://velite.js.org/) |
 | Code Highlighting | [Shiki](https://shiki.style/) + rehype-pretty-code (dual theme) |
+| Heading Anchors | rehype-slug |
 | Math Rendering | remark-math + rehype-katex |
 | Dark Mode | [next-themes](https://github.com/pacocoursey/next-themes) (class-based) |
 | PWA | [Serwist](https://serwist.pages.dev/) |
@@ -260,7 +261,7 @@ src/
   components/
     layout/                    # Header, Footer, LanguageSwitcher
     theme/                     # ThemeProvider, ThemeToggle
-    blog/                      # PostCard, PostList, Pagination, CategoryBadge, TagBadge, SocialShare
+    blog/                      # PostCard, PostList, Pagination, CategoryBadge, TagBadge, SocialShare, TableOfContents
     search/                    # SearchPageClient
     projects/                  # ProjectCard
     mdx/                       # MdxContent, MdxComponents
@@ -270,6 +271,7 @@ src/
     constants.ts               # Site URL, author, posts per page, OG image path, social links
     posts.ts                   # Content query utilities (locale-aware)
     search.ts                  # Client-side search logic (AND match, case-insensitive)
+    toc.ts                     # Table of contents heading extraction
     feed.ts                    # RSS 2.0 / Atom 1.0 XML generation
     seo.ts                     # SEO helpers (hreflang alternate builder)
     utils.ts                   # cn(), formatDate(date, locale)

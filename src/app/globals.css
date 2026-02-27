@@ -196,6 +196,12 @@ body {
   color: var(--shiki-dark);
 }
 
+/* Table of Contents */
+.toc summary::-webkit-details-marker,
+.toc summary::marker {
+  color: var(--muted-foreground);
+}
+
 /* KaTeX overrides */
 .katex-display {
   overflow-x: auto;

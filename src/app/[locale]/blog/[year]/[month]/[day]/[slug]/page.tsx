@@ -8,6 +8,8 @@ import { TagBadge } from "@/components/blog/tag-badge";
 import { SocialShare } from "@/components/blog/social-share";
 import { SITE_URL, AUTHOR } from "@/lib/constants";
 import { locales, isValidLocale, getDictionary } from "@/lib/i18n";
+import { extractHeadings } from "@/lib/toc";
+import { TableOfContents } from "@/components/blog/table-of-contents";
 
 interface PostPageProps {
   params: Promise<{ locale: string; year: string; month: string; day: string; slug: string }>;
@@ -69,6 +71,8 @@ export default async function PostPage({ params }: PostPageProps) {
   const t = getDictionary(locale);
   const post = getPostBySlug(year, month, day, slug, locale);
   if (!post) notFound();
+
+  const headings = extractHeadings(post.content);
 
   const blogPostingJsonLd = {
     "@context": "https://schema.org",
@@ -153,6 +157,9 @@ export default async function PostPage({ params }: PostPageProps) {
             )}
           </div>
         </header>
+        {headings.length >= 2 && (
+          <TableOfContents headings={headings} locale={locale} />
+        )}
         <div className="prose">
           <MdxContent code={post.body} />
         </div>

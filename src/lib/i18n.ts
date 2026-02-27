@@ -59,6 +59,9 @@ const dictionaries = {
       resultsCount: "{count}件の記事が見つかりました",
       label: "検索",
     },
+    toc: {
+      title: "目次",
+    },
     footer: {
       copyright: "All rights reserved.",
     },
@@ -114,6 +117,9 @@ const dictionaries = {
       noResults: "No posts found matching \"{query}\".",
       resultsCount: "{count} post(s) found",
       label: "Search",
+    },
+    toc: {
+      title: "Table of Contents",
     },
     footer: {
       copyright: "All rights reserved.",

@@ -63,7 +63,8 @@ content/categories/*.yml
 - Velite runs as a custom Webpack plugin before compilation (see `next.config.ts`)
 - Locale is extracted from the directory path (e.g., `posts/ja/hello-world` → locale `"ja"`)
 - Posts get a permalink like `/{locale}/blog/{year}/{month}/{day}/{slug}`
-- MDX processing: remark-math → rehype-katex → rehype-pretty-code (Shiki, dual theme: github-light/github-dark)
+- MDX processing: rehype-slug → remark-math → rehype-katex → rehype-pretty-code (Shiki, dual theme: github-light/github-dark)
+- Markdown (`s.markdown()`) processing uses a separate `markdown` config key with `rehype-slug` for heading IDs
 - Content is queried at runtime via helper functions in `src/lib/posts.ts` that filter the static arrays
 
 ### Routing & i18n
@@ -91,7 +92,7 @@ content/categories/*.yml
 ### Component Conventions
 
 - Server components by default (async functions); client components only where interactivity is needed (`"use client"` directive)
-- Client components: `ThemeToggle`, `ThemeProvider`, `LanguageSwitcher`, `SearchPageClient`
+- Client components: `ThemeToggle`, `ThemeProvider`, `LanguageSwitcher`, `SearchPageClient`, `TableOfContents`
 - `cn()` from `src/lib/utils.ts` (clsx + tailwind-merge) for className composition
 - Category names/descriptions have bilingual support (`nameJa`, `descriptionJa` fields in YAML)
 - Tags are free-form strings from post frontmatter; tag pages live at `/{locale}/tag/{slug}`
