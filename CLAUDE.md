@@ -42,6 +42,7 @@ playwright.config.ts           # Playwright config (Chromium, webServer)
 ```
 
 - Vitest resolves `#site/content` to `__tests__/__mocks__/velite.ts` so tests run without a Velite build.
+- Vitest resolves `@/*` to `src/*` so lib and component imports work in tests.
 - When adding new exported functions to `src/lib/`, add corresponding tests in `__tests__/lib/`.
 - When adding or modifying components in `src/components/`, add corresponding tests in `__tests__/components/<subdirectory>/` matching the source path.
 - When adding new pages or changing page behavior, add corresponding E2E tests in `e2e/`.
@@ -93,6 +94,15 @@ content/categories/*.yml
 - `cn()` from `src/lib/utils.ts` (clsx + tailwind-merge) for className composition
 - Category names/descriptions have bilingual support (`nameJa`, `descriptionJa` fields in YAML)
 - Tags are free-form strings from post frontmatter; tag pages live at `/{locale}/tag/{slug}`
+
+### RSS / Atom Feeds
+
+- Per-locale feeds: `/{locale}/feed.xml` (RSS 2.0) and `/{locale}/atom.xml` (Atom 1.0)
+- XML generation logic in `src/lib/feed.ts` (`generateRss()`, `generateAtom()`)
+- Route handlers in `src/app/[locale]/feed.xml/route.ts` and `src/app/[locale]/atom.xml/route.ts`
+- Statically generated at build time via `generateStaticParams`
+- Autodiscovery `<link>` tags in `src/app/[locale]/layout.tsx`
+- Feeds include the 20 most recent published posts per locale
 
 ### PWA
 

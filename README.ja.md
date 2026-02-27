@@ -74,6 +74,10 @@ npm run test:e2e
 - `/ja/about` - 日本語 About ページ
 - `/en/tag/nextjs` - 英語タグ別一覧
 - `/ja/tag/nextjs` - 日本語タグ別一覧
+- `/en/feed.xml` - 英語 RSS フィード
+- `/ja/feed.xml` - 日本語 RSS フィード
+- `/en/atom.xml` - 英語 Atom フィード
+- `/ja/atom.xml` - 日本語 Atom フィード
 
 ロケールプレフィックスなしで `/` にアクセスすると `/en` にリダイレクトされます (ブラウザの `Accept-Language` ヘッダーに `ja` が含まれる場合は `/ja`)。
 
@@ -198,6 +202,7 @@ descriptionJa: プログラミングに関する記事
 - **構造化データ**: レイアウトに WebSite JSON-LD、各記事に BlogPosting + BreadcrumbList JSON-LD を出力します。
 - **hreflang / canonical**: 全ページで `<link rel="canonical">` と `<link rel="alternate" hreflang="...">` タグを出力します。サイトマップにもロケール間の対訳ペアに hreflang alternates を含みます。
 - **Twitter カード**: `twitter:site` と `twitter:creator` をグローバルに設定しています。
+- **RSS / Atom フィード**: ロケールごとに `/{locale}/feed.xml` (RSS 2.0) と `/{locale}/atom.xml` (Atom 1.0) を配信します。レイアウトの `<head>` にオートディスカバリー用の `<link>` タグを含みます。フィードには最新20件の公開記事が含まれます。
 
 ## ディレクトリ構成
 
@@ -216,6 +221,10 @@ src/
       layout.tsx               # ロケールレイアウト (html, body, Header, Footer, メタデータ)
       page.tsx                 # ホームページ (最新記事)
       not-found.tsx            # 404 ページ
+      feed.xml/
+        route.ts               # RSS 2.0 フィード (SSG)
+      atom.xml/
+        route.ts               # Atom 1.0 フィード (SSG)
       about/
         page.tsx               # About ページ (MDX)
       projects/
@@ -243,6 +252,7 @@ src/
     i18n.ts                    # ロケール型, 辞書, getDictionary()
     constants.ts               # サイト URL, 著者名, 1ページあたり記事数, OG 画像パス, ソーシャルリンク
     posts.ts                   # コンテンツクエリユーティリティ (ロケール対応)
+    feed.ts                    # RSS 2.0 / Atom 1.0 XML 生成
     seo.ts                     # SEO ヘルパー (hreflang alternate ビルダー)
     utils.ts                   # cn(), formatDate(date, locale)
 content/

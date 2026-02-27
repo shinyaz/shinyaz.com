@@ -74,6 +74,10 @@ All pages are served under a locale prefix:
 - `/ja/about` - Japanese about page
 - `/en/tag/nextjs` - English tag listing
 - `/ja/tag/nextjs` - Japanese tag listing
+- `/en/feed.xml` - English RSS feed
+- `/ja/feed.xml` - Japanese RSS feed
+- `/en/atom.xml` - English Atom feed
+- `/ja/atom.xml` - Japanese Atom feed
 
 Accessing `/` without a locale prefix redirects to `/en` (or `/ja` if the browser's `Accept-Language` header contains `ja`).
 
@@ -198,6 +202,7 @@ descriptionJa: プログラミングに関する記事
 - **Structured data**: WebSite JSON-LD on the layout, BlogPosting + BreadcrumbList JSON-LD on each post.
 - **hreflang / canonical**: Every page emits `<link rel="canonical">` and `<link rel="alternate" hreflang="...">` tags. The sitemap also includes hreflang alternates for cross-locale translation pairs.
 - **Twitter cards**: `twitter:site` and `twitter:creator` are set globally.
+- **RSS / Atom feeds**: Per-locale feeds at `/{locale}/feed.xml` (RSS 2.0) and `/{locale}/atom.xml` (Atom 1.0). Autodiscovery `<link>` tags are included in the layout `<head>`. Feeds contain the 20 most recent published posts.
 
 ## Project Structure
 
@@ -216,6 +221,10 @@ src/
       layout.tsx               # Locale layout (html, body, Header, Footer, metadata)
       page.tsx                 # Home page (latest posts)
       not-found.tsx            # 404 page
+      feed.xml/
+        route.ts               # RSS 2.0 feed (SSG)
+      atom.xml/
+        route.ts               # Atom 1.0 feed (SSG)
       about/
         page.tsx               # About page (MDX)
       projects/
@@ -243,6 +252,7 @@ src/
     i18n.ts                    # Locale types, dictionaries, getDictionary()
     constants.ts               # Site URL, author, posts per page, OG image path, social links
     posts.ts                   # Content query utilities (locale-aware)
+    feed.ts                    # RSS 2.0 / Atom 1.0 XML generation
     seo.ts                     # SEO helpers (hreflang alternate builder)
     utils.ts                   # cn(), formatDate(date, locale)
 content/

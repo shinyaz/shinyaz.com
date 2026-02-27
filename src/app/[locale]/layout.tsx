@@ -105,6 +105,18 @@ export default async function LocaleLayout({ children, params }: LocaleLayoutPro
     <html lang={locale} suppressHydrationWarning>
       <head>
         <GTM />
+        <link
+          rel="alternate"
+          type="application/rss+xml"
+          title={`${t.site.name} (RSS)`}
+          href={`/${locale}/feed.xml`}
+        />
+        <link
+          rel="alternate"
+          type="application/atom+xml"
+          title={`${t.site.name} (Atom)`}
+          href={`/${locale}/atom.xml`}
+        />
         <script
           type="application/ld+json"
           dangerouslySetInnerHTML={{ __html: JSON.stringify(webSiteJsonLd) }}
