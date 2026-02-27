@@ -7,7 +7,7 @@ describe("generateRss", () => {
     expect(xml).toContain('<?xml version="1.0" encoding="UTF-8"?>');
     expect(xml).toContain('<rss version="2.0"');
     expect(xml).toContain("<channel>");
-    expect(xml).toContain("<title>shinyaz Blog</title>");
+    expect(xml).toContain("<title>shinyaz.com</title>");
     expect(xml).toContain("<link>https://shinyaz.com/en</link>");
     expect(xml).toContain("<language>en</language>");
   });
@@ -68,7 +68,7 @@ describe("generateAtom", () => {
     expect(xml).toContain('<?xml version="1.0" encoding="UTF-8"?>');
     expect(xml).toContain('<feed xmlns="http://www.w3.org/2005/Atom"');
     expect(xml).toContain('xml:lang="en"');
-    expect(xml).toContain("<title>shinyaz Blog</title>");
+    expect(xml).toContain("<title>shinyaz.com</title>");
     expect(xml).toContain("<author>");
     expect(xml).toContain("<name>shinyaz</name>");
   });
@@ -124,7 +124,7 @@ describe("XML escaping", () => {
     // Test indirectly: the XML should be well-formed (no unescaped &, <, > in content)
     const xml = generateRss("ja");
     expect(xml).toContain("日本語の記事");
-    expect(xml).toContain("<title>shinyaz Blog</title>");
+    expect(xml).toContain("<title>shinyaz.com</title>");
   });
 
   it("escapes special characters in Atom", () => {

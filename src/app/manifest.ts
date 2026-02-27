@@ -2,8 +2,8 @@ import type { MetadataRoute } from "next";
 
 export default function manifest(): MetadataRoute.Manifest {
   return {
-    name: "shinyaz Blog",
-    short_name: "shinyaz Blog",
+    name: "shinyaz.com",
+    short_name: "shinyaz.com",
     description: "shinyazの個人技術ブログ",
     start_url: "/en",
     display: "standalone",

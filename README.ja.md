@@ -1,4 +1,4 @@
-# shinyaz Blog
+# shinyaz.com
 
 [English / 英語](./README.md)
 

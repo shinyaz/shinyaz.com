@@ -20,13 +20,13 @@ describe("isValidLocale", () => {
 describe("getDictionary", () => {
   it("returns Japanese dictionary", () => {
     const dict = getDictionary("ja");
-    expect(dict.site.name).toBe("shinyaz Blog");
+    expect(dict.site.name).toBe("shinyaz.com");
     expect(dict.blog.empty).toBe("記事がありません。");
   });
 
   it("returns English dictionary", () => {
     const dict = getDictionary("en");
-    expect(dict.site.name).toBe("shinyaz Blog");
+    expect(dict.site.name).toBe("shinyaz.com");
     expect(dict.blog.empty).toBe("No posts found.");
   });
 
