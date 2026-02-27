@@ -204,6 +204,18 @@ descriptionJa: プログラミングに関する記事
 - **Twitter カード**: `twitter:site` と `twitter:creator` をグローバルに設定しています。
 - **RSS / Atom フィード**: ロケールごとに `/{locale}/feed.xml` (RSS 2.0) と `/{locale}/atom.xml` (Atom 1.0) を配信します。レイアウトの `<head>` にオートディスカバリー用の `<link>` タグを含みます。フィードには最新20件の公開記事が含まれます。
 
+## セキュリティ
+
+HTTP セキュリティヘッダーは `next.config.ts` の `headers()` 関数で設定され、全ルートに適用されます:
+
+- **Content-Security-Policy**: リソースの読み込み元を制限 (GTM/GA、Next.js・next-themes に必要なインラインスクリプト/スタイルを許可)
+- **Strict-Transport-Security**: HTTPS を強制 (max-age 2年、includeSubDomains、preload)
+- **X-Content-Type-Options**: `nosniff` — MIME タイプスニッフィングを防止
+- **X-Frame-Options**: `DENY` — iframe によるクリックジャッキングを防止
+- **Referrer-Policy**: `strict-origin-when-cross-origin` — リファラー情報を制限
+- **Permissions-Policy**: カメラ・マイク・位置情報 API を無効化
+- **X-DNS-Prefetch-Control**: 外部リンクの DNS プリフェッチを有効化
+
 ## ディレクトリ構成
 
 ```

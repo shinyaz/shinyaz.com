@@ -204,6 +204,18 @@ descriptionJa: プログラミングに関する記事
 - **Twitter cards**: `twitter:site` and `twitter:creator` are set globally.
 - **RSS / Atom feeds**: Per-locale feeds at `/{locale}/feed.xml` (RSS 2.0) and `/{locale}/atom.xml` (Atom 1.0). Autodiscovery `<link>` tags are included in the layout `<head>`. Feeds contain the 20 most recent published posts.
 
+## Security
+
+HTTP security headers are configured in `next.config.ts` via the `headers()` function and applied to all routes:
+
+- **Content-Security-Policy**: Restricts resource origins (allows GTM/GA, inline scripts/styles needed by Next.js and next-themes)
+- **Strict-Transport-Security**: Enforces HTTPS with 2-year max-age, includeSubDomains, and preload
+- **X-Content-Type-Options**: `nosniff` — prevents MIME type sniffing
+- **X-Frame-Options**: `DENY` — prevents clickjacking via iframes
+- **Referrer-Policy**: `strict-origin-when-cross-origin` — limits referrer information
+- **Permissions-Policy**: Disables camera, microphone, and geolocation APIs
+- **X-DNS-Prefetch-Control**: Enables DNS prefetching for external links
+
 ## Project Structure
 
 ```
