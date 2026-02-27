@@ -32,6 +32,7 @@ __tests__/
   components/                  # Mirrors src/components/ subdirectory structure
     blog/                      # Tests for src/components/blog/
     layout/                    # Tests for src/components/layout/
+    search/                    # Tests for src/components/search/
     mdx/                       # Tests for src/components/mdx/
     projects/                  # Tests for src/components/projects/
     theme/                     # Tests for src/components/theme/
@@ -90,7 +91,7 @@ content/categories/*.yml
 ### Component Conventions
 
 - Server components by default (async functions); client components only where interactivity is needed (`"use client"` directive)
-- Client components: `ThemeToggle`, `ThemeProvider`, `LanguageSwitcher`
+- Client components: `ThemeToggle`, `ThemeProvider`, `LanguageSwitcher`, `SearchPageClient`
 - `cn()` from `src/lib/utils.ts` (clsx + tailwind-merge) for className composition
 - Category names/descriptions have bilingual support (`nameJa`, `descriptionJa` fields in YAML)
 - Tags are free-form strings from post frontmatter; tag pages live at `/{locale}/tag/{slug}`

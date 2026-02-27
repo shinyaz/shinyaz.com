@@ -72,6 +72,8 @@ All pages are served under a locale prefix:
 - `/ja/uses` - Japanese uses page
 - `/en/about` - English about page
 - `/ja/about` - Japanese about page
+- `/en/search` - English search page
+- `/ja/search` - Japanese search page
 - `/en/tag/nextjs` - English tag listing
 - `/ja/tag/nextjs` - Japanese tag listing
 - `/en/feed.xml` - English RSS feed
@@ -249,6 +251,8 @@ src/
           page.tsx             # Post detail (SSG, JSON-LD with inLanguage)
       category/[slug]/
         page.tsx               # Category listing with pagination
+      search/
+        page.tsx               # Search page (client-side filtering)
       tag/[slug]/
         page.tsx               # Tag listing with pagination
       ~offline/
@@ -257,6 +261,7 @@ src/
     layout/                    # Header, Footer, LanguageSwitcher
     theme/                     # ThemeProvider, ThemeToggle
     blog/                      # PostCard, PostList, Pagination, CategoryBadge, TagBadge, SocialShare
+    search/                    # SearchPageClient
     projects/                  # ProjectCard
     mdx/                       # MdxContent, MdxComponents
     common/                    # GTM
@@ -264,6 +269,7 @@ src/
     i18n.ts                    # Locale types, dictionaries, getDictionary()
     constants.ts               # Site URL, author, posts per page, OG image path, social links
     posts.ts                   # Content query utilities (locale-aware)
+    search.ts                  # Client-side search logic (AND match, case-insensitive)
     feed.ts                    # RSS 2.0 / Atom 1.0 XML generation
     seo.ts                     # SEO helpers (hreflang alternate builder)
     utils.ts                   # cn(), formatDate(date, locale)
@@ -286,6 +292,7 @@ __tests__/
   components/                  # Component tests (mirrors src/components/ structure)
     blog/                      # Blog component tests
     layout/                    # Layout component tests
+    search/                    # Search component tests
     mdx/                       # MDX component tests
     projects/                  # Projects component tests
     theme/                     # Theme component tests

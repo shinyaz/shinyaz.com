@@ -52,6 +52,13 @@ const dictionaries = {
       title: "Offline",
       message: "インターネットに接続されていません。接続を確認して再度お試しください。",
     },
+    search: {
+      title: "検索",
+      placeholder: "記事を検索...",
+      noResults: "「{query}」に一致する記事はありませんでした。",
+      resultsCount: "{count}件の記事が見つかりました",
+      label: "検索",
+    },
     footer: {
       copyright: "All rights reserved.",
     },
@@ -100,6 +107,13 @@ const dictionaries = {
     offline: {
       title: "Offline",
       message: "You are not connected to the internet. Please check your connection and try again.",
+    },
+    search: {
+      title: "Search",
+      placeholder: "Search posts...",
+      noResults: "No posts found matching \"{query}\".",
+      resultsCount: "{count} post(s) found",
+      label: "Search",
     },
     footer: {
       copyright: "All rights reserved.",

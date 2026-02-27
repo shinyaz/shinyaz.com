@@ -42,4 +42,16 @@ describe("Header", () => {
     const homeLink = screen.getByText("shinyaz Blog").closest("a");
     expect(homeLink?.getAttribute("href")).toBe("/en");
   });
+
+  it("renders search icon link for en locale", () => {
+    render(<Header locale="en" />);
+    const searchLink = screen.getByLabelText("Search");
+    expect(searchLink.closest("a")?.getAttribute("href")).toBe("/en/search");
+  });
+
+  it("renders search icon link for ja locale", () => {
+    render(<Header locale="ja" />);
+    const searchLink = screen.getByLabelText("検索");
+    expect(searchLink.closest("a")?.getAttribute("href")).toBe("/ja/search");
+  });
 });

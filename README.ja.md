@@ -72,6 +72,8 @@ npm run test:e2e
 - `/ja/uses` - 日本語 Uses ページ
 - `/en/about` - 英語 About ページ
 - `/ja/about` - 日本語 About ページ
+- `/en/search` - 英語検索ページ
+- `/ja/search` - 日本語検索ページ
 - `/en/tag/nextjs` - 英語タグ別一覧
 - `/ja/tag/nextjs` - 日本語タグ別一覧
 - `/en/feed.xml` - 英語 RSS フィード
@@ -249,6 +251,8 @@ src/
           page.tsx             # 記事詳細 (SSG, JSON-LD に inLanguage 含む)
       category/[slug]/
         page.tsx               # カテゴリ別一覧 (ページネーション付き)
+      search/
+        page.tsx               # 検索ページ (クライアントサイドフィルタリング)
       tag/[slug]/
         page.tsx               # タグ別一覧 (ページネーション付き)
       ~offline/
@@ -257,6 +261,7 @@ src/
     layout/                    # Header, Footer, LanguageSwitcher
     theme/                     # ThemeProvider, ThemeToggle
     blog/                      # PostCard, PostList, Pagination, CategoryBadge, TagBadge, SocialShare
+    search/                    # SearchPageClient
     projects/                  # ProjectCard
     mdx/                       # MdxContent, MdxComponents
     common/                    # GTM
@@ -264,6 +269,7 @@ src/
     i18n.ts                    # ロケール型, 辞書, getDictionary()
     constants.ts               # サイト URL, 著者名, 1ページあたり記事数, OG 画像パス, ソーシャルリンク
     posts.ts                   # コンテンツクエリユーティリティ (ロケール対応)
+    search.ts                  # クライアントサイド検索ロジック (AND マッチ, 大小文字区別なし)
     feed.ts                    # RSS 2.0 / Atom 1.0 XML 生成
     seo.ts                     # SEO ヘルパー (hreflang alternate ビルダー)
     utils.ts                   # cn(), formatDate(date, locale)
@@ -286,6 +292,7 @@ __tests__/
   components/                  # コンポーネントテスト (src/components/ と同じ構造)
     blog/                      # ブログコンポーネントテスト
     layout/                    # レイアウトコンポーネントテスト
+    search/                    # 検索コンポーネントテスト
     mdx/                       # MDX コンポーネントテスト
     projects/                  # プロジェクトコンポーネントテスト
     theme/                     # テーマコンポーネントテスト
