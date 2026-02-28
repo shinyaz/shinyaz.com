@@ -63,7 +63,7 @@ describe("MobileNav", () => {
     render(<MobileNav locale="ja" t={tJa} />);
     fireEvent.click(screen.getByRole("button", { name: "メニュー" }));
 
-    const blogLink = screen.getByText("Blog").closest("a");
+    const blogLink = screen.getByText("ブログ").closest("a");
     expect(blogLink?.getAttribute("href")).toBe("/ja/blog");
   });
 

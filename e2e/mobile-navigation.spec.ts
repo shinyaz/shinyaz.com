@@ -64,6 +64,6 @@ test.describe("Mobile Navigation", () => {
     const hamburger = page.getByRole("button", { name: "メニュー" });
     await expect(hamburger).toBeVisible();
     await hamburger.click();
-    await expect(page.getByRole("link", { name: "Blog" })).toBeVisible();
+    await expect(page.getByRole("link", { name: "ブログ" })).toBeVisible();
   });
 });

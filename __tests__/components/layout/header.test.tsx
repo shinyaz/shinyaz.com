@@ -37,7 +37,7 @@ describe("Header", () => {
 
   it("links use correct ja locale prefix", () => {
     render(<Header locale="ja" />);
-    const blogLink = screen.getByText("Blog").closest("a");
+    const blogLink = screen.getByText("ブログ").closest("a");
     expect(blogLink?.getAttribute("href")).toBe("/ja/blog");
   });
 
