@@ -19,6 +19,7 @@ test.describe("Security Headers", () => {
     expect(csp).toContain("style-src 'self' 'unsafe-inline'");
     expect(csp).toContain("object-src 'none'");
     expect(csp).toContain("frame-ancestors 'none'");
+    expect(csp).toContain("upgrade-insecure-requests");
   });
 
   test("X-Content-Type-Options is nosniff", () => {

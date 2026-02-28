@@ -26,6 +26,7 @@ const securityHeaders = [
       "form-action 'self'",
       "object-src 'none'",
       "frame-ancestors 'none'",
+      ...(isDev ? [] : ["upgrade-insecure-requests"]),
     ].join("; "),
   },
   { key: "X-Content-Type-Options", value: "nosniff" },
