@@ -9,6 +9,7 @@ import { GTM, GTMNoScript } from "@/components/common/gtm";
 import { SITE_URL, AUTHOR, OG_IMAGE_PATH, TWITTER_SITE } from "@/lib/constants";
 import { locales, isValidLocale, getDictionary } from "@/lib/i18n";
 import { Analytics } from "@vercel/analytics/next";
+import { SpeedInsights } from "@vercel/speed-insights/next";
 
 const ibmPlexSans = IBM_Plex_Sans({
   variable: "--font-ibm-plex-sans",
@@ -129,6 +130,7 @@ export default async function LocaleLayout({ children, params }: LocaleLayoutPro
       >
         <GTMNoScript />
         <Analytics />
+        <SpeedInsights />
         <SerwistProvider swUrl="/serwist/sw.js">
           <ThemeProvider>
             <Header locale={locale} />
