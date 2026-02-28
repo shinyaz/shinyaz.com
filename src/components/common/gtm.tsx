@@ -1,6 +1,7 @@
 import Script from "next/script";
 
-const GTM_ID = process.env.NEXT_PUBLIC_GTM_ID;
+const GTM_ID_RAW = process.env.NEXT_PUBLIC_GTM_ID;
+const GTM_ID = GTM_ID_RAW && /^GTM-[A-Z0-9]+$/.test(GTM_ID_RAW) ? GTM_ID_RAW : undefined;
 
 export function GTM() {
   if (!GTM_ID) return null;

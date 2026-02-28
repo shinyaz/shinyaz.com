@@ -35,7 +35,7 @@ test.describe("Security Headers", () => {
 
   test("Permissions-Policy restricts browser features", () => {
     expect(headers["permissions-policy"]).toBe(
-      "camera=(), microphone=(), geolocation=()"
+      "camera=(), microphone=(), geolocation=(), accelerometer=(), gyroscope=(), magnetometer=(), payment=(), usb=(), autoplay=()"
     );
   });
 
