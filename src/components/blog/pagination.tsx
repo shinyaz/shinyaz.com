@@ -24,12 +24,12 @@ export function Pagination({ currentPage, totalPages, basePath, locale }: Pagina
       {prevPage ? (
         <Link
           href={pageHref(prevPage)}
-          className="rounded-md border border-border px-3 py-1.5 text-sm hover:bg-accent transition-colors"
+          className="rounded-md border border-border px-4 py-2 text-sm hover:bg-accent transition-colors md:px-3 md:py-1.5"
         >
           {t.pagination.prev}
         </Link>
       ) : (
-        <span className="rounded-md border border-border px-3 py-1.5 text-sm opacity-40">
+        <span className="rounded-md border border-border px-4 py-2 text-sm opacity-40 md:px-3 md:py-1.5">
           {t.pagination.prev}
         </span>
       )}
@@ -39,12 +39,12 @@ export function Pagination({ currentPage, totalPages, basePath, locale }: Pagina
       {nextPage ? (
         <Link
           href={pageHref(nextPage)}
-          className="rounded-md border border-border px-3 py-1.5 text-sm hover:bg-accent transition-colors"
+          className="rounded-md border border-border px-4 py-2 text-sm hover:bg-accent transition-colors md:px-3 md:py-1.5"
         >
           {t.pagination.next}
         </Link>
       ) : (
-        <span className="rounded-md border border-border px-3 py-1.5 text-sm opacity-40">
+        <span className="rounded-md border border-border px-4 py-2 text-sm opacity-40 md:px-3 md:py-1.5">
           {t.pagination.next}
         </span>
       )}

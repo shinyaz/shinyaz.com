@@ -48,7 +48,7 @@ export default async function SearchPage({ params }: SearchPageProps) {
   }));
 
   return (
-    <div className="mx-auto max-w-3xl px-4 py-12">
+    <div className="mx-auto max-w-3xl px-4 py-6 md:py-12">
       <header className="mb-8">
         <h1 className="text-2xl font-bold tracking-tight md:text-3xl">
           {t.search.title}

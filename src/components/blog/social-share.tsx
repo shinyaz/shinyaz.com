@@ -27,10 +27,10 @@ export function SocialShare({ url, title, locale }: SocialShareProps) {
   };
 
   const buttonClass =
-    "inline-flex h-9 w-9 items-center justify-center rounded-md border border-border hover:bg-accent hover:text-accent-foreground transition-colors";
+    "inline-flex h-11 w-11 items-center justify-center rounded-md border border-border hover:bg-accent hover:text-accent-foreground transition-colors md:h-9 md:w-9";
 
   return (
-    <div className="mt-8 border-t border-border pt-8">
+    <div className="mt-6 border-t border-border pt-6 md:mt-8 md:pt-8">
       <p className="mb-3 text-sm font-medium text-muted-foreground">
         {t.share.label}
       </p>

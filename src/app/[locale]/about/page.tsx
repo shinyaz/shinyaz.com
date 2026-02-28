@@ -43,7 +43,7 @@ export default async function AboutPage({ params }: AboutPageProps) {
   if (!page) notFound();
 
   return (
-    <div className="mx-auto max-w-3xl px-4 py-12">
+    <div className="mx-auto max-w-3xl px-4 py-6 md:py-12">
       <article>
         <header className="mb-8">
           <h1 className="text-2xl font-bold tracking-tight md:text-3xl">

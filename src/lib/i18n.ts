@@ -27,6 +27,8 @@ const dictionaries = {
       projects: "Projects",
       uses: "Uses",
       about: "About",
+      menu: "メニュー",
+      closeMenu: "メニューを閉じる",
     },
     projects: {
       description: "個人プロジェクトやオープンソースの取り組み",
@@ -86,6 +88,8 @@ const dictionaries = {
       projects: "Projects",
       uses: "Uses",
       about: "About",
+      menu: "Menu",
+      closeMenu: "Close menu",
     },
     projects: {
       description: "Personal projects and open-source work",

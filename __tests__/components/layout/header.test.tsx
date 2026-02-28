@@ -11,6 +11,10 @@ vi.mock("@/components/layout/language-switcher", () => ({
   LanguageSwitcher: () => <button>language-switcher</button>,
 }));
 
+vi.mock("@/components/layout/mobile-nav", () => ({
+  MobileNav: () => <nav data-testid="mobile-nav">mobile-nav</nav>,
+}));
+
 describe("Header", () => {
   it("renders site name", () => {
     render(<Header locale="en" />);

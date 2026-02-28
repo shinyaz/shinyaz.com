@@ -11,7 +11,7 @@ export default async function NotFound() {
   const t = getDictionary(locale);
 
   return (
-    <div className="mx-auto max-w-3xl px-4 py-24 text-center">
+    <div className="mx-auto max-w-3xl px-4 py-12 text-center md:py-24">
       <h1 className="text-6xl font-bold tracking-tight">404</h1>
       <p className="mt-4 text-muted-foreground">{t.notFound.message}</p>
       <Link
