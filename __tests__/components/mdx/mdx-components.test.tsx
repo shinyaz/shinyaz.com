@@ -52,19 +52,42 @@ describe("mdxComponents.a", () => {
     expect(link.getAttribute("target")).toBe("_blank");
   });
 
-  it("does not treat javascript: protocol as external", () => {
+  it("blocks javascript: protocol and renders as span", () => {
     // @ts-expect-error -- MDX component props
     render(<MdxA href="javascript:void(0)">JS Link</MdxA>);
-    const link = screen.getByText("JS Link");
-    expect(link.getAttribute("target")).toBeNull();
-    expect(link.getAttribute("rel")).toBeNull();
+    const el = screen.getByText("JS Link");
+    expect(el.tagName).toBe("SPAN");
+    expect(el.getAttribute("href")).toBeNull();
   });
 
-  it("does not treat data: protocol as external", () => {
+  it("blocks data: protocol and renders as span", () => {
     // @ts-expect-error -- MDX component props
     render(<MdxA href="data:text/html,<h1>hi</h1>">Data Link</MdxA>);
-    const link = screen.getByText("Data Link");
-    expect(link.getAttribute("target")).toBeNull();
-    expect(link.getAttribute("rel")).toBeNull();
+    const el = screen.getByText("Data Link");
+    expect(el.tagName).toBe("SPAN");
+    expect(el.getAttribute("href")).toBeNull();
+  });
+
+  it("blocks vbscript: protocol and renders as span", () => {
+    // @ts-expect-error -- MDX component props
+    render(<MdxA href="vbscript:MsgBox('xss')">VB Link</MdxA>);
+    const el = screen.getByText("VB Link");
+    expect(el.tagName).toBe("SPAN");
+  });
+
+  it("allows mailto: links", () => {
+    // @ts-expect-error -- MDX component props
+    render(<MdxA href="mailto:test@example.com">Email</MdxA>);
+    const link = screen.getByText("Email");
+    expect(link.tagName).toBe("A");
+    expect(link.getAttribute("href")).toBe("mailto:test@example.com");
+  });
+
+  it("allows anchor fragment links", () => {
+    // @ts-expect-error -- MDX component props
+    render(<MdxA href="#section">Anchor</MdxA>);
+    const link = screen.getByText("Anchor");
+    expect(link.tagName).toBe("A");
+    expect(link.getAttribute("href")).toBe("#section");
   });
 });

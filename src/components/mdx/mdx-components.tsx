@@ -16,6 +16,9 @@ export const mdxComponents: MDXComponents = {
     );
   },
   a: ({ href, children, ...props }) => {
+    if (href && !/^(https?:\/\/|\/|#|mailto:)/.test(href)) {
+      return <span {...props}>{children}</span>;
+    }
     const isExternal =
       href?.startsWith("http://") || href?.startsWith("https://");
     return (

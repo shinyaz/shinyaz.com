@@ -20,6 +20,11 @@ test.describe("Security Headers", () => {
     expect(csp).toContain("object-src 'none'");
     expect(csp).toContain("frame-ancestors 'none'");
     expect(csp).toContain("upgrade-insecure-requests");
+    expect(csp).toContain("report-uri /api/csp-report");
+  });
+
+  test("X-Powered-By header is not present", () => {
+    expect(headers["x-powered-by"]).toBeUndefined();
   });
 
   test("X-Content-Type-Options is nosniff", () => {
@@ -36,7 +41,7 @@ test.describe("Security Headers", () => {
 
   test("Permissions-Policy restricts browser features", () => {
     expect(headers["permissions-policy"]).toBe(
-      "camera=(), microphone=(), geolocation=(), accelerometer=(), gyroscope=(), magnetometer=(), payment=(), usb=(), autoplay=()"
+      "camera=(), microphone=(), geolocation=(), accelerometer=(), gyroscope=(), magnetometer=(), payment=(), usb=(), autoplay=(), interest-cohort=(), browsing-topics=()"
     );
   });
 

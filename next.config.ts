@@ -27,6 +27,7 @@ const securityHeaders = [
       "object-src 'none'",
       "frame-ancestors 'none'",
       ...(isDev ? [] : ["upgrade-insecure-requests"]),
+      "report-uri /api/csp-report",
     ].join("; "),
   },
   { key: "X-Content-Type-Options", value: "nosniff" },
@@ -35,7 +36,7 @@ const securityHeaders = [
   {
     key: "Permissions-Policy",
     value:
-      "camera=(), microphone=(), geolocation=(), accelerometer=(), gyroscope=(), magnetometer=(), payment=(), usb=(), autoplay=()",
+      "camera=(), microphone=(), geolocation=(), accelerometer=(), gyroscope=(), magnetometer=(), payment=(), usb=(), autoplay=(), interest-cohort=(), browsing-topics=()",
   },
   {
     key: "Strict-Transport-Security",
@@ -45,6 +46,7 @@ const securityHeaders = [
 ];
 
 const nextConfig: NextConfig = {
+  poweredByHeader: false,
   webpack: (config) => {
     config.plugins.push(new VelitePlugin());
     return config;
