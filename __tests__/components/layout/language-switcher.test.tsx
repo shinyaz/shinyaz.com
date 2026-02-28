@@ -40,4 +40,18 @@ describe("LanguageSwitcher", () => {
     const link = screen.getByRole("link");
     expect(link.getAttribute("href")).toBe("/ja/blog/2026/01/15/test-post");
   });
+
+  it("only replaces the leading locale segment, not occurrences elsewhere in the path", () => {
+    mockPathname = "/en/blog/2026/01/15/en-post";
+    render(<LanguageSwitcher locale="en" />);
+    const link = screen.getByRole("link");
+    expect(link.getAttribute("href")).toBe("/ja/blog/2026/01/15/en-post");
+  });
+
+  it("handles root locale path", () => {
+    mockPathname = "/ja";
+    render(<LanguageSwitcher locale="ja" />);
+    const link = screen.getByRole("link");
+    expect(link.getAttribute("href")).toBe("/en");
+  });
 });

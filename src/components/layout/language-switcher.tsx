@@ -11,7 +11,7 @@ interface LanguageSwitcherProps {
 export function LanguageSwitcher({ locale }: LanguageSwitcherProps) {
   const pathname = usePathname();
   const targetLocale = locale === "ja" ? "en" : "ja";
-  const targetPath = pathname.replace(`/${locale}`, `/${targetLocale}`);
+  const targetPath = `/${targetLocale}${pathname.slice(locale.length + 1)}`;
 
   return (
     <Link
