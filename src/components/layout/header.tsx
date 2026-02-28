@@ -2,6 +2,7 @@ import Link from "next/link";
 import { getDictionary, type Locale } from "@/lib/i18n";
 import { ThemeToggle } from "@/components/theme/theme-toggle";
 import { LanguageSwitcher } from "@/components/layout/language-switcher";
+import { MobileNav } from "@/components/layout/mobile-nav";
 
 interface HeaderProps {
   locale: Locale;
@@ -16,7 +17,7 @@ export function Header({ locale }: HeaderProps) {
         <Link href={`/${locale}`} className="text-lg font-bold tracking-tight">
           {t.site.name}
         </Link>
-        <nav className="flex items-center gap-4">
+        <nav className="hidden items-center gap-4 md:flex">
           <Link href={`/${locale}/blog`} className="text-sm text-muted-foreground hover:text-foreground transition-colors">
             {t.nav.blog}
           </Link>
@@ -52,6 +53,7 @@ export function Header({ locale }: HeaderProps) {
           <LanguageSwitcher locale={locale} />
           <ThemeToggle />
         </nav>
+        <MobileNav locale={locale} t={t} />
       </div>
     </header>
   );

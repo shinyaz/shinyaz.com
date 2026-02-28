@@ -42,7 +42,7 @@ export default async function BlogPage({ params, searchParams }: BlogPageProps) 
   const { posts, totalPages, currentPage } = getPaginatedPosts(page, allPosts);
 
   return (
-    <div className="mx-auto max-w-3xl px-4 py-12">
+    <div className="mx-auto max-w-3xl px-4 py-6 md:py-12">
       <header className="mb-8">
         <h1 className="text-2xl font-bold tracking-tight md:text-3xl">{t.blog.title}</h1>
         <p className="mt-2 text-muted-foreground">{t.blog.description}</p>

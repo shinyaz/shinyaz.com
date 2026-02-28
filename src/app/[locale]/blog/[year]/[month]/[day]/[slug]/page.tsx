@@ -125,7 +125,7 @@ export default async function PostPage({ params }: PostPageProps) {
   };
 
   return (
-    <div className="mx-auto max-w-3xl px-4 py-12">
+    <div className="mx-auto max-w-3xl px-4 py-6 md:py-12">
       <script
         type="application/ld+json"
         dangerouslySetInnerHTML={{ __html: JSON.stringify(blogPostingJsonLd) }}
@@ -139,7 +139,7 @@ export default async function PostPage({ params }: PostPageProps) {
           <h1 className="text-2xl font-bold tracking-tight md:text-3xl">
             {post.title}
           </h1>
-          <div className="mt-3 flex items-center gap-3 text-xs text-muted-foreground">
+          <div className="mt-3 flex flex-wrap items-center gap-2 text-xs text-muted-foreground md:gap-3">
             <time dateTime={post.date}>{formatDate(post.date, locale)}</time>
             {post.categories.length > 0 && (
               <div className="flex gap-1.5">

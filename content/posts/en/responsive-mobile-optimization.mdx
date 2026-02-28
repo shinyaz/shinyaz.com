@@ -1,0 +1,402 @@
+---
+title: "Making a Next.js Blog Responsive — Hamburger Menu and Mobile Optimization"
+description: "Implement mobile navigation without any external libraries. A detailed walkthrough of adding a hamburger menu, responsive spacing, touch target optimization, and accessibility to a Next.js App Router blog."
+date: 2026-02-28
+published: true
+categories:
+  - programming
+tags:
+  - nextjs
+  - responsive
+  - tailwindcss
+  - a11y
+---
+
+## Background
+
+This blog is built with Next.js 16 and Tailwind CSS v4, but responsive design was almost entirely absent. While the desktop experience was fine, mobile had several issues:
+
+- Navigation links were all in a horizontal row, overflowing on narrow screens
+- Padding and margins were fixed values, creating excessive whitespace on mobile
+- Buttons and links had small touch targets, making them hard to tap
+- Heading font sizes were too large for mobile viewports
+
+This post walks through the responsive optimizations I implemented with **zero external dependencies**:
+
+1. Hamburger menu (mobile navigation)
+2. Responsive spacing (mobile-first)
+3. Responsive typography
+4. Touch target optimization
+5. Accessibility
+
+## Viewport Metadata
+
+First, add the Next.js `Viewport` export to ensure proper scaling on mobile browsers.
+
+```typescript title="src/app/layout.tsx"
+import type { Viewport } from "next";
+
+export const viewport: Viewport = {
+  width: "device-width",
+  initialScale: 1,
+  maximumScale: 5,
+};
+```
+
+Setting `maximumScale: 5` ensures users can pinch-to-zoom. Using `maximumScale: 1` would disable zoom and violate WCAG accessibility guidelines.
+
+## Hamburger Menu Implementation
+
+### Architecture
+
+The Header component remains a Server Component, with only the interactive mobile navigation extracted as a `"use client"` component.
+
+```
+Header (Server Component)
+├── Desktop Nav (hidden md:flex) — existing navigation
+└── MobileNav (Client Component, md:hidden) — new
+    ├── Hamburger button
+    ├── Overlay
+    └── Drawer (slides in from right)
+```
+
+Key design decisions:
+
+- **Preserve Server Components**: Only the interactive part becomes a client component, not the entire Header
+- **Pass dictionary via props**: The `getDictionary(locale)` result is passed to MobileNav as props, eliminating any client-side i18n library
+
+### MobileNav Component
+
+```tsx title="src/components/layout/mobile-nav.tsx"
+"use client";
+
+import { useState, useEffect } from "react";
+import Link from "next/link";
+import type { Dictionary, Locale } from "@/lib/i18n";
+import { ThemeToggle } from "@/components/theme/theme-toggle";
+import { LanguageSwitcher } from "@/components/layout/language-switcher";
+
+interface MobileNavProps {
+  locale: Locale;
+  t: Dictionary;
+}
+
+export function MobileNav({ locale, t }: MobileNavProps) {
+  const [isOpen, setIsOpen] = useState(false);
+
+  // Lock body scroll when open
+  useEffect(() => {
+    if (isOpen) {
+      document.body.style.overflow = "hidden";
+    } else {
+      document.body.style.overflow = "";
+    }
+    return () => {
+      document.body.style.overflow = "";
+    };
+  }, [isOpen]);
+
+  // Close on Escape key
+  useEffect(() => {
+    if (!isOpen) return;
+    function handleKeyDown(e: KeyboardEvent) {
+      if (e.key === "Escape") {
+        setIsOpen(false);
+      }
+    }
+    document.addEventListener("keydown", handleKeyDown);
+    return () => document.removeEventListener("keydown", handleKeyDown);
+  }, [isOpen]);
+
+  // ...
+}
+```
+
+Let me walk through the key implementation details.
+
+### Scroll Lock
+
+While the drawer is open, `document.body.style.overflow = "hidden"` prevents the background from scrolling. The `useEffect` cleanup function ensures the style is reset on unmount.
+
+### Keyboard Support
+
+Pressing Escape closes the drawer. The event listener is only registered when `isOpen` is `true`, avoiding unnecessary listeners.
+
+### Auto-Close on Navigation
+
+Each link's `onClick` handler calls `setIsOpen(false)` to close the drawer on page transitions.
+
+```tsx
+<Link
+  href={link.href}
+  onClick={() => setIsOpen(false)}
+>
+  {link.label}
+</Link>
+```
+
+I initially implemented this by watching `usePathname()` changes in a `useEffect`, but this violated React 19's `react-hooks/set-state-in-effect` ESLint rule. Calling `setState` inside an effect can cause cascading renders, so I switched to explicit closure via onClick handlers.
+
+### Accessibility
+
+```tsx
+<button
+  aria-expanded={isOpen}
+  aria-label={isOpen ? t.nav.closeMenu : t.nav.menu}
+>
+```
+
+- `aria-expanded` communicates the open/close state to screen readers
+- `aria-label` provides bilingual labels ("Menu" / "Close menu")
+- `motion-reduce:transition-none` respects `prefers-reduced-motion`
+
+### The fixed Positioning and backdrop-filter Trap
+
+I ran into two gotchas during implementation that are worth sharing.
+
+#### Issue 1: z-index Stacking Context
+
+The Header uses `sticky top-0 z-50`, which creates a stacking context. Since MobileNav is a child of the Header, the z-index values on the overlay and drawer are resolved **within the Header's stacking context**.
+
+My initial implementation used `fixed inset-0 z-40` for the overlay. This caused two problems:
+
+1. **The overlay covered the header area** — `inset-0` targets the entire viewport, so the overlay's `bg-background/80 backdrop-blur-sm` stacked on top of the header's own semi-transparent backdrop, breaking the visual appearance
+2. **The hamburger button became unclickable** — The button's z-index is auto (effectively 0), so the z-40 overlay rendered on top of it
+
+As an initial fix, I changed the overlay range to `top-14 right-0 bottom-0 left-0` and added `relative z-50` to the hamburger button.
+
+#### Issue 2: backdrop-filter Creates a Containing Block for fixed Elements
+
+However, that wasn't enough. The drawer's **height matched the header's height (~57px)**, making the menu virtually invisible.
+
+The root cause was the Header's `backdrop-blur-sm`, which generates `backdrop-filter: blur(4px)`. Per the CSS spec, **an element with `backdrop-filter` becomes a containing block for `fixed`-positioned descendants**. This means `fixed top-14 bottom-0` was interpreted as "56px from the **Header's** top to the **Header's** bottom" rather than the viewport, resulting in a drawer height of nearly 0.
+
+This behavior is triggered by `transform`, `perspective`, `filter`, `backdrop-filter`, `will-change`, and similar properties — a lesser-known part of the CSS specification.
+
+#### Solution: createPortal
+
+The final fix was to use `createPortal` to render the overlay and drawer directly into `document.body`, completely bypassing the Header's `backdrop-filter` and z-index stacking context.
+
+```tsx title="src/components/layout/mobile-nav.tsx"
+import { createPortal } from "react-dom";
+
+export function MobileNav({ locale, t }: MobileNavProps) {
+  const [isOpen, setIsOpen] = useState(false);
+
+  return (
+    <div className="md:hidden">
+      <button
+        className="relative z-50 inline-flex h-9 w-9 ..."
+        aria-expanded={isOpen}
+      >
+        {/* Hamburger icon */}
+      </button>
+
+      {isOpen &&
+        createPortal(
+          <>
+            <div
+              className="fixed top-14 right-0 bottom-0 left-0 z-40 bg-black/50"
+              onClick={() => setIsOpen(false)}
+              aria-hidden="true"
+            />
+            <nav className="fixed top-14 right-0 bottom-0 z-50 w-3/4 max-w-xs bg-background p-6 shadow-xl">
+              {/* Menu content */}
+            </nav>
+          </>,
+          document.body,
+        )}
+    </div>
+  );
+}
+```
+
+When placing modals or drawers inside a `sticky` header, it's easy to overlook `backdrop-filter`. If `fixed` positioning doesn't behave as expected, check the parent element's styles — or use `createPortal` to render outside the DOM tree entirely.
+
+### Header Changes
+
+Simply add `hidden md:flex` to the existing desktop nav and include MobileNav:
+
+```tsx title="src/components/layout/header.tsx"
+<nav className="hidden items-center gap-4 md:flex">
+  {/* Existing desktop nav */}
+</nav>
+<MobileNav locale={locale} t={t} />
+```
+
+## Responsive Spacing
+
+All page containers were updated from `py-12` to `py-6 md:py-12`. Following Tailwind CSS's mobile-first approach, the smaller value is the default, scaling up at the breakpoint.
+
+```tsx
+// Before
+<div className="mx-auto max-w-3xl px-4 py-12">
+
+// After
+<div className="mx-auto max-w-3xl px-4 py-6 md:py-12">
+```
+
+This applies to 11 files (9 regular pages + not-found + offline). While seemingly minor, this halves the vertical padding on mobile, significantly improving the visible content area.
+
+## Responsive Typography
+
+Heading sizes within the `.prose` class are reduced on mobile using native CSS `@media` queries.
+
+```css title="src/app/globals.css"
+.prose {
+  & h1 {
+    font-size: 1.625rem;
+
+    @media (min-width: 768px) {
+      font-size: 2rem;
+    }
+  }
+
+  & h2 {
+    font-size: 1.25rem;
+    margin-top: 1.5rem;
+
+    @media (min-width: 768px) {
+      font-size: 1.5rem;
+      margin-top: 2rem;
+    }
+  }
+
+  & h3 {
+    font-size: 1.125rem;
+    margin-top: 1.25rem;
+
+    @media (min-width: 768px) {
+      font-size: 1.25rem;
+      margin-top: 1.5rem;
+    }
+  }
+}
+```
+
+Code block font sizes also scale from `0.8125rem` to `0.875rem` at the md breakpoint.
+
+## Touch Target Optimization
+
+WCAG 2.5.5 recommends a minimum touch target size of 44x44 CSS pixels. The following components were updated for mobile:
+
+### Social Share Buttons
+
+```tsx
+// Before
+"inline-flex h-9 w-9 ..."
+
+// After
+"inline-flex h-11 w-11 ... md:h-9 md:w-9"
+```
+
+`h-11 w-11` equals 44px, meeting the WCAG recommendation.
+
+### Pagination
+
+```tsx
+// Before
+"px-3 py-1.5"
+
+// After
+"px-4 py-2 md:px-3 md:py-1.5"
+```
+
+### Footer Social Links
+
+```tsx
+// Before
+className="text-muted-foreground hover:text-foreground transition-colors"
+
+// After
+className="inline-flex h-11 w-11 items-center justify-center text-muted-foreground hover:text-foreground transition-colors md:h-auto md:w-auto"
+```
+
+This provides a 44px touch area around the 16px icons on mobile while keeping the display compact on desktop.
+
+### Metadata Row Wrapping
+
+Added `flex-wrap` to post card and article page metadata rows so category badges and tags wrap to the next line on narrow screens.
+
+```tsx
+// Before
+<div className="flex items-center gap-3">
+
+// After
+<div className="flex flex-wrap items-center gap-2 md:gap-3">
+```
+
+## Testing Strategy
+
+### Unit Tests
+
+The MobileNav component tests verify the following:
+
+```typescript title="__tests__/components/layout/mobile-nav.test.tsx"
+describe("MobileNav", () => {
+  it("renders hamburger button");
+  it("hamburger button has aria-expanded=false initially");
+  it("opens drawer on click and sets aria-expanded=true");
+  it("shows nav links when drawer is open");
+  it("nav links have correct hrefs for en locale");
+  it("nav links have correct hrefs for ja locale");
+  it("closes drawer on Escape key");
+  it("locks body scroll when open");
+  it("unlocks body scroll when closed");
+});
+```
+
+### E2E Tests
+
+Playwright E2E tests were added with a mobile viewport (375x667).
+
+```typescript title="e2e/mobile-navigation.spec.ts"
+test.use({ viewport: { width: 375, height: 667 } });
+
+test.describe("Mobile Navigation", () => {
+  test("hamburger menu is visible on mobile");
+  test("desktop nav is hidden on mobile");
+  test("opens drawer and shows nav links");
+  test("navigates to blog via mobile menu");
+  test("drawer closes after navigation");
+  test("closes drawer with Escape key");
+  test("closes drawer when clicking overlay");
+  test("Japanese locale mobile menu");
+});
+```
+
+A `mobile-chrome` project was added to the Playwright config, running only mobile-specific tests:
+
+```typescript title="playwright.config.ts"
+projects: [
+  {
+    name: "chromium",
+    use: { ...devices["Desktop Chrome"] },
+  },
+  {
+    name: "mobile-chrome",
+    use: { ...devices["Pixel 5"] },
+    testMatch: "mobile-*.spec.ts",
+  },
+],
+```
+
+## Summary of Changes
+
+| Type | Count | Description |
+| --- | --- | --- |
+| New files | 3 | MobileNav component, unit test, E2E test |
+| Modified files | 22 | Layout, i18n, pages, components, CSS, test config |
+
+Zero external dependencies were added.
+
+## Conclusion
+
+This responsive optimization covered four main areas:
+
+1. **Hamburger menu**: Keeping the Server Component architecture while minimizing client-side code
+2. **Responsive spacing**: Mobile-first `py-6 md:py-12` pattern to improve visible content area
+3. **Responsive typography**: CSS `@media` queries for gradual heading and code block sizing
+4. **Touch targets**: WCAG-recommended 44px on mobile while staying compact on desktop
+
+All of this was achieved with Tailwind CSS utility classes and standard React hooks, with no external libraries. If you have a Next.js blog with a similar setup, feel free to use this as a reference.

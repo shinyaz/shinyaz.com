@@ -9,14 +9,14 @@ export function Footer({ locale }: FooterProps) {
   const t = getDictionary(locale);
 
   return (
-    <footer className="border-t border-border py-8">
+    <footer className="border-t border-border py-6 md:py-8">
       <div className="mx-auto max-w-3xl px-4 text-center text-sm text-muted-foreground">
         <div className="flex justify-center gap-4 mb-4">
           <a
             href={SOCIAL_LINKS.github}
             target="_blank"
             rel="noopener noreferrer"
-            className="text-muted-foreground hover:text-foreground transition-colors"
+            className="inline-flex h-11 w-11 items-center justify-center text-muted-foreground hover:text-foreground transition-colors md:h-auto md:w-auto"
             aria-label="GitHub"
           >
             <svg
@@ -33,7 +33,7 @@ export function Footer({ locale }: FooterProps) {
             href={SOCIAL_LINKS.x}
             target="_blank"
             rel="noopener noreferrer"
-            className="text-muted-foreground hover:text-foreground transition-colors"
+            className="inline-flex h-11 w-11 items-center justify-center text-muted-foreground hover:text-foreground transition-colors md:h-auto md:w-auto"
             aria-label="X"
           >
             <svg
@@ -50,7 +50,7 @@ export function Footer({ locale }: FooterProps) {
             href={SOCIAL_LINKS.linkedin}
             target="_blank"
             rel="noopener noreferrer"
-            className="text-muted-foreground hover:text-foreground transition-colors"
+            className="inline-flex h-11 w-11 items-center justify-center text-muted-foreground hover:text-foreground transition-colors md:h-auto md:w-auto"
             aria-label="LinkedIn"
           >
             <svg

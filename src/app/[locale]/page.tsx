@@ -30,8 +30,8 @@ export default async function HomePage({ params }: HomePageProps) {
   const posts = getPublishedPosts(locale).slice(0, 5);
 
   return (
-    <div className="mx-auto max-w-3xl px-4 py-12">
-      <section className="mb-12">
+    <div className="mx-auto max-w-3xl px-4 py-6 md:py-12">
+      <section className="mb-8 md:mb-12">
         <h1 className="text-2xl font-bold tracking-tight md:text-3xl">{t.site.name}</h1>
         <p className="mt-2 text-muted-foreground">
           {t.home.subtitle}

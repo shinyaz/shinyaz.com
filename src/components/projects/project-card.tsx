@@ -20,7 +20,7 @@ export function ProjectCard({ project, locale }: ProjectCardProps) {
   const description = getProjectDescription(project, locale);
 
   return (
-    <div className="rounded-lg border border-border p-5">
+    <div className="rounded-lg border border-border p-4 md:p-5">
       <h2 className="text-lg font-semibold tracking-tight">{name}</h2>
       <p className="mt-2 text-sm text-muted-foreground">{description}</p>
       {project.techStack.length > 0 && (
