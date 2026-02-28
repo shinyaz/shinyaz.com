@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect } from "react";
+import { createPortal } from "react-dom";
 import Link from "next/link";
 import type { Dictionary, Locale } from "@/lib/i18n";
 import { ThemeToggle } from "@/components/theme/theme-toggle";
@@ -88,37 +89,39 @@ export function MobileNav({ locale, t }: MobileNavProps) {
         )}
       </button>
 
-      {isOpen && (
-        <>
-          {/* Overlay */}
-          <div
-            className="fixed top-14 right-0 bottom-0 left-0 z-40 bg-background/80 backdrop-blur-sm"
-            onClick={() => setIsOpen(false)}
-            aria-hidden="true"
-          />
+      {isOpen &&
+        createPortal(
+          <>
+            {/* Overlay */}
+            <div
+              className="fixed top-14 right-0 bottom-0 left-0 z-40 bg-black/50"
+              onClick={() => setIsOpen(false)}
+              aria-hidden="true"
+            />
 
-          {/* Drawer */}
-          <nav className="fixed top-14 right-0 bottom-0 z-50 w-3/4 max-w-xs border-l border-border bg-background p-6 transition-transform motion-reduce:transition-none">
-            <ul className="flex flex-col gap-4">
-              {navLinks.map((link) => (
-                <li key={link.href}>
-                  <Link
-                    href={link.href}
-                    className="block text-base text-muted-foreground hover:text-foreground transition-colors"
-                    onClick={() => setIsOpen(false)}
-                  >
-                    {link.label}
-                  </Link>
-                </li>
-              ))}
-            </ul>
-            <div className="mt-6 flex items-center gap-3 border-t border-border pt-6">
-              <LanguageSwitcher locale={locale} />
-              <ThemeToggle />
-            </div>
-          </nav>
-        </>
-      )}
+            {/* Drawer */}
+            <nav className="fixed top-14 right-0 bottom-0 z-50 w-3/4 max-w-xs border-l border-border bg-background p-6 shadow-xl motion-reduce:transition-none">
+              <ul className="flex flex-col gap-4">
+                {navLinks.map((link) => (
+                  <li key={link.href}>
+                    <Link
+                      href={link.href}
+                      className="block text-base text-muted-foreground hover:text-foreground transition-colors"
+                      onClick={() => setIsOpen(false)}
+                    >
+                      {link.label}
+                    </Link>
+                  </li>
+                ))}
+              </ul>
+              <div className="mt-6 flex items-center gap-3 border-t border-border pt-6">
+                <LanguageSwitcher locale={locale} />
+                <ThemeToggle />
+              </div>
+            </nav>
+          </>,
+          document.body,
+        )}
     </div>
   );
 }
