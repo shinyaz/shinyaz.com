@@ -170,6 +170,11 @@ playwright.config.ts           # Playwright config (Chromium, webServer)
 
 ### Git Workflow
 
+- **Never commit directly to `main`** — always create a feature branch and open a Pull Request
+  1. Create a branch from `main` (e.g., `feat/add-search`, `fix/csp-header`)
+  2. Make commits on the feature branch
+  3. Push the branch and create a PR via `gh pr create`
+  4. Vercel automatically generates a Preview Deployment for the PR
 - Use Conventional Commits (feat:, fix:, docs:, test:, refactor:, chore:)
 - Keep commits atomic — each focused on a single change
 - Write clear, descriptive commit messages in English
