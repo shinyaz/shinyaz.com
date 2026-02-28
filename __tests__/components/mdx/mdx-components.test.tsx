@@ -51,4 +51,20 @@ describe("mdxComponents.a", () => {
     const link = screen.getByText("HTTP Link");
     expect(link.getAttribute("target")).toBe("_blank");
   });
+
+  it("does not treat javascript: protocol as external", () => {
+    // @ts-expect-error -- MDX component props
+    render(<MdxA href="javascript:void(0)">JS Link</MdxA>);
+    const link = screen.getByText("JS Link");
+    expect(link.getAttribute("target")).toBeNull();
+    expect(link.getAttribute("rel")).toBeNull();
+  });
+
+  it("does not treat data: protocol as external", () => {
+    // @ts-expect-error -- MDX component props
+    render(<MdxA href="data:text/html,<h1>hi</h1>">Data Link</MdxA>);
+    const link = screen.getByText("Data Link");
+    expect(link.getAttribute("target")).toBeNull();
+    expect(link.getAttribute("rel")).toBeNull();
+  });
 });
