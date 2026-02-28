@@ -18,7 +18,7 @@ const dictionaries = {
       allPosts: "すべての記事",
     },
     blog: {
-      title: "Blog",
+      title: "ブログ",
       description: "すべてのブログ記事一覧",
       empty: "記事がありません。",
     },
@@ -52,7 +52,8 @@ const dictionaries = {
     },
     offline: {
       title: "Offline",
-      message: "インターネットに接続されていません。接続を確認して再度お試しください。",
+      message:
+        "インターネットに接続されていません。接続を確認して再度お試しください。",
     },
     search: {
       title: "検索",
@@ -96,7 +97,7 @@ const dictionaries = {
     },
     tag: {
       title: "Tag",
-      description: "Posts tagged with \"{tag}\"",
+      description: 'Posts tagged with "{tag}"',
     },
     share: {
       label: "Share this post",
@@ -113,12 +114,13 @@ const dictionaries = {
     },
     offline: {
       title: "Offline",
-      message: "You are not connected to the internet. Please check your connection and try again.",
+      message:
+        "You are not connected to the internet. Please check your connection and try again.",
     },
     search: {
       title: "Search",
       placeholder: "Search posts...",
-      noResults: "No posts found matching \"{query}\".",
+      noResults: 'No posts found matching "{query}".',
       resultsCount: "{count} post(s) found",
       label: "Search",
     },
