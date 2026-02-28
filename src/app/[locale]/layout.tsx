@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import { notFound } from "next/navigation";
 import { IBM_Plex_Sans, IBM_Plex_Mono, IBM_Plex_Sans_JP } from "next/font/google";
 import { ThemeProvider } from "@/components/theme/theme-provider";
+import { SerwistProvider } from "@/components/pwa/serwist-provider";
 import { Header } from "@/components/layout/header";
 import { Footer } from "@/components/layout/footer";
 import { GTM, GTMNoScript } from "@/components/common/gtm";
@@ -126,11 +127,13 @@ export default async function LocaleLayout({ children, params }: LocaleLayoutPro
         className={`${ibmPlexSans.variable} ${ibmPlexMono.variable} ${ibmPlexSansJP.variable} antialiased min-h-dvh flex flex-col`}
       >
         <GTMNoScript />
-        <ThemeProvider>
-          <Header locale={locale} />
-          <main className="flex-1">{children}</main>
-          <Footer locale={locale} />
-        </ThemeProvider>
+        <SerwistProvider swUrl="/serwist/sw.js">
+          <ThemeProvider>
+            <Header locale={locale} />
+            <main className="flex-1">{children}</main>
+            <Footer locale={locale} />
+          </ThemeProvider>
+        </SerwistProvider>
       </body>
     </html>
   );

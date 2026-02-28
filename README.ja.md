@@ -231,7 +231,10 @@ src/
     manifest.ts                # PWA マニフェスト
     robots.ts                  # robots.txt
     sitemap.ts                 # 動的サイトマップ (全ロケール)
-    sw.ts                      # Service Worker (Serwist)
+    sw.ts                      # Service Worker ソース (Serwist)
+    serwist/
+      [path]/
+        route.ts               # Serwist ルートハンドラー (SW ビルド + プリキャッシュマニフェスト)
     [locale]/
       layout.tsx               # ロケールレイアウト (html, body, Header, Footer, メタデータ)
       page.tsx                 # ホームページ (最新記事)
@@ -261,6 +264,7 @@ src/
   components/
     layout/                    # Header, Footer, LanguageSwitcher
     theme/                     # ThemeProvider, ThemeToggle
+    pwa/                       # SerwistProvider
     blog/                      # PostCard, PostList, Pagination, CategoryBadge, TagBadge, SocialShare, TableOfContents
     search/                    # SearchPageClient
     projects/                  # ProjectCard
@@ -311,7 +315,7 @@ e2e/                           # E2E テスト (Playwright)
 
 ## デプロイ
 
-Git リポジトリにプッシュし、[Vercel](https://vercel.com/) に接続します。ビルドコマンド (`next build --webpack`) は `package.json` で設定済みです。
+Git リポジトリにプッシュし、[Vercel](https://vercel.com/) に接続します。ビルドコマンド (`next build --turbopack`) は `package.json` で設定済みです。
 
 ## ライセンス
 

@@ -7,7 +7,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Commands
 
 - **Dev server:** `npm run dev`
-- **Production build:** `npm run build` (uses `next build --webpack`)
+- **Production build:** `npm run build` (uses `next build --turbopack`)
 - **Start production:** `npm start`
 - **Lint:** `npm run lint`
 - **Unit / component tests:** `npm test` (Vitest)
@@ -21,7 +21,7 @@ When modifying code, you **must** perform these steps before considering the tas
    - **Unit / component tests:** If the change touches `src/lib/` or `src/components/` (non-page), check whether existing tests in `__tests__/` still pass. Add or update tests to cover new or changed behavior. Run `npm test` and fix all failures.
    - **E2E tests:** If the change affects routing, page rendering, navigation, or i18n behavior, check whether existing tests in `e2e/` still pass. Add or update E2E tests as needed. Run `npm run test:e2e` and fix all failures.
    - If the change is limited to content files (`content/`), styling only, or configuration that doesn't alter runtime logic, tests may be skipped.
-2. **Lint:** Run `npm run lint` and fix all errors. Warnings in generated files (e.g., `public/sw.js`) can be ignored.
+2. **Lint:** Run `npm run lint` and fix all errors.
 3. **Build:** Run `npm run build` and confirm it succeeds with no errors or warnings.
 4. **README update:** If the change affects architecture, directory structure, commands, dependencies, or user-facing behavior, update both `README.md` and `README.ja.md`.
 
@@ -37,7 +37,7 @@ content/pages/{en,ja}/*.mdx
 content/categories/*.yml
 ```
 
-- Velite runs as a custom Webpack plugin before compilation (see `next.config.ts`)
+- Velite runs as a prebuild step (`velite build`) before Next.js compilation
 - Locale is extracted from the directory path (e.g., `posts/ja/hello-world` → locale `"ja"`)
 - Posts get a permalink like `/{locale}/blog/{year}/{month}/{day}/{slug}`
 - MDX processing: rehype-slug → remark-math → rehype-katex → rehype-pretty-code (Shiki, dual theme: github-light/github-dark)
@@ -69,7 +69,7 @@ content/categories/*.yml
 ### Component Conventions
 
 - Server components by default (async functions); client components only where interactivity is needed (`"use client"` directive)
-- Client components: `ThemeToggle`, `ThemeProvider`, `LanguageSwitcher`, `SearchPageClient`, `TableOfContents`
+- Client components: `ThemeToggle`, `ThemeProvider`, `LanguageSwitcher`, `SearchPageClient`, `TableOfContents`, `SerwistProvider`
 - `cn()` from `src/lib/utils.ts` (clsx + tailwind-merge) for className composition
 - Category names/descriptions have bilingual support (`nameJa`, `descriptionJa` fields in YAML)
 - Tags are free-form strings from post frontmatter; tag pages live at `/{locale}/tag/{slug}`
@@ -85,7 +85,7 @@ content/categories/*.yml
 
 ### PWA
 
-Service worker via Serwist, configured in `next.config.ts`. Source at `src/app/sw.ts`, output at `public/sw.js`. Disabled in development.
+Service worker via `@serwist/turbopack`. The SW source is at `src/app/sw.ts`, compiled and served through a Next.js Route Handler at `src/app/serwist/[path]/route.ts` (URL: `/serwist/sw.js`). Precache manifest is automatically injected at build time. SW registration is handled by `SerwistProvider` in the locale layout.
 
 ## Testing
 

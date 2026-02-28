@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { locales, defaultLocale, isValidLocale } from "@/lib/i18n";
 
-const SKIP_PREFIXES = ["/_next", "/api", "/static", "/icons", "/favicon.ico", "/sw.js", "/sitemap.xml", "/robots.txt", "/manifest.webmanifest"];
+const SKIP_PREFIXES = ["/_next", "/api", "/static", "/icons", "/favicon.ico", "/serwist/", "/sitemap.xml", "/robots.txt", "/manifest.webmanifest"];
 
 export function proxy(request: NextRequest) {
   const { pathname } = request.nextUrl;
@@ -38,5 +38,5 @@ export function proxy(request: NextRequest) {
 }
 
 export const config = {
-  matcher: ["/((?!_next|api|static|icons|favicon\\.ico|sw\\.js|sitemap\\.xml|robots\\.txt|manifest\\.webmanifest).*)"],
+  matcher: ["/((?!_next|api|static|icons|favicon\\.ico|serwist|sitemap\\.xml|robots\\.txt|manifest\\.webmanifest).*)"],
 };

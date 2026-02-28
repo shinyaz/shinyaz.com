@@ -231,7 +231,10 @@ src/
     manifest.ts                # PWA manifest
     robots.ts                  # robots.txt
     sitemap.ts                 # Dynamic sitemap (all locales)
-    sw.ts                      # Service worker (Serwist)
+    sw.ts                      # Service worker source (Serwist)
+    serwist/
+      [path]/
+        route.ts               # Serwist route handler (SW build + precache manifest)
     [locale]/
       layout.tsx               # Locale layout (html, body, Header, Footer, metadata)
       page.tsx                 # Home page (latest posts)
@@ -261,6 +264,7 @@ src/
   components/
     layout/                    # Header, Footer, LanguageSwitcher
     theme/                     # ThemeProvider, ThemeToggle
+    pwa/                       # SerwistProvider
     blog/                      # PostCard, PostList, Pagination, CategoryBadge, TagBadge, SocialShare, TableOfContents
     search/                    # SearchPageClient
     projects/                  # ProjectCard
@@ -311,7 +315,7 @@ e2e/                           # E2E tests (Playwright)
 
 ## Deployment
 
-Push to a Git repository and connect it to [Vercel](https://vercel.com/). The build command (`next build --webpack`) is configured in `package.json`.
+Push to a Git repository and connect it to [Vercel](https://vercel.com/). The build command (`next build --turbopack`) is configured in `package.json`.
 
 ## License
 
