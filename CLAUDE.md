@@ -2,6 +2,8 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+**Language rule:** Think in English internally. Always respond to the user in Japanese.
+
 ## Commands
 
 - **Dev server:** `npm run dev`
@@ -13,40 +15,15 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Required Checks After Code Changes
 
-When modifying code in this repository, you **must** perform the following steps before considering the task complete:
+When modifying code, you **must** perform these steps before considering the task complete:
 
 1. **Tests — assess & update:**
-   - **Unit / component tests:** If the change touches `src/lib/` utilities or `src/components/` (non-page components), check whether existing tests in `__tests__/` still pass. Add or update tests to cover the new or changed behavior. Run `npm test` and fix all failures.
+   - **Unit / component tests:** If the change touches `src/lib/` or `src/components/` (non-page), check whether existing tests in `__tests__/` still pass. Add or update tests to cover new or changed behavior. Run `npm test` and fix all failures.
    - **E2E tests:** If the change affects routing, page rendering, navigation, or i18n behavior, check whether existing tests in `e2e/` still pass. Add or update E2E tests as needed. Run `npm run test:e2e` and fix all failures.
    - If the change is limited to content files (`content/`), styling only, or configuration that doesn't alter runtime logic, tests may be skipped.
 2. **Lint:** Run `npm run lint` and fix all errors. Warnings in generated files (e.g., `public/sw.js`) can be ignored.
 3. **Build:** Run `npm run build` and confirm it succeeds with no errors or warnings.
-4. **README update:** If the change affects architecture, directory structure, commands, dependencies, or user-facing behavior, update both `README.md` and `README.ja.md` to reflect the change.
-
-### Test Structure
-
-```
-__tests__/
-  __mocks__/velite.ts          # Mock Velite data (used in place of #site/content during tests)
-  lib/                         # Unit tests for src/lib/ (utils, i18n, posts, seo)
-  components/                  # Mirrors src/components/ subdirectory structure
-    blog/                      # Tests for src/components/blog/
-    layout/                    # Tests for src/components/layout/
-    search/                    # Tests for src/components/search/
-    mdx/                       # Tests for src/components/mdx/
-    projects/                  # Tests for src/components/projects/
-    theme/                     # Tests for src/components/theme/
-    common/                    # Tests for src/components/common/
-e2e/                           # Playwright E2E tests (navigation, blog, i18n, offline)
-vitest.config.mts              # Vitest config (jsdom, path aliases, mock alias)
-playwright.config.ts           # Playwright config (Chromium, webServer)
-```
-
-- Vitest resolves `#site/content` to `__tests__/__mocks__/velite.ts` so tests run without a Velite build.
-- Vitest resolves `@/*` to `src/*` so lib and component imports work in tests.
-- When adding new exported functions to `src/lib/`, add corresponding tests in `__tests__/lib/`.
-- When adding or modifying components in `src/components/`, add corresponding tests in `__tests__/components/<subdirectory>/` matching the source path.
-- When adding new pages or changing page behavior, add corresponding E2E tests in `e2e/`.
+4. **README update:** If the change affects architecture, directory structure, commands, dependencies, or user-facing behavior, update both `README.md` and `README.ja.md`.
 
 ## Architecture
 
@@ -109,3 +86,133 @@ content/categories/*.yml
 ### PWA
 
 Service worker via Serwist, configured in `next.config.ts`. Source at `src/app/sw.ts`, output at `public/sw.js`. Disabled in development.
+
+## Testing
+
+### Test Structure
+
+```
+__tests__/
+  __mocks__/velite.ts          # Mock Velite data (used in place of #site/content during tests)
+  lib/                         # Unit tests for src/lib/ (utils, i18n, posts, seo)
+  components/                  # Mirrors src/components/ subdirectory structure
+    blog/                      # Tests for src/components/blog/
+    layout/                    # Tests for src/components/layout/
+    search/                    # Tests for src/components/search/
+    mdx/                       # Tests for src/components/mdx/
+    projects/                  # Tests for src/components/projects/
+    theme/                     # Tests for src/components/theme/
+    common/                    # Tests for src/components/common/
+e2e/                           # Playwright E2E tests (navigation, blog, i18n, offline)
+vitest.config.mts              # Vitest config (jsdom, path aliases, mock alias)
+playwright.config.ts           # Playwright config (Chromium, webServer)
+```
+
+### Test Conventions
+
+- Vitest resolves `#site/content` to `__tests__/__mocks__/velite.ts` so tests run without a Velite build
+- Vitest resolves `@/*` to `src/*` so lib and component imports work in tests
+- New exported functions in `src/lib/` → add tests in `__tests__/lib/`
+- New or modified components in `src/components/` → add tests in `__tests__/components/<subdirectory>/`
+- New pages or changed page behavior → add E2E tests in `e2e/`
+
+### Test Discipline
+
+- Never skip failing tests — fix them
+- Test behavior, not implementation details
+- Tests must be independent — runnable in any order
+- Tests must be fast and deterministic
+- Prioritize meaningful tests over coverage numbers
+- Always cover error cases
+
+## Development Guidelines
+
+### Core Principles
+
+- Always consider quality, maintainability, and safety — not just working code
+- Balance effort appropriately for the project phase (prototype vs. MVP vs. production)
+- Never ignore problems — fix them or explicitly document them
+- Boy Scout Rule: leave code better than you found it
+- Broken Windows Theory: fix small issues immediately upon discovery
+
+### Code Quality
+
+- DRY: avoid duplication; maintain a single source of truth
+- Use meaningful variable and function names that convey intent
+- Maintain consistent coding style across the project
+- Comments explain "why", code expresses "what"
+
+### Error Handling
+
+- Resolve all errors, even seemingly unrelated ones
+- Fix root causes — never suppress errors with `@ts-ignore` or empty catch blocks
+- Detect errors early and provide clear error messages
+- External APIs and network calls must always account for failure
+
+### Security
+
+- Manage API keys and passwords via environment variables (never hardcode)
+- Validate all external input
+- Follow the principle of least privilege
+- Avoid unnecessary dependencies
+- Run security audit tools regularly
+
+### Performance & Reliability
+
+- Optimize based on measurement, not guesswork
+- Lazy-load resources until they are needed
+- Define clear cache expiration and invalidation strategies
+- Avoid N+1 queries and over-fetching
+- Set appropriate timeouts
+- Implement retries with exponential backoff where applicable
+- Use circuit breaker patterns for external services
+- Ensure observability with appropriate logging and metrics
+
+### Git Workflow
+
+- Use Conventional Commits (feat:, fix:, docs:, test:, refactor:, chore:)
+- Keep commits atomic — each focused on a single change
+- Write clear, descriptive commit messages in English
+
+### Dependency Management
+
+- Add only truly necessary dependencies
+- Always commit lock files (package-lock.json)
+- Before adding a dependency, check its license, size, and maintenance status
+- Update regularly for security patches and bug fixes
+
+### Documentation
+
+- Keep README up to date with project overview, setup, and usage
+- Update documentation in sync with code changes
+- Prefer concrete examples over abstract descriptions
+- Record important design decisions in ADRs (Architecture Decision Records)
+
+### Debugging
+
+- Establish reliable reproduction steps first
+- Use binary search to narrow down the problem scope
+- Start investigation from recent changes
+- Use appropriate tools (debugger, profiler, etc.)
+- Record findings and solutions for knowledge sharing
+
+### Maintainability & Refactoring
+
+- Consider improving existing code alongside feature additions
+- Break large changes into small, incremental steps
+- Actively delete unused code
+- Explicitly document technical debt in comments or docs
+
+### Code Review
+
+- Treat review comments as constructive improvement suggestions
+- Focus on the code, not the person
+- Clearly explain the reasoning and impact of changes
+- Welcome feedback as a learning opportunity
+
+### Trade-offs
+
+- No silver bullet — perfection is not achievable in all dimensions
+- Find the optimal balance within constraints
+- Prioritize simplicity for prototypes, robustness for production
+- Document compromises and their rationale explicitly
