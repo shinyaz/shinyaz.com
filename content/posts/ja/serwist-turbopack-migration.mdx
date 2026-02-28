@@ -1,5 +1,5 @@
 ---
-title: "Next.js PWAを@serwist/turbopackに移行してビルドを高速化する"
+title: "Next.js PWA を @serwist/turbopack に移行してビルドを高速化する"
 description: "@serwist/nextからserwist/turbopackへの移行手順を解説。precacheマニフェスト自動注入とTurbopackビルドの統合で、構成をシンプルにしつつビルド時間を短縮します。"
 date: 2026-02-28
 published: true
@@ -28,13 +28,13 @@ tags:
 
 主な違いをまとめると：
 
-| 観点 | @serwist/next (webpack) | @serwist/turbopack |
-|---|---|---|
-| SW ビルド | webpack プラグインが自動生成 | Route Handler 経由で esbuild が処理 |
-| SW の URL | `/sw.js`（public/ に出力） | `/serwist/sw.js`（Route Handler のパス） |
-| precache manifest | webpack プラグインが注入 | `createSerwistRoute` が注入 |
-| SW 登録 | `register` オプションで自動 | `SerwistProvider` コンポーネントで明示的に |
-| Turbopack 対応 | 不可 | ネイティブ対応 |
+| 観点              | @serwist/next (webpack)      | @serwist/turbopack                         |
+| ----------------- | ---------------------------- | ------------------------------------------ |
+| SW ビルド         | webpack プラグインが自動生成 | Route Handler 経由で esbuild が処理        |
+| SW の URL         | `/sw.js`（public/ に出力）   | `/serwist/sw.js`（Route Handler のパス）   |
+| precache manifest | webpack プラグインが注入     | `createSerwistRoute` が注入                |
+| SW 登録           | `register` オプションで自動  | `SerwistProvider` コンポーネントで明示的に |
+| Turbopack 対応    | 不可                         | ネイティブ対応                             |
 
 ## 移行手順
 
@@ -72,8 +72,9 @@ import { spawnSync } from "node:child_process";
 import { createSerwistRoute } from "@serwist/turbopack";
 
 const revision =
-  spawnSync("git", ["rev-parse", "HEAD"], { encoding: "utf-8" })
-    .stdout.trim() || crypto.randomUUID();
+  spawnSync("git", ["rev-parse", "HEAD"], {
+    encoding: "utf-8",
+  }).stdout.trim() || crypto.randomUUID();
 
 export const { dynamic, dynamicParams, revalidate, generateStaticParams, GET } =
   createSerwistRoute({
@@ -124,9 +125,7 @@ export default async function LocaleLayout({ children, params }) {
     <html lang={locale}>
       <body>
         <SerwistProvider swUrl="/serwist/sw.js">
-          <ThemeProvider>
-            {children}
-          </ThemeProvider>
+          <ThemeProvider>{children}</ThemeProvider>
         </SerwistProvider>
       </body>
     </html>
