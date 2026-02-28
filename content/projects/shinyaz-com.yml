@@ -1,8 +1,8 @@
 name: shinyaz.com
 slug: shinyaz-com
-description: "Personal tech blog built with Next.js, MDX, and Velite. Supports bilingual content (Japanese/English), dark mode, and PWA."
+description: "Minimal, monochrome personal tech blog. Features bilingual support (Japanese/English), dark mode, client-side full-text search, auto-generated table of contents, math rendering, SEO with JSON-LD structured data, RSS/Atom feeds, PWA with precache, and comprehensive security headers."
 nameJa: shinyaz.com
-descriptionJa: "Next.js、MDX、Velite で構築した個人技術ブログ。日英バイリンガル対応、ダークモード、PWA をサポート。"
+descriptionJa: "ミニマル・モノトーンの個人技術ブログ。日英バイリンガル対応、ダークモード、クライアントサイド全文検索、目次自動生成、数式レンダリング、JSON-LD 構造化データによる SEO、RSS/Atom フィード、プリキャッシュ付き PWA、包括的なセキュリティヘッダーを搭載。"
 url: https://shinyaz.com
 github: https://github.com/shinyaz/shinyaz.com
 techStack:
@@ -11,6 +11,10 @@ techStack:
   - Tailwind CSS
   - Velite
   - MDX
+  - Shiki
+  - KaTeX
   - Serwist
+  - Vitest
+  - Playwright
 featured: true
 order: 1
