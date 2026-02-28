@@ -50,7 +50,7 @@ export function MobileNav({ locale, t }: MobileNavProps) {
     <div className="md:hidden">
       <button
         onClick={() => setIsOpen(!isOpen)}
-        className="inline-flex h-9 w-9 items-center justify-center rounded-md border border-border text-muted-foreground hover:bg-accent hover:text-accent-foreground transition-colors"
+        className="relative z-50 inline-flex h-9 w-9 items-center justify-center rounded-md border border-border text-muted-foreground hover:bg-accent hover:text-accent-foreground transition-colors"
         aria-expanded={isOpen}
         aria-label={isOpen ? t.nav.closeMenu : t.nav.menu}
       >
@@ -92,7 +92,7 @@ export function MobileNav({ locale, t }: MobileNavProps) {
         <>
           {/* Overlay */}
           <div
-            className="fixed inset-0 z-40 bg-background/80 backdrop-blur-sm"
+            className="fixed top-14 right-0 bottom-0 left-0 z-40 bg-background/80 backdrop-blur-sm"
             onClick={() => setIsOpen(false)}
             aria-hidden="true"
           />
