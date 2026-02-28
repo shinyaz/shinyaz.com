@@ -1,6 +1,6 @@
 ---
 title: "Hello World - Welcome to shinyaz.com"
-description: "The first post on shinyaz.com. A demo of code highlighting and math rendering with MDX."
+description: "The first post on shinyaz.com. A detailed look at the blog's features: bilingual support, dark mode, full-text search, PWA, SEO, and more."
 date: 2026-02-22
 published: true
 categories:
@@ -13,24 +13,82 @@ tags:
 
 ## Introduction
 
-Welcome to shinyaz.com! This is a personal tech blog built with Next.js and MDX.
+Welcome to shinyaz.com! This is a minimal, monochrome personal tech blog built with Next.js 16 and MDX.
 
-In this post, I'll introduce some of the blog's features.
+In this post, I'll walk through the technologies and features that power this blog.
 
-## Code Highlighting
+## Tech Stack
 
-Here's a demo of syntax highlighting powered by `rehype-pretty-code` and `shiki`.
+| Category | Technology |
+|---|---|
+| Framework | Next.js 16 (App Router) |
+| Styling | Tailwind CSS v4 |
+| Content | MDX + Velite |
+| Code Highlighting | Shiki + rehype-pretty-code |
+| Math Rendering | remark-math + rehype-katex |
+| Dark Mode | next-themes |
+| PWA | Serwist |
+| Testing | Vitest + Playwright |
+| Deployment | Vercel |
 
-```typescript title="hello.ts"
+## Bilingual Support (Japanese / English)
+
+Every page on this blog is available in both Japanese and English. Instead of relying on an external i18n library, translations are handled by a simple TypeScript dictionary object.
+
+```typescript
+const dictionaries = {
+  ja: {
+    site: { name: "shinyaz.com", description: "..." },
+    nav: { home: "ホーム", blog: "ブログ", ... },
+    // ...
+  },
+  en: {
+    site: { name: "shinyaz.com", description: "..." },
+    nav: { home: "Home", blog: "Blog", ... },
+    // ...
+  },
+};
+```
+
+- A language switcher button ("EN / JP") in the header toggles between locales while staying on the same page
+- URLs always include a locale prefix (e.g., `/en/blog/...`, `/ja/blog/...`)
+- Bare paths automatically redirect based on the browser's `Accept-Language` header
+- Content files are organized by locale (`content/posts/en/`, `content/posts/ja/`)
+
+## Dark Mode
+
+The blog supports class-based dark mode toggling via `next-themes`. Theme tokens are defined as CSS custom properties, switching between `:root` (light) and `.dark` (dark).
+
+Code blocks also adapt automatically, using Shiki's dual theme (github-light / github-dark) that responds to the active theme.
+
+```typescript title="example.ts"
 function greet(name: string): string {
   return `Hello, ${name}! Welcome to shinyaz.com.`;
 }
 
-const message = greet("World");
-console.log(message);
+console.log(greet("World"));
 ```
 
-Inline code works too: `const x: number = 42;`
+## Content Pipeline
+
+Posts are written as MDX files and transformed into static data at build time by [Velite](https://velite.js.org/).
+
+```
+content/posts/{en,ja}/*.mdx
+  → Velite (prebuild)
+    → .velite/ (static data)
+      → Next.js (App Router)
+```
+
+MDX content is processed through the following plugin chain:
+
+1. **rehype-slug** — Automatically adds IDs to headings for anchor links
+2. **remark-math** + **rehype-katex** — Math rendering
+3. **rehype-pretty-code** (Shiki) — Syntax highlighting with dual themes
+
+## Code Highlighting
+
+Syntax highlighting supports multiple languages with optional filename display.
 
 ```python title="fibonacci.py"
 def fibonacci(n: int) -> list[int]:
@@ -45,9 +103,11 @@ def fibonacci(n: int) -> list[int]:
 print(fibonacci(10))
 ```
 
+Inline code works too: `const x: number = 42;`
+
 ## Math Rendering
 
-Here's a demo of math rendering powered by `remark-math` and `rehype-katex`.
+LaTeX-style math expressions are fully supported.
 
 Inline math: $E = mc^2$
 
@@ -63,21 +123,63 @@ $$
 x = \frac{-b \pm \sqrt{b^2 - 4ac}}{2a}
 $$
 
-## Lists
+## Auto-Generated Table of Contents
 
-- Next.js 16 (App Router)
-- Tailwind CSS v4
-- Velite (content management)
-- MDX (writing posts)
+Each post displays a table of contents automatically generated from its headings (h2, h3). An `IntersectionObserver`-based scroll spy highlights the section currently in view.
 
-1. Write a post
-2. Build the site
-3. Deploy
+## Client-Side Search
 
-## Blockquote
+The blog includes a fully client-side search engine with no external services.
 
-> A tech blog is a great way to organize and share what you've learned.
+- Searches across four fields: title, description, categories, and tags
+- AND matching with space-separated tokens (only posts matching all tokens are shown)
+- Real-time filtering (results update as you type)
+- Syncs with URL query parameters (`?q=nextjs` for direct linking)
+
+## Fonts
+
+The blog uses the [IBM Plex](https://www.ibm.com/plex/) font family throughout.
+
+- **IBM Plex Sans** — Latin text (weights: 400, 500, 600, 700)
+- **IBM Plex Mono** — Code blocks (weights: 400, 700)
+- **IBM Plex Sans JP** — Japanese text (weights: 400, 500, 700, lazy-loaded)
+
+The Japanese font is loaded with `preload: false` to optimize initial page load performance, since its file size is significantly larger.
+
+## SEO
+
+The blog implements several SEO best practices:
+
+- **Structured data (JSON-LD)**: `WebSite` schema on the layout, `BlogPosting` + `BreadcrumbList` schema on each post
+- **Open Graph / Twitter Cards**: Meta tags for social sharing
+- **hreflang / canonical**: Proper markup for translation pairs across locales
+- **Sitemap**: Dynamic sitemap covering all locales
+- **RSS / Atom feeds**: Auto-generated RSS 2.0 and Atom 1.0 per locale (latest 20 posts)
+
+## PWA & Offline Support
+
+The blog is a Progressive Web App powered by [Serwist](https://serwist.pages.dev/).
+
+- Precache manifest is automatically injected at build time, precaching static assets
+- An offline fallback page is displayed when there's no network connection
+- Runtime caching strategies optimally cache Next.js pages and assets
+
+## Security
+
+HTTP security headers are applied to all routes:
+
+- **Content-Security-Policy** — Restricts resource origins
+- **Strict-Transport-Security** — Enforces HTTPS with a 2-year max-age
+- **X-Content-Type-Options** / **X-Frame-Options** — Prevents MIME sniffing and clickjacking
+- **Permissions-Policy** — Disables unnecessary APIs like camera, microphone, and geolocation
+
+## Testing
+
+Quality is maintained through a two-layer testing strategy:
+
+- **Unit / component tests** (Vitest) — Verify library functions and component behavior
+- **E2E tests** (Playwright) — Integration tests for navigation, blog, search, i18n, offline support, and security headers
 
 ## Summary
 
-That's an overview of the core features of shinyaz.com. I'll continue posting articles about technology.
+shinyaz.com packs a lot of technical detail behind its minimal design. I'll continue posting articles about technology on this blog. If any of these features interest you, feel free to explore the source code.

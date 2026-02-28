@@ -1,6 +1,6 @@
 ---
-title: "Hello World - shinyaz.comへようこそ"
-description: "shinyaz.comの最初の記事です。MDXによるコードハイライトや数式レンダリングのデモを紹介します。"
+title: "Hello World - shinyaz.com へようこそ"
+description: "shinyaz.comの最初の記事です。バイリンガル対応、ダークモード、全文検索、PWA、SEOなど、本ブログの特徴を詳しく紹介します。"
 date: 2026-02-22
 published: true
 categories:
@@ -13,24 +13,82 @@ tags:
 
 ## はじめに
 
-shinyaz.com へようこそ！このブログは Next.js と MDX で構築された個人技術ブログです。
+shinyaz.com へようこそ！このブログは Next.js 16 と MDX で構築されたミニマル・モノトーンの個人技術ブログです。
 
-この記事では、ブログの機能をいくつか紹介します。
+この記事では、ブログを支える技術とその特徴を詳しく紹介します。
 
-## コードハイライト
+## 技術スタック
 
-`rehype-pretty-code` と `shiki` によるシンタックスハイライトのデモです。
+| カテゴリ         | 技術                       |
+| ---------------- | -------------------------- |
+| フレームワーク   | Next.js 16 (App Router)    |
+| スタイリング     | Tailwind CSS v4            |
+| コンテンツ管理   | MDX + Velite               |
+| コードハイライト | Shiki + rehype-pretty-code |
+| 数式レンダリング | remark-math + rehype-katex |
+| ダークモード     | next-themes                |
+| PWA              | Serwist                    |
+| テスト           | Vitest + Playwright        |
+| デプロイ         | Vercel                     |
 
-```typescript title="hello.ts"
+## バイリンガル対応 (日本語 / English)
+
+本ブログはすべてのページが日本語と英語の両方で提供されています。外部 i18n ライブラリを使わず、TypeScript の辞書オブジェクトだけで UI 翻訳を実現しています。
+
+```typescript
+const dictionaries = {
+  ja: {
+    site: { name: "shinyaz.com", description: "..." },
+    nav: { home: "ホーム", blog: "ブログ", ... },
+    // ...
+  },
+  en: {
+    site: { name: "shinyaz.com", description: "..." },
+    nav: { home: "Home", blog: "Blog", ... },
+    // ...
+  },
+};
+```
+
+- ヘッダーの「EN / JP」ボタンで、同じページに留まったまま言語を切り替え可能
+- URL は常にロケールプレフィックス付き（例: `/ja/blog/...`、`/en/blog/...`）
+- ブラウザの `Accept-Language` ヘッダーから自動でリダイレクト
+- コンテンツファイルも言語ごとにディレクトリ分割（`content/posts/ja/`、`content/posts/en/`）
+
+## ダークモード
+
+`next-themes` によるクラスベースのダークモード切替に対応しています。テーマトークンは CSS カスタムプロパティで定義され、`:root`（ライト）と `.dark`（ダーク）で切り替わります。
+
+コードブロックも Shiki のデュアルテーマ（github-light / github-dark）を使い、テーマに連動して自動で切り替わります。
+
+```typescript title="example.ts"
 function greet(name: string): string {
   return `Hello, ${name}! Welcome to shinyaz.com.`;
 }
 
-const message = greet("World");
-console.log(message);
+console.log(greet("World"));
 ```
 
-インラインコードも使えます: `const x: number = 42;`
+## コンテンツパイプライン
+
+記事は MDX ファイルで執筆し、[Velite](https://velite.js.org/) がビルド時に静的データへ変換します。
+
+```
+content/posts/{en,ja}/*.mdx
+  → Velite (prebuild)
+    → .velite/ (静的データ)
+      → Next.js (App Router)
+```
+
+MDX は以下のプラグインチェーンで処理されます：
+
+1. **rehype-slug** — 見出しに自動で ID を付与（アンカーリンク用）
+2. **remark-math** + **rehype-katex** — 数式レンダリング
+3. **rehype-pretty-code** (Shiki) — シンタックスハイライト（デュアルテーマ）
+
+## コードハイライト
+
+複数の言語に対応したシンタックスハイライトです。ファイル名の表示も可能です。
 
 ```python title="fibonacci.py"
 def fibonacci(n: int) -> list[int]:
@@ -45,9 +103,11 @@ def fibonacci(n: int) -> list[int]:
 print(fibonacci(10))
 ```
 
+インラインコードも使えます: `const x: number = 42;`
+
 ## 数式レンダリング
 
-`remark-math` と `rehype-katex` による数式レンダリングのデモです。
+LaTeX 記法による数式のレンダリングに対応しています。
 
 インライン数式: $E = mc^2$
 
@@ -63,21 +123,63 @@ $$
 x = \frac{-b \pm \sqrt{b^2 - 4ac}}{2a}
 $$
 
-## リスト
+## 目次の自動生成
 
-- Next.js 16 (App Router)
-- Tailwind CSS v4
-- Velite (コンテンツ管理)
-- MDX (記事執筆)
+各記事には見出し（h2, h3）から自動生成される目次が表示されます。`IntersectionObserver` によるスクロールスパイで、現在読んでいるセクションがハイライトされます。
 
-1. 記事を書く
-2. ビルドする
-3. デプロイする
+## クライアントサイド検索
 
-## 引用
+外部サービスを使わない、完全クライアントサイドの全文検索を搭載しています。
 
-> 技術ブログは、学んだことを整理し共有するための素晴らしい手段です。
+- タイトル・説明・カテゴリ・タグの4フィールドを横断検索
+- スペース区切りの AND 検索（すべてのトークンにマッチする記事のみ表示）
+- リアルタイム絞り込み（タイプするたびに結果が更新）
+- URL クエリパラメータと同期（`?q=nextjs` で直接リンク可能）
+
+## フォント
+
+[IBM Plex](https://www.ibm.com/plex/) ファミリーを採用しています。
+
+- **IBM Plex Sans** — 欧文テキスト用（400, 500, 600, 700）
+- **IBM Plex Mono** — コードブロック用（400, 700）
+- **IBM Plex Sans JP** — 日本語テキスト用（400, 500, 700、遅延読み込み）
+
+日本語フォントはファイルサイズが大きいため `preload: false` で遅延読み込みし、初期表示パフォーマンスを最適化しています。
+
+## SEO
+
+検索エンジン最適化のため、以下を実装しています：
+
+- **構造化データ (JSON-LD)**: `WebSite` スキーマ（レイアウト）、`BlogPosting` + `BreadcrumbList` スキーマ（各記事）
+- **Open Graph / Twitter Card**: ソーシャルシェア用のメタタグ
+- **hreflang / canonical**: 言語間の対訳ペアを正しくマークアップ
+- **サイトマップ**: 全ロケールの URL を含む動的サイトマップ
+- **RSS / Atom フィード**: ロケールごとに RSS 2.0 と Atom 1.0 を自動生成（最新20件）
+
+## PWA & オフライン対応
+
+[Serwist](https://serwist.pages.dev/) による Service Worker で PWA に対応しています。
+
+- ビルド時に precache manifest を自動注入し、静的アセットをプリキャッシュ
+- ネットワーク未接続時はオフラインフォールバックページを表示
+- ランタイムキャッシュ戦略で Next.js のページとアセットを最適にキャッシュ
+
+## セキュリティ
+
+すべてのルートに HTTP セキュリティヘッダーを適用しています：
+
+- **Content-Security-Policy** — リソースの読み込み元を制限
+- **Strict-Transport-Security** — HTTPS を強制（max-age 2年）
+- **X-Content-Type-Options** / **X-Frame-Options** — MIME スニッフィング・クリックジャッキング防止
+- **Permissions-Policy** — カメラ・マイク・位置情報など不要な API を無効化
+
+## テスト
+
+品質を担保するため、二層のテスト戦略を採用しています。
+
+- **ユニット / コンポーネントテスト** (Vitest) — ライブラリ関数とコンポーネントの振る舞いを検証
+- **E2E テスト** (Playwright) — ナビゲーション、ブログ、検索、i18n、オフライン、セキュリティヘッダーを統合検証
 
 ## まとめ
 
-これで shinyaz.com の基本機能の紹介は以上です。今後も技術に関する記事を投稿していきます。
+shinyaz.com は、ミニマルなデザインの裏側で多くの技術的工夫を取り入れています。今後もこのブログで技術に関する記事を投稿していきます。気になる機能があれば、ぜひソースコードも覗いてみてください。
