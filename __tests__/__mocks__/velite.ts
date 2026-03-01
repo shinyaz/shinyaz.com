@@ -22,7 +22,7 @@ export const posts = [
     description: "Second post description",
     date: "2026-02-10T00:00:00.000Z",
     published: true,
-    categories: ["devops"],
+    categories: ["programming"],
     tags: ["docker", "container"],
     filePath: "posts/en/second-post",
     metadata: { readingTime: 5, wordCount: 800 },
@@ -80,13 +80,6 @@ export const categories = [
     description: "Articles about programming",
     nameJa: "プログラミング",
     descriptionJa: "プログラミングに関する記事",
-  },
-  {
-    name: "DevOps",
-    slug: "devops",
-    description: "Articles about DevOps",
-    nameJa: "DevOps",
-    descriptionJa: "DevOpsに関する記事",
   },
 ];
 

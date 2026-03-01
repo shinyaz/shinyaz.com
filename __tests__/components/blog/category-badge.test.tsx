@@ -20,8 +20,8 @@ describe("CategoryBadge", () => {
   });
 
   it("uses correct locale prefix", () => {
-    render(<CategoryBadge slug="devops" locale="ja" />);
+    render(<CategoryBadge slug="programming" locale="ja" />);
     const link = screen.getByRole("link");
-    expect(link.getAttribute("href")).toBe("/ja/category/devops");
+    expect(link.getAttribute("href")).toBe("/ja/category/programming");
   });
 });

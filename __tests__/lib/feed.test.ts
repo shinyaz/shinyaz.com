@@ -36,7 +36,6 @@ describe("generateRss", () => {
   it("includes categories for posts", () => {
     const xml = generateRss("en");
     expect(xml).toContain("<category>programming</category>");
-    expect(xml).toContain("<category>devops</category>");
   });
 
   it("includes atom:link self reference", () => {
@@ -108,7 +107,6 @@ describe("generateAtom", () => {
   it("includes category terms", () => {
     const xml = generateAtom("en");
     expect(xml).toContain('<category term="programming"/>');
-    expect(xml).toContain('<category term="devops"/>');
   });
 
   it("includes feed-level updated timestamp", () => {
