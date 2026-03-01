@@ -74,6 +74,9 @@ const dictionaries = {
     toc: {
       title: "目次",
     },
+    about: {
+      authorName: "田原 慎也",
+    },
     footer: {
       copyright: "All rights reserved.",
     },
@@ -144,6 +147,9 @@ const dictionaries = {
     },
     toc: {
       title: "Table of Contents",
+    },
+    about: {
+      authorName: "Shinya Tahara",
     },
     footer: {
       copyright: "All rights reserved.",
