@@ -75,6 +75,10 @@ All pages are served under a locale prefix:
 - `/ja/about` - Japanese about page
 - `/en/search` - English search page
 - `/ja/search` - Japanese search page
+- `/en/category` - English category index
+- `/ja/category` - Japanese category index
+- `/en/tag` - English tag index
+- `/ja/tag` - Japanese tag index
 - `/en/tag/nextjs` - English tag listing
 - `/ja/tag/nextjs` - Japanese tag listing
 - `/en/feed.xml` - English RSS feed
@@ -253,12 +257,16 @@ src/
         page.tsx               # Blog listing with pagination
         [year]/[month]/[day]/[slug]/
           page.tsx             # Post detail (SSG, JSON-LD with inLanguage)
-      category/[slug]/
-        page.tsx               # Category listing with pagination
+      category/
+        page.tsx               # Category index (all categories)
+        [slug]/
+          page.tsx             # Category listing with pagination
       search/
         page.tsx               # Search page (client-side filtering)
-      tag/[slug]/
-        page.tsx               # Tag listing with pagination
+      tag/
+        page.tsx               # Tag index (all tags)
+        [slug]/
+          page.tsx             # Tag listing with pagination
       ~offline/
         page.tsx               # Offline fallback
   components/
