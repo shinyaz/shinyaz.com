@@ -28,6 +28,6 @@ test.describe("Internationalization", () => {
 
   test("Japanese blog page shows Japanese labels", async ({ page }) => {
     await page.goto("/ja/blog");
-    await expect(page.locator("h1")).toContainText("Blog");
+    await expect(page.locator("h1")).toContainText("ブログ");
   });
 });
