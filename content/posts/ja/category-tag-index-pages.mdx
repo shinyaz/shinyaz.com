@@ -1,0 +1,320 @@
+---
+title: "Next.js ブログにカテゴリ一覧・タグ一覧ページを追加する"
+description: "個別のカテゴリ・タグページはあるのに一覧がない問題を解決。Next.js App Router で静的生成されるカテゴリインデックスとタグクラウドページを、既存のヘルパー関数を再利用しながら最小限の変更で実装する手順を解説します。"
+date: 2026-03-01
+published: true
+categories:
+  - programming
+tags:
+  - nextjs
+  - blog
+  - i18n
+---
+
+## 課題
+
+このブログには個別のカテゴリページ（`/ja/category/programming`）とタグページ（`/ja/tag/nextjs`）が以前から存在していました。しかし、**全カテゴリ・全タグを俯瞰できる一覧ページ**がなく、ユーザーがどんなカテゴリやタグがあるのかを把握する手段がありませんでした。
+
+記事のメタデータに表示されるバッジから個別ページへは遷移できますが、ブログ全体のコンテンツ構造を探索するには不十分です。
+
+今回の対応で以下の4つのページを新設しました。
+
+- `/ja/category` — 日本語カテゴリ一覧
+- `/en/category` — 英語カテゴリ一覧
+- `/ja/tag` — 日本語タグ一覧
+- `/en/tag` — 英語タグ一覧
+
+## 設計方針
+
+このブログは Velite で MDX をビルド時に静的データ化し、`src/lib/posts.ts` のヘルパー関数でクエリしています。カテゴリ一覧・タグ一覧を作るために必要なデータ取得関数はすべて既存でした。
+
+- `getAllCategories()` — 全カテゴリの取得
+- `getCategoryName()` / `getCategoryDescription()` — バイリンガル対応のカテゴリ名・説明
+- `getPostsByCategory()` — カテゴリ別の記事取得（記事数カウントに利用）
+- `getAllTags(locale)` — ロケール別の全タグ取得
+- `getPostsByTag()` — タグ別の記事取得（記事数カウントに利用）
+
+新しいコンポーネントやユーティリティの追加は不要で、既存の関数を組み合わせるだけで実装できました。
+
+## i18n 辞書の拡張
+
+まず、UI 文字列を `src/lib/i18n.ts` に追加します。
+
+```typescript title="src/lib/i18n.ts"
+const dictionaries = {
+  ja: {
+    blog: {
+      // ...既存のキー
+      browseCategories: "カテゴリ一覧",
+      browseTags: "タグ一覧",
+    },
+    category: {
+      title: "カテゴリ",
+      description: "すべてのカテゴリ一覧",
+      postCount: "{count}件の記事",
+    },
+    tag: {
+      // ...既存のキー
+      indexTitle: "タグ",
+      indexDescription: "すべてのタグ一覧",
+    },
+  },
+  en: {
+    blog: {
+      browseCategories: "Categories",
+      browseTags: "Tags",
+    },
+    category: {
+      title: "Categories",
+      description: "Browse all categories",
+      postCount: "{count} post(s)",
+    },
+    tag: {
+      indexTitle: "Tags",
+      indexDescription: "Browse all tags",
+    },
+  },
+} as const;
+```
+
+`tag` セクションでは既存の `title` / `description` が個別タグページ（`タグ: #nextjs`）用なので、一覧ページ用に `indexTitle` / `indexDescription` を別キーとして追加しました。`category` セクションは新設です。
+
+## カテゴリ一覧ページ
+
+カテゴリ一覧は**カード形式のグリッドレイアウト**で表示します。各カードにはカテゴリ名、説明、記事数を表示し、クリックで個別カテゴリページへ遷移します。
+
+```tsx title="src/app/[locale]/category/page.tsx"
+import Link from "next/link";
+import { getAllCategories, getPostsByCategory, getCategoryName, getCategoryDescription } from "@/lib/posts";
+import { locales, isValidLocale, getDictionary } from "@/lib/i18n";
+
+export async function generateStaticParams() {
+  return locales.map((locale) => ({ locale }));
+}
+
+export default async function CategoryIndexPage({ params }: CategoryIndexPageProps) {
+  const { locale } = await params;
+  if (!isValidLocale(locale)) notFound();
+  const t = getDictionary(locale);
+  const categories = getAllCategories();
+
+  return (
+    <div className="mx-auto max-w-3xl px-4 py-6 md:py-12">
+      <header className="mb-8">
+        <h1 className="text-2xl font-bold tracking-tight md:text-3xl">
+          {t.category.title}
+        </h1>
+        <p className="mt-2 text-muted-foreground">{t.category.description}</p>
+      </header>
+      <div className="grid gap-4 sm:grid-cols-2">
+        {categories.map((category) => {
+          const name = getCategoryName(category, locale);
+          const description = getCategoryDescription(category, locale);
+          const postCount = getPostsByCategory(category.slug, locale).length;
+          return (
+            <Link
+              key={category.slug}
+              href={`/${locale}/category/${category.slug}`}
+              className="rounded-lg border border-border p-4 transition-colors hover:bg-accent"
+            >
+              <h2 className="font-semibold">{name}</h2>
+              {description && (
+                <p className="mt-1 text-sm text-muted-foreground">{description}</p>
+              )}
+              <p className="mt-2 text-xs text-muted-foreground">
+                {t.category.postCount.replace("{count}", String(postCount))}
+              </p>
+            </Link>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+```
+
+ポイントは以下の通りです。
+
+- **サーバーコンポーネント**として実装。インタラクティブな要素がないため `"use client"` は不要
+- `generateStaticParams` でロケールごとに静的生成
+- `sm:grid-cols-2` でモバイルは1列、sm 以上で2列のレスポンシブグリッド
+- `getCategoryName()` / `getCategoryDescription()` でバイリンガル表示を自動切り替え
+
+## タグ一覧ページ
+
+タグ一覧は**タグクラウド風のフレックスレイアウト**で表示します。各タグの横に記事数を括弧付きで表示します。
+
+```tsx title="src/app/[locale]/tag/page.tsx"
+export default async function TagIndexPage({ params }: TagIndexPageProps) {
+  const { locale } = await params;
+  if (!isValidLocale(locale)) notFound();
+  const t = getDictionary(locale);
+  const tags = getAllTags(locale);
+
+  return (
+    <div className="mx-auto max-w-3xl px-4 py-6 md:py-12">
+      <header className="mb-8">
+        <h1 className="text-2xl font-bold tracking-tight md:text-3xl">
+          {t.tag.indexTitle}
+        </h1>
+        <p className="mt-2 text-muted-foreground">{t.tag.indexDescription}</p>
+      </header>
+      <div className="flex flex-wrap gap-3">
+        {tags.map((tag) => {
+          const postCount = getPostsByTag(tag, locale).length;
+          return (
+            <Link
+              key={tag}
+              href={`/${locale}/tag/${tag}`}
+              className="inline-flex items-center gap-1.5 rounded-full border border-border px-3 py-1.5 text-sm text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
+            >
+              #{tag}
+              <span className="text-xs">({postCount})</span>
+            </Link>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+```
+
+既存の `TagBadge` コンポーネント（`px-2.5 py-0.5 text-xs`）より少し大きめのスタイル（`px-3 py-1.5 text-sm`）にし、一覧ページでの視認性とタップしやすさを確保しています。
+
+カテゴリ一覧との設計上の違いとして、`getAllTags(locale)` はロケールを引数に取ります。タグは記事のフロントマターから動的に収集されるため、日本語記事と英語記事で異なるタグセットが返されます。一方、カテゴリは YAML で定義された固定リストなのでロケールに依存しません。
+
+## ブログ一覧ページからのナビゲーション
+
+新しいページへの導線として、ブログ一覧ページのヘッダーにリンクを追加しました。
+
+```tsx title="src/app/[locale]/blog/page.tsx"
+<header className="mb-8">
+  <h1 className="text-2xl font-bold tracking-tight md:text-3xl">
+    {t.blog.title}
+  </h1>
+  <p className="mt-2 text-muted-foreground">{t.blog.description}</p>
+  <div className="mt-4 flex gap-3">
+    <Link
+      href={`/${locale}/category`}
+      className="inline-block rounded-full border border-border px-3 py-1 text-sm text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
+    >
+      {t.blog.browseCategories}
+    </Link>
+    <Link
+      href={`/${locale}/tag`}
+      className="inline-block rounded-full border border-border px-3 py-1 text-sm text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
+    >
+      {t.blog.browseTags}
+    </Link>
+  </div>
+</header>
+```
+
+スタイルは既存の `CategoryBadge` / `TagBadge` に近い丸みのあるボタン風リンクにし、ブログの既存デザインとの一貫性を保っています。
+
+## SEO 対応
+
+両ページとも既存パターンに従い、以下の SEO 対応を実装しています。
+
+- `generateMetadata` で `title`、`description`、`openGraph`、`alternates` を設定
+- `buildAlternateLanguages` で `hreflang` の代替言語リンクを生成
+- `canonical` URL を明示的に指定
+
+```typescript
+export async function generateMetadata({ params }: CategoryIndexPageProps): Promise<Metadata> {
+  const { locale } = await params;
+  if (!isValidLocale(locale)) return {};
+  const t = getDictionary(locale);
+  return {
+    title: t.category.title,
+    description: t.category.description,
+    openGraph: {
+      title: t.category.title,
+      description: t.category.description,
+      url: `${SITE_URL}/${locale}/category`,
+      type: "website",
+    },
+    alternates: {
+      canonical: `${SITE_URL}/${locale}/category`,
+      languages: buildAlternateLanguages((l) => `/${l}/category`),
+    },
+  };
+}
+```
+
+## テスト
+
+### ユニットテスト
+
+i18n 辞書に新しいキーが正しく追加されたことを検証するテストを追加しました。
+
+```typescript title="__tests__/lib/i18n.test.ts"
+it("has category section with required keys", () => {
+  const ja = getDictionary("ja");
+  const en = getDictionary("en");
+  expect(ja.category.title).toBe("カテゴリ");
+  expect(ja.category.postCount).toContain("{count}");
+  expect(en.category.title).toBe("Categories");
+  expect(en.category.postCount).toContain("{count}");
+});
+
+it("has tag index keys", () => {
+  const ja = getDictionary("ja");
+  const en = getDictionary("en");
+  expect(ja.tag.indexTitle).toBe("タグ");
+  expect(en.tag.indexTitle).toBe("Tags");
+});
+```
+
+### E2E テスト
+
+Playwright で各ページの表示・ナビゲーション・記事数表示を検証しています。
+
+```typescript title="e2e/category-index.spec.ts"
+test.describe("Category Index Page", () => {
+  test("English category index page loads with categories", async ({ page }) => {
+    await page.goto("/en/category");
+    await expect(page.locator("h1")).toContainText("Categories");
+    await expect(page.locator("a[href*='/en/category/']").first()).toBeVisible();
+  });
+
+  test("each category card shows post count", async ({ page }) => {
+    await page.goto("/en/category");
+    const firstCard = page.locator("a[href*='/en/category/']").first();
+    await expect(firstCard).toContainText(/\d+ post/);
+  });
+
+  test("clicking a category navigates to category detail page", async ({ page }) => {
+    await page.goto("/en/category");
+    await page.locator("a[href*='/en/category/']").first().click();
+    await expect(page).toHaveURL(/\/en\/category\/.+/);
+  });
+});
+```
+
+タグ一覧ページも同様のテスト構成です。加えて、ブログ一覧ページから各インデックスページへのナビゲーションが機能することもテストしています。
+
+## 変更ファイル一覧
+
+| 区分 | ファイル | 内容 |
+| --- | --- | --- |
+| 変更 | `src/lib/i18n.ts` | `category` セクション新設、`tag` / `blog` にキー追加 |
+| 新規 | `src/app/[locale]/category/page.tsx` | カテゴリ一覧ページ |
+| 新規 | `src/app/[locale]/tag/page.tsx` | タグ一覧ページ |
+| 変更 | `src/app/[locale]/blog/page.tsx` | ナビゲーションリンク追加 |
+| 新規 | `e2e/category-index.spec.ts` | カテゴリ一覧 E2E テスト |
+| 新規 | `e2e/tag-index.spec.ts` | タグ一覧 E2E テスト |
+| 変更 | `__tests__/lib/i18n.test.ts` | i18n キーのユニットテスト追加 |
+
+新しい依存関係の追加はゼロです。
+
+## まとめ
+
+既存のヘルパー関数とデータパイプラインをそのまま再利用することで、最小限のコード変更でカテゴリ一覧・タグ一覧ページを追加できました。
+
+- **カテゴリ一覧**: カード形式のグリッドレイアウト（名前・説明・記事数）
+- **タグ一覧**: タグクラウド風のフレックスレイアウト（タグ名・記事数）
+- **ブログページ**: ヘッダーにカテゴリ・タグ一覧へのリンクを追加
+- **バイリンガル対応**: i18n 辞書の拡張で日英両方をサポート
+
+新しいページは完全にサーバーコンポーネントとして実装されているため、クライアント JavaScript は追加されません。Velite で静的生成されたデータをそのまま利用するので、ランタイムのデータフェッチも発生しません。
