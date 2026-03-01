@@ -18,16 +18,18 @@ test.describe("Mobile Navigation", () => {
   test("opens drawer and shows nav links", async ({ page }) => {
     await page.goto("/en");
     await page.getByRole("button", { name: "Menu" }).click();
-    await expect(page.getByRole("link", { name: "Blog" })).toBeVisible();
-    await expect(page.getByRole("link", { name: "Projects" })).toBeVisible();
-    await expect(page.getByRole("link", { name: "Uses" })).toBeVisible();
-    await expect(page.getByRole("link", { name: "About" })).toBeVisible();
+    const drawer = page.locator("body > nav");
+    await expect(drawer.getByRole("link", { name: "Blog" })).toBeVisible();
+    await expect(drawer.getByRole("link", { name: "Projects" })).toBeVisible();
+    await expect(drawer.getByRole("link", { name: "Uses" })).toBeVisible();
+    await expect(drawer.getByRole("link", { name: "About" })).toBeVisible();
   });
 
   test("navigates to blog via mobile menu", async ({ page }) => {
     await page.goto("/en");
     await page.getByRole("button", { name: "Menu" }).click();
-    await page.getByRole("link", { name: "Blog" }).click();
+    const drawer = page.locator("body > nav");
+    await drawer.getByRole("link", { name: "Blog" }).click();
     await expect(page).toHaveURL(/\/en\/blog/);
     await expect(page.locator("h1")).toBeVisible();
   });
@@ -35,7 +37,8 @@ test.describe("Mobile Navigation", () => {
   test("drawer closes after navigation", async ({ page }) => {
     await page.goto("/en");
     await page.getByRole("button", { name: "Menu" }).click();
-    await page.getByRole("link", { name: "About" }).click();
+    const drawer = page.locator("body > nav");
+    await drawer.getByRole("link", { name: "About" }).click();
     await expect(page).toHaveURL(/\/en\/about/);
     // After navigation, the drawer should be closed, hamburger shows "Menu" again
     const hamburger = page.getByRole("button", { name: "Menu" });
@@ -54,8 +57,8 @@ test.describe("Mobile Navigation", () => {
     await page.goto("/en");
     await page.getByRole("button", { name: "Menu" }).click();
     await expect(page.getByRole("button", { name: "Close menu" })).toBeVisible();
-    // Click the overlay (left side of screen, since drawer is on right)
-    await page.click("[aria-hidden='true']");
+    // Click the overlay on the left side, outside the drawer (drawer covers right 3/4)
+    await page.locator("body > div[aria-hidden='true']").click({ position: { x: 10, y: 300 } });
     await expect(page.getByRole("button", { name: "Menu" })).toBeVisible();
   });
 
@@ -64,6 +67,7 @@ test.describe("Mobile Navigation", () => {
     const hamburger = page.getByRole("button", { name: "メニュー" });
     await expect(hamburger).toBeVisible();
     await hamburger.click();
-    await expect(page.getByRole("link", { name: "ブログ" })).toBeVisible();
+    const drawer = page.locator("body > nav");
+    await expect(drawer.getByRole("link", { name: "ブログ" })).toBeVisible();
   });
 });
