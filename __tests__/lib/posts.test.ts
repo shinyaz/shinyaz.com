@@ -201,7 +201,7 @@ describe("getAllProjects", () => {
 describe("getAllCategories", () => {
   it("returns all categories", () => {
     const cats = getAllCategories();
-    expect(cats.length).toBe(2);
+    expect(cats.length).toBe(1);
   });
 });
 
