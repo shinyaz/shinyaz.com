@@ -1,0 +1,400 @@
+---
+title: "Next.js ブログに動的OGP画像を自動生成する"
+description: "SNSでシェアした際に記事タイトルやカテゴリが表示される動的OGP画像を、Next.js App Router の opengraph-image.tsx ファイル規約と Satori を使ってビルド時に静的生成する方法を解説します。"
+date: 2026-03-01
+published: true
+categories:
+  - programming
+tags:
+  - nextjs
+  - seo
+  - og-image
+---
+
+## 課題
+
+このブログでは、全ページ共通のデフォルト OG 画像（`/icons/og-default.png`）を使用していました。SNS でシェアしたときに表示されるのは常に同じ汎用的な画像で、記事ごとの区別がつきません。
+
+理想的には、各記事のタイトル・カテゴリ・日付・著者名が含まれた固有のOGP画像が自動生成されるべきです。
+
+## アプローチの選定
+
+動的OGP画像の生成にはいくつかの方法がありますが、今回は **Next.js App Router の `opengraph-image.tsx` ファイル規約**を採用しました。
+
+| 方式 | 利点 | 欠点 |
+| --- | --- | --- |
+| 外部サービス（Cloudinary等） | 設定が簡単 | 外部依存、コスト |
+| Canvas API | 柔軟 | Node.js環境でのセットアップが複雑 |
+| **opengraph-image.tsx** | Next.js組み込み、追加依存なし | Satoriの制約あり |
+
+選定理由:
+
+- `next/og`（Satori + Resvg）は Next.js にバンドル済みで、追加パッケージのインストールが不要
+- `opengraph-image.tsx` をルートセグメントに配置するだけで `og:image`、`og:image:width`、`og:image:height`、`twitter:image` メタタグが自動設定される
+- `generateMetadata` の手動変更が不要
+- `generateStaticParams` でビルド時に全画像を静的生成できる
+
+## フォントの準備
+
+Satori は CSS の `@font-face` を使えず、フォントデータを `ArrayBuffer` として渡す必要があります。このブログは IBM Plex Sans / IBM Plex Sans JP を使用しているため、TTF ファイルをプロジェクトにバンドルしました。
+
+```
+src/assets/fonts/
+  IBMPlexSans-Bold.ttf      # Latin文字用（約200KB）
+  IBMPlexSansJP-Bold.ttf    # 日本語用（約5.5MB）
+```
+
+外部 URL から `fetch` する方法もありますが、ビルド時のネットワーク依存を避けるためローカルバンドルを採用しています。
+
+## OG画像のレイアウト設計
+
+レイアウトは React コンポーネントとして `src/lib/og-image.tsx` に定義しました。ブログのモノクロデザインを踏襲しています。
+
+```tsx title="src/lib/og-image.tsx"
+interface OgImageLayoutProps {
+  title: string;
+  date: string;
+  category?: string;
+  author: string;
+  siteName: string;
+  locale: Locale;
+}
+
+export function OgImageLayout({
+  title,
+  date,
+  category,
+  author,
+  siteName,
+}: OgImageLayoutProps) {
+  return (
+    <div
+      style={{
+        width: "1200px",
+        height: "630px",
+        display: "flex",
+        flexDirection: "column",
+        justifyContent: "space-between",
+        padding: "60px 80px",
+        backgroundColor: "#fafafa",
+        fontFamily: "IBM Plex Sans, IBM Plex Sans JP",
+      }}
+    >
+      {/* 上部: カテゴリバッジ + 日付 */}
+      <div style={{ display: "flex", alignItems: "center", gap: "16px" }}>
+        {category && (
+          <div
+            style={{
+              fontSize: "20px",
+              color: "#111111",
+              backgroundColor: "#e5e5e5",
+              padding: "4px 16px",
+              borderRadius: "4px",
+              fontWeight: 700,
+            }}
+          >
+            {category}
+          </div>
+        )}
+        <div style={{ fontSize: "20px", color: "#737373" }}>{date}</div>
+      </div>
+
+      {/* 中央: タイトル */}
+      <div style={{ display: "flex", flex: 1, alignItems: "center" }}>
+        <div
+          style={{
+            fontSize: title.length > 40 ? "42px" : "52px",
+            fontWeight: 700,
+            color: "#111111",
+            lineHeight: 1.3,
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            wordBreak: "break-word",
+          }}
+        >
+          {title}
+        </div>
+      </div>
+
+      {/* 下部: 著者名 + サイト名 */}
+      <div
+        style={{
+          display: "flex",
+          justifyContent: "space-between",
+          alignItems: "center",
+        }}
+      >
+        <div style={{ fontSize: "24px", color: "#737373", fontWeight: 700 }}>
+          {author}
+        </div>
+        <div style={{ fontSize: "24px", color: "#737373" }}>{siteName}</div>
+      </div>
+    </div>
+  );
+}
+```
+
+デザインのポイント:
+
+- **サイズ**: 1200x630px（OGP推奨サイズ）
+- **配色**: 背景 `#fafafa`、テキスト `#111111`、サブテキスト `#737373` でブログのモノクロテーマと統一
+- **タイトルの自動調整**: 40文字を超えるタイトルはフォントサイズを 52px → 42px に自動縮小
+- **カテゴリバッジ**: カテゴリが設定されている場合のみ表示
+
+Satori は通常の CSS ではなく、インラインスタイルで Flexbox レイアウトを記述する必要があります。`className` や Tailwind は使えません。
+
+## generateStaticParams の共通化
+
+`page.tsx` と `opengraph-image.tsx` は同じルートセグメントに配置されるため、同じ `generateStaticParams` ロジックが必要です。重複を避けるため、共通ユーティリティとして切り出しました。
+
+```typescript title="src/lib/blog-params.ts"
+import { getPublishedPosts } from "./posts";
+import { locales } from "./i18n";
+
+export function generateBlogStaticParams() {
+  const allParams: {
+    locale: string;
+    year: string;
+    month: string;
+    day: string;
+    slug: string;
+  }[] = [];
+  for (const locale of locales) {
+    const posts = getPublishedPosts(locale);
+    for (const post of posts) {
+      allParams.push({
+        locale,
+        year: post.year,
+        month: post.month,
+        day: post.day,
+        slug: post.slugName,
+      });
+    }
+  }
+  return allParams;
+}
+```
+
+`page.tsx` 側はインポートに置き換えるだけです。
+
+```typescript title="src/app/[locale]/blog/[year]/[month]/[day]/[slug]/page.tsx"
+import { generateBlogStaticParams } from "@/lib/blog-params";
+
+export const generateStaticParams = generateBlogStaticParams;
+```
+
+## OG画像生成ルートの実装
+
+`opengraph-image.tsx` は Next.js のファイル規約に従い、記事ルートと同じディレクトリに配置します。
+
+```tsx title="src/app/[locale]/blog/[year]/[month]/[day]/[slug]/opengraph-image.tsx"
+import { ImageResponse } from "next/og";
+import { readFile } from "node:fs/promises";
+import { join } from "node:path";
+import { getPostBySlug, getCategoryBySlug, getCategoryName } from "@/lib/posts";
+import { formatDate } from "@/lib/utils";
+import { isValidLocale } from "@/lib/i18n";
+import { AUTHOR } from "@/lib/constants";
+import { generateBlogStaticParams } from "@/lib/blog-params";
+import { OgImageLayout } from "@/lib/og-image";
+
+export const alt = "Blog post";
+export const size = { width: 1200, height: 630 };
+export const contentType = "image/png";
+
+export const generateStaticParams = generateBlogStaticParams;
+
+let fontSansCache: Buffer | null = null;
+let fontSansJPCache: Buffer | null = null;
+
+async function loadFonts() {
+  if (!fontSansCache) {
+    fontSansCache = await readFile(
+      join(process.cwd(), "src/assets/fonts/IBMPlexSans-Bold.ttf")
+    );
+  }
+  if (!fontSansJPCache) {
+    fontSansJPCache = await readFile(
+      join(process.cwd(), "src/assets/fonts/IBMPlexSansJP-Bold.ttf")
+    );
+  }
+  return { fontSans: fontSansCache, fontSansJP: fontSansJPCache };
+}
+
+export default async function OgImage({ params }: Props) {
+  const { locale, year, month, day, slug } = await params;
+
+  if (!isValidLocale(locale)) {
+    return new ImageResponse(<div>Not Found</div>, { ...size });
+  }
+
+  const post = getPostBySlug(year, month, day, slug, locale);
+  if (!post) {
+    return new ImageResponse(<div>Not Found</div>, { ...size });
+  }
+
+  const { fontSans, fontSansJP } = await loadFonts();
+
+  const categorySlug = post.categories[0];
+  const category = categorySlug
+    ? getCategoryBySlug(categorySlug)
+    : undefined;
+  const categoryName = category
+    ? getCategoryName(category, locale)
+    : undefined;
+
+  return new ImageResponse(
+    (
+      <OgImageLayout
+        title={post.title}
+        date={formatDate(post.date, locale)}
+        category={categoryName}
+        author={AUTHOR}
+        siteName="shinyaz.com"
+        locale={locale}
+      />
+    ),
+    {
+      ...size,
+      fonts: [
+        {
+          name: "IBM Plex Sans",
+          data: fontSans,
+          weight: 700,
+          style: "normal",
+        },
+        {
+          name: "IBM Plex Sans JP",
+          data: fontSansJP,
+          weight: 700,
+          style: "normal",
+        },
+      ],
+    }
+  );
+}
+```
+
+実装のポイント:
+
+- **フォントキャッシュ**: `loadFonts()` はモジュールレベル変数にキャッシュし、複数記事のビルド時に毎回ディスクから読まないようにしている
+- **既存関数の再利用**: `getPostBySlug`、`getCategoryBySlug`、`getCategoryName`、`formatDate` をそのまま利用
+- **`generateStaticParams`**: 共通関数を使い、ビルド時に全記事の画像を静的生成
+- **エクスポート規約**: `alt`、`size`、`contentType` を named export することで、Next.js がメタタグを自動生成
+
+## 仕組み：opengraph-image.tsx が行うこと
+
+`opengraph-image.tsx` を配置すると、Next.js は以下を自動的に行います。
+
+1. ファイルの `default export` 関数を呼び出して `ImageResponse` を生成
+2. 生成された画像をルートの `.png` として提供（例: `/en/blog/2026/03/01/hello-world/opengraph-image.png`）
+3. 親レイアウトの `<head>` に以下のメタタグを自動挿入:
+
+```html
+<meta property="og:image" content="https://shinyaz.com/en/blog/.../opengraph-image.png" />
+<meta property="og:image:width" content="1200" />
+<meta property="og:image:height" content="630" />
+<meta property="og:image:type" content="image/png" />
+<meta name="twitter:image" content="https://shinyaz.com/en/blog/.../opengraph-image.png" />
+```
+
+`generateMetadata` で `openGraph.images` を手動設定する必要がありません。ファイルベースのメタデータ API の恩恵です。
+
+## テスト
+
+### ユニットテスト
+
+`OgImageLayout` コンポーネントのJSX出力を直接テストしています。
+
+```tsx title="__tests__/lib/og-image.test.tsx"
+describe("OgImageLayout", () => {
+  it("renders category badge when category is provided", () => {
+    const result = OgImageLayout({ ...baseProps, category: "Programming" });
+    const topBar = result.props.children[0];
+    const categoryBadge = topBar.props.children[0];
+    expect(categoryBadge.props.children).toBe("Programming");
+  });
+
+  it("uses smaller font size for long titles", () => {
+    const longTitle = "This is a very long title that exceeds forty characters";
+    const result = OgImageLayout({ ...baseProps, title: longTitle });
+    const centerSection = result.props.children[1];
+    const titleDiv = centerSection.props.children;
+    expect(titleDiv.props.style.fontSize).toBe("42px");
+  });
+});
+```
+
+`generateBlogStaticParams` のテストも追加し、公開記事のみが含まれること、下書きが除外されることを検証しています。
+
+### E2E テスト
+
+Playwright で実際のビルド成果物に対して検証しています。
+
+```typescript title="e2e/og-image.spec.ts"
+test.describe("OG Image", () => {
+  test("English blog post has og:image meta tag", async ({ page }) => {
+    await page.goto("/en/blog");
+    const firstPostLink = page.locator("article a").first();
+    await page.goto(await firstPostLink.getAttribute("href")!);
+
+    const ogImage = page.locator('meta[property="og:image"]');
+    await expect(ogImage).toHaveCount(1);
+    expect(await ogImage.getAttribute("content")).toContain("opengraph-image");
+  });
+
+  test("OG image URL returns a PNG image", async ({ page, request, baseURL }) => {
+    // ...記事ページから og:image URL を取得
+    const localUrl = imageUrl.replace(/^https?:\/\/[^\/]+/, baseURL!);
+    const response = await request.get(localUrl);
+    expect(response.status()).toBe(200);
+    expect(response.headers()["content-type"]).toContain("image/png");
+  });
+
+  test("og:image:width and og:image:height are set", async ({ page }) => {
+    // ...
+    expect(await ogWidth.getAttribute("content")).toBe("1200");
+    expect(await ogHeight.getAttribute("content")).toBe("630");
+  });
+});
+```
+
+E2E テストでは `og:image` の URL が本番ドメインを含むため、テスト実行時にローカルサーバーの URL に置き換えている点がポイントです。
+
+## ビルド結果
+
+`npm run build` を実行すると、OG画像が SSG ルートとして静的生成されます。
+
+```
+● /[locale]/blog/[year]/[month]/[day]/[slug]/opengraph-image
+  ├ /ja/blog/2026/03/01/category-tag-index-pages/opengraph-image
+  ├ /ja/blog/2026/02/28/responsive-mobile-optimization/opengraph-image
+  ├ /ja/blog/2026/02/28/serwist-turbopack-migration/opengraph-image
+  └ [+5 more paths]
+```
+
+## 変更ファイル一覧
+
+| 区分 | ファイル | 内容 |
+| --- | --- | --- |
+| 新規 | `src/assets/fonts/IBMPlexSans-Bold.ttf` | Latin用フォント |
+| 新規 | `src/assets/fonts/IBMPlexSansJP-Bold.ttf` | 日本語用フォント |
+| 新規 | `src/lib/og-image.tsx` | OG画像レイアウトコンポーネント |
+| 新規 | `src/lib/blog-params.ts` | generateStaticParams 共通関数 |
+| 新規 | `opengraph-image.tsx` | OG画像生成ルート |
+| 変更 | `page.tsx` | generateStaticParams を共通関数に置き換え |
+| 新規 | `__tests__/lib/og-image.test.tsx` | レイアウトのユニットテスト（8件） |
+| 新規 | `__tests__/lib/blog-params.test.ts` | パラメータ生成のユニットテスト（5件） |
+| 新規 | `e2e/og-image.spec.ts` | E2Eテスト（5件） |
+
+新しい依存関係の追加はゼロです。
+
+## まとめ
+
+Next.js の `opengraph-image.tsx` ファイル規約を活用し、ブログ記事ごとに固有のOGP画像を自動生成する仕組みを実装しました。
+
+- **追加依存ゼロ**: `next/og` は Next.js にバンドル済み
+- **メタタグの自動設定**: `generateMetadata` の変更不要
+- **ビルド時静的生成**: ランタイムの画像生成負荷なし
+- **バイリンガル対応**: 日本語フォントをバンドルし、日英両方の記事で適切に表示
+- **既存コードの再利用**: レイアウトと画像生成を分離し、テスタビリティを確保
