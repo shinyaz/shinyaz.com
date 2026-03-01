@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import Image from "next/image";
 import { notFound } from "next/navigation";
 import { getPageBySlug } from "@/lib/posts";
 import { MdxContent } from "@/components/mdx/mdx-content";
@@ -45,7 +46,15 @@ export default async function AboutPage({ params }: AboutPageProps) {
   return (
     <div className="mx-auto max-w-3xl px-4 py-6 md:py-12">
       <article>
-        <header className="mb-8">
+        <header className="mb-8 flex flex-col items-center gap-4 sm:flex-row sm:items-center sm:gap-6">
+          <Image
+            src="/images/profile.jpeg"
+            alt={page.title}
+            width={96}
+            height={96}
+            className="rounded-full"
+            priority
+          />
           <h1 className="text-2xl font-bold tracking-tight md:text-3xl">
             {page.title}
           </h1>
