@@ -35,6 +35,35 @@ describe("getDictionary", () => {
     const en = getDictionary("en");
     expect(Object.keys(ja)).toEqual(Object.keys(en));
   });
+
+  it("has category section with required keys", () => {
+    const ja = getDictionary("ja");
+    const en = getDictionary("en");
+    expect(ja.category.title).toBe("カテゴリ");
+    expect(ja.category.description).toBeTruthy();
+    expect(ja.category.postCount).toContain("{count}");
+    expect(en.category.title).toBe("Categories");
+    expect(en.category.description).toBeTruthy();
+    expect(en.category.postCount).toContain("{count}");
+  });
+
+  it("has tag index keys", () => {
+    const ja = getDictionary("ja");
+    const en = getDictionary("en");
+    expect(ja.tag.indexTitle).toBe("タグ");
+    expect(ja.tag.indexDescription).toBeTruthy();
+    expect(en.tag.indexTitle).toBe("Tags");
+    expect(en.tag.indexDescription).toBeTruthy();
+  });
+
+  it("has blog browse links keys", () => {
+    const ja = getDictionary("ja");
+    const en = getDictionary("en");
+    expect(ja.blog.browseCategories).toBeTruthy();
+    expect(ja.blog.browseTags).toBeTruthy();
+    expect(en.blog.browseCategories).toBeTruthy();
+    expect(en.blog.browseTags).toBeTruthy();
+  });
 });
 
 describe("locales and defaultLocale", () => {

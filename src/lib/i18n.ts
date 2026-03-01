@@ -21,6 +21,8 @@ const dictionaries = {
       title: "ブログ",
       description: "すべてのブログ記事一覧",
       empty: "記事がありません。",
+      browseCategories: "カテゴリ一覧",
+      browseTags: "タグ一覧",
     },
     nav: {
       blog: "ブログ",
@@ -33,9 +35,16 @@ const dictionaries = {
     projects: {
       description: "個人プロジェクトやオープンソースの取り組み",
     },
+    category: {
+      title: "カテゴリ",
+      description: "すべてのカテゴリ一覧",
+      postCount: "{count}件の記事",
+    },
     tag: {
       title: "タグ",
       description: "「{tag}」タグが付いた記事一覧",
+      indexTitle: "タグ",
+      indexDescription: "すべてのタグ一覧",
     },
     share: {
       label: "共有する",
@@ -83,6 +92,8 @@ const dictionaries = {
       title: "Blog",
       description: "All blog posts",
       empty: "No posts found.",
+      browseCategories: "Categories",
+      browseTags: "Tags",
     },
     nav: {
       blog: "Blog",
@@ -95,9 +106,16 @@ const dictionaries = {
     projects: {
       description: "Personal projects and open-source work",
     },
+    category: {
+      title: "Categories",
+      description: "Browse all categories",
+      postCount: "{count} post(s)",
+    },
     tag: {
       title: "Tag",
       description: 'Posts tagged with "{tag}"',
+      indexTitle: "Tags",
+      indexDescription: "Browse all tags",
     },
     share: {
       label: "Share this post",

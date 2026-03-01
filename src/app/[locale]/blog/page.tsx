@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import Link from "next/link";
 import { notFound } from "next/navigation";
 import { getPublishedPosts, getPaginatedPosts } from "@/lib/posts";
 import { PostList } from "@/components/blog/post-list";
@@ -46,6 +47,20 @@ export default async function BlogPage({ params, searchParams }: BlogPageProps) 
       <header className="mb-8">
         <h1 className="text-2xl font-bold tracking-tight md:text-3xl">{t.blog.title}</h1>
         <p className="mt-2 text-muted-foreground">{t.blog.description}</p>
+        <div className="mt-4 flex gap-3">
+          <Link
+            href={`/${locale}/category`}
+            className="inline-block rounded-full border border-border px-3 py-1 text-sm text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
+          >
+            {t.blog.browseCategories}
+          </Link>
+          <Link
+            href={`/${locale}/tag`}
+            className="inline-block rounded-full border border-border px-3 py-1 text-sm text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
+          >
+            {t.blog.browseTags}
+          </Link>
+        </div>
       </header>
       <PostList posts={posts} locale={locale} />
       <Pagination currentPage={currentPage} totalPages={totalPages} basePath={`/${locale}/blog`} locale={locale} />

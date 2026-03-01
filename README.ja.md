@@ -75,6 +75,10 @@ npm run test:e2e
 - `/ja/about` - 日本語 About ページ
 - `/en/search` - 英語検索ページ
 - `/ja/search` - 日本語検索ページ
+- `/en/category` - 英語カテゴリ一覧
+- `/ja/category` - 日本語カテゴリ一覧
+- `/en/tag` - 英語タグ一覧
+- `/ja/tag` - 日本語タグ一覧
 - `/en/tag/nextjs` - 英語タグ別一覧
 - `/ja/tag/nextjs` - 日本語タグ別一覧
 - `/en/feed.xml` - 英語 RSS フィード
@@ -253,12 +257,16 @@ src/
         page.tsx               # ブログ一覧 (ページネーション付き)
         [year]/[month]/[day]/[slug]/
           page.tsx             # 記事詳細 (SSG, JSON-LD に inLanguage 含む)
-      category/[slug]/
-        page.tsx               # カテゴリ別一覧 (ページネーション付き)
+      category/
+        page.tsx               # カテゴリ一覧 (全カテゴリ)
+        [slug]/
+          page.tsx             # カテゴリ別一覧 (ページネーション付き)
       search/
         page.tsx               # 検索ページ (クライアントサイドフィルタリング)
-      tag/[slug]/
-        page.tsx               # タグ別一覧 (ページネーション付き)
+      tag/
+        page.tsx               # タグ一覧 (全タグ)
+        [slug]/
+          page.tsx             # タグ別一覧 (ページネーション付き)
       ~offline/
         page.tsx               # オフラインフォールバック
   components/
