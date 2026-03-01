@@ -1,6 +1,6 @@
 import type { Metadata } from "next";
 import { notFound } from "next/navigation";
-import { getPublishedPosts, getPostBySlug } from "@/lib/posts";
+import { getPostBySlug } from "@/lib/posts";
 import { formatDate } from "@/lib/utils";
 import { MdxContent } from "@/components/mdx/mdx-content";
 import { CategoryBadge } from "@/components/blog/category-badge";
@@ -10,27 +10,13 @@ import { SITE_URL, AUTHOR } from "@/lib/constants";
 import { locales, isValidLocale, getDictionary } from "@/lib/i18n";
 import { extractHeadings } from "@/lib/toc";
 import { TableOfContents } from "@/components/blog/table-of-contents";
+import { generateBlogStaticParams } from "@/lib/blog-params";
 
 interface PostPageProps {
   params: Promise<{ locale: string; year: string; month: string; day: string; slug: string }>;
 }
 
-export async function generateStaticParams() {
-  const allParams: { locale: string; year: string; month: string; day: string; slug: string }[] = [];
-  for (const locale of locales) {
-    const posts = getPublishedPosts(locale);
-    for (const post of posts) {
-      allParams.push({
-        locale,
-        year: post.year,
-        month: post.month,
-        day: post.day,
-        slug: post.slugName,
-      });
-    }
-  }
-  return allParams;
-}
+export const generateStaticParams = generateBlogStaticParams;
 
 export async function generateMetadata({ params }: PostPageProps): Promise<Metadata> {
   const { locale, year, month, day, slug } = await params;
