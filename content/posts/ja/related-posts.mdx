@@ -1,0 +1,262 @@
+---
+title: "Next.js ブログに関連記事セクションを追加する"
+description: "ブログ記事ページの下部にカテゴリ・タグの共通性に基づいてスコアリングした関連記事を表示し、サイト内回遊を促進する機能を実装する手順を解説します。"
+date: 2026-03-02
+published: true
+categories:
+  - programming
+tags:
+  - nextjs
+  - blog
+---
+
+## 課題
+
+このブログの記事ページは `SocialShare` コンポーネントで終わっており、読者が次に読む記事を見つける手段がありませんでした。せっかくカテゴリやタグで記事を分類しているのに、関連記事への導線がないのはもったいない状態です。
+
+今回の対応で、記事ページの下部に**カテゴリ・タグの共通性に基づいてスコアリングした関連記事**を自動表示するセクションを追加しました。
+
+## 設計方針
+
+既存の `getPublishedPosts()` で同ロケールの公開記事を取得し、カテゴリとタグの共通数でスコアリングするシンプルなアプローチを採用しました。
+
+- **カテゴリ一致**: 重み 2（カテゴリはより大きな分類なので高めに）
+- **タグ一致**: 重み 1
+- **スコア 0 の記事は除外**（全く関連のない記事は表示しない）
+- **同点時は新しい記事を優先**
+- **デフォルト表示件数は 3 件**
+
+機械学習ベースのレコメンドや全文検索による類似度計算といった高度な手法は、この規模のブログではオーバーエンジニアリングです。メタデータベースのスコアリングで十分な精度が得られます。
+
+## getRelatedPosts() の実装
+
+`src/lib/posts.ts` に関連記事取得関数を追加します。
+
+```typescript title="src/lib/posts.ts"
+import type { Post } from "#site/content";
+
+export function getRelatedPosts(post: Post, limit = 3): Post[] {
+  const candidates = getPublishedPosts(post.locale as Locale).filter(
+    (p) => p.permalink !== post.permalink
+  );
+
+  const scored = candidates.map((p) => {
+    let score = 0;
+    for (const cat of p.categories) {
+      if (post.categories.includes(cat)) score += 2;
+    }
+    for (const tag of p.tags) {
+      if (post.tags.includes(tag)) score += 1;
+    }
+    return { post: p, score };
+  });
+
+  return scored
+    .filter((s) => s.score > 0)
+    .sort(
+      (a, b) =>
+        b.score - a.score ||
+        new Date(b.post.date).getTime() - new Date(a.post.date).getTime()
+    )
+    .slice(0, limit)
+    .map((s) => s.post);
+}
+```
+
+ポイントは以下の通りです。
+
+- `getPublishedPosts(post.locale)` で**同じロケールの記事のみ**を候補にする
+- `permalink` で自身を除外する
+- カテゴリ一致（+2）とタグ一致（+1）でスコアを計算
+- スコア降順 → 日付降順でソートし、上位 `limit` 件を返す
+- スコア 0 の記事は `filter` で除外するため、関連のない記事が表示されることはない
+
+## i18n 辞書の拡張
+
+`src/lib/i18n.ts` にセクション見出し用の辞書キーを追加します。
+
+```typescript title="src/lib/i18n.ts"
+const dictionaries = {
+  ja: {
+    relatedPosts: {
+      title: "関連記事",
+    },
+  },
+  en: {
+    relatedPosts: {
+      title: "Related Posts",
+    },
+  },
+} as const;
+```
+
+## RelatedPosts コンポーネント
+
+`src/components/blog/related-posts.tsx` を新規作成します。既存の `PostCard` コンポーネントを再利用し、最小限のコードで実装します。
+
+```tsx title="src/components/blog/related-posts.tsx"
+import type { Post } from "#site/content";
+import { PostCard } from "./post-card";
+import { getDictionary, type Locale } from "@/lib/i18n";
+
+interface RelatedPostsProps {
+  posts: Post[];
+  locale: Locale;
+}
+
+export function RelatedPosts({ posts, locale }: RelatedPostsProps) {
+  if (posts.length === 0) return null;
+
+  const t = getDictionary(locale);
+
+  return (
+    <section className="mt-12 border-t border-border pt-8">
+      <h2 className="mb-6 text-xl font-bold tracking-tight">
+        {t.relatedPosts.title}
+      </h2>
+      <div className="divide-y divide-border">
+        {posts.map((post) => (
+          <PostCard
+            key={post.permalink}
+            title={post.title}
+            description={post.description}
+            date={post.date}
+            permalink={post.permalink}
+            categories={post.categories}
+            tags={post.tags}
+            locale={locale}
+          />
+        ))}
+      </div>
+    </section>
+  );
+}
+```
+
+設計上のポイント:
+
+- **サーバーコンポーネント**として実装（`"use client"` 不要）。クライアント JavaScript を追加しない
+- **関連記事が 0 件の場合は `null` を返す**ため、セクション自体が非表示になる
+- `PostCard` を再利用することで、ブログ一覧ページと同じ見た目・情報量を保つ
+- `border-t` と `mt-12` で記事本文との視覚的な区切りを明確にする
+
+## 記事ページへの統合
+
+`src/app/[locale]/blog/[year]/[month]/[day]/[slug]/page.tsx` で `getRelatedPosts` を呼び出し、`<article>` の外に配置します。
+
+```tsx title="src/app/[locale]/blog/[year]/[month]/[day]/[slug]/page.tsx"
+import { getPostBySlug, getRelatedPosts } from "@/lib/posts";
+import { RelatedPosts } from "@/components/blog/related-posts";
+
+export default async function PostPage({ params }: PostPageProps) {
+  // ...既存のロジック
+  const post = getPostBySlug(year, month, day, slug, locale);
+  if (!post) notFound();
+
+  const relatedPosts = getRelatedPosts(post);
+
+  return (
+    <div className="mx-auto max-w-3xl px-4 py-6 md:py-12">
+      <article>
+        {/* ...既存の記事コンテンツ */}
+        <SocialShare url={`${SITE_URL}${post.permalink}`} title={post.title} locale={locale} />
+      </article>
+      <RelatedPosts posts={relatedPosts} locale={locale} />
+    </div>
+  );
+}
+```
+
+`<RelatedPosts>` を `<article>` の外に配置しているのは、セマンティクス上、関連記事は現在の記事のコンテンツではなくナビゲーション的な要素だからです。
+
+## テスト
+
+### ユニットテスト
+
+`getRelatedPosts()` のスコアリングロジックを網羅的にテストします。
+
+```typescript title="__tests__/lib/posts.test.ts"
+describe("getRelatedPosts", () => {
+  const firstPost = getPostBySlug("2026", "01", "15", "first-post", "en")!;
+
+  it("does not include the post itself", () => {
+    const related = getRelatedPosts(firstPost);
+    expect(related.find((p) => p.permalink === firstPost.permalink)).toBeUndefined();
+  });
+
+  it("returns only same-locale posts", () => {
+    const related = getRelatedPosts(firstPost);
+    expect(related.every((p) => p.locale === "en")).toBe(true);
+  });
+
+  it("prioritizes category matches over tag matches", () => {
+    const related = getRelatedPosts(firstPost);
+    expect(related[0].slugName).toBe("second-post");
+  });
+
+  it("excludes posts with score 0", () => {
+    const related = getRelatedPosts(firstPost);
+    expect(related.find((p) => p.slugName === "unrelated-post")).toBeUndefined();
+  });
+
+  it("respects the limit parameter", () => {
+    const related = getRelatedPosts(firstPost, 1);
+    expect(related.length).toBeLessThanOrEqual(1);
+  });
+
+  it("returns empty array when no related posts exist", () => {
+    const unrelatedPost = getPublishedPosts("en").find(
+      (p) => p.slugName === "unrelated-post"
+    )!;
+    const related = getRelatedPosts(unrelatedPost);
+    expect(related).toEqual([]);
+  });
+});
+```
+
+### コンポーネントテスト
+
+`RelatedPosts` の表示・非表示を検証します。
+
+```tsx title="__tests__/components/blog/related-posts.test.tsx"
+describe("RelatedPosts", () => {
+  it("renders nothing when posts array is empty", () => {
+    const { container } = render(<RelatedPosts posts={[]} locale="en" />);
+    expect(container.innerHTML).toBe("");
+  });
+
+  it("renders section with title when posts exist", () => {
+    render(<RelatedPosts posts={mockPosts} locale="en" />);
+    expect(screen.getByText("Related Posts")).toBeDefined();
+  });
+
+  it("renders Japanese title for ja locale", () => {
+    render(<RelatedPosts posts={mockPosts} locale="ja" />);
+    expect(screen.getByText("関連記事")).toBeDefined();
+  });
+});
+```
+
+## 変更ファイル一覧
+
+| 区分 | ファイル | 内容 |
+| --- | --- | --- |
+| 変更 | `src/lib/posts.ts` | `getRelatedPosts()` 関数を追加 |
+| 変更 | `src/lib/i18n.ts` | `relatedPosts` 辞書キーを追加 |
+| 新規 | `src/components/blog/related-posts.tsx` | 関連記事コンポーネント |
+| 変更 | `page.tsx` | 記事ページに関連記事セクションを統合 |
+| 変更 | `__tests__/__mocks__/velite.ts` | テスト用にスコア 0 の記事を追加 |
+| 変更 | `__tests__/lib/posts.test.ts` | `getRelatedPosts` のテスト（7件） |
+| 新規 | `__tests__/components/blog/related-posts.test.tsx` | コンポーネントテスト（4件） |
+
+新しい依存関係の追加はゼロです。
+
+## まとめ
+
+既存の `getPublishedPosts()` と `PostCard` を再利用し、最小限のコードで関連記事セクションを実装しました。
+
+- **スコアリング**: カテゴリ一致（重み2）+ タグ一致（重み1）のシンプルなロジック
+- **ゼロ件対応**: 関連記事がない場合はセクション自体を非表示
+- **バイリンガル対応**: i18n 辞書の拡張で日英両方をサポート
+- **クライアント JS 追加なし**: サーバーコンポーネントとして実装
+- **テスト完備**: スコアリングロジック・コンポーネント表示の両面をカバー
