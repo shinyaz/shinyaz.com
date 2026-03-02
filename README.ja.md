@@ -61,30 +61,20 @@ npm run test:e2e
 
 ### URL 構成
 
-全ページがロケールプレフィックス付きで配信されます:
+全ページがロケールプレフィックス付きで配信されます (`[locale]` = `en` | `ja`):
 
-- `/en/` - 英語ホーム
-- `/ja/` - 日本語ホーム
-- `/en/blog` - 英語ブログ一覧
-- `/ja/blog/2026/02/22/hello-world` - 日本語ブログ記事
-- `/en/projects` - 英語 Projects ページ
-- `/ja/projects` - 日本語 Projects ページ
-- `/en/uses` - 英語 Uses ページ
-- `/ja/uses` - 日本語 Uses ページ
-- `/en/about` - 英語 About ページ
-- `/ja/about` - 日本語 About ページ
-- `/en/search` - 英語検索ページ
-- `/ja/search` - 日本語検索ページ
-- `/en/category` - 英語カテゴリ一覧
-- `/ja/category` - 日本語カテゴリ一覧
-- `/en/tag` - 英語タグ一覧
-- `/ja/tag` - 日本語タグ一覧
-- `/en/tag/nextjs` - 英語タグ別一覧
-- `/ja/tag/nextjs` - 日本語タグ別一覧
-- `/en/feed.xml` - 英語 RSS フィード
-- `/ja/feed.xml` - 日本語 RSS フィード
-- `/en/atom.xml` - 英語 Atom フィード
-- `/ja/atom.xml` - 日本語 Atom フィード
+- `/[locale]/` - ホーム
+- `/[locale]/blog` - ブログ一覧
+- `/[locale]/blog/2026/02/22/hello-world` - ブログ記事
+- `/[locale]/projects` - Projects ページ
+- `/[locale]/uses` - Uses ページ
+- `/[locale]/about` - About ページ
+- `/[locale]/search` - 検索ページ
+- `/[locale]/category` - カテゴリ一覧
+- `/[locale]/tag` - タグ一覧
+- `/[locale]/tag/nextjs` - タグ別一覧
+- `/[locale]/feed.xml` - RSS フィード
+- `/[locale]/atom.xml` - Atom フィード
 
 ロケールプレフィックスなしで `/` にアクセスすると `/en` にリダイレクトされます (ブラウザの `Accept-Language` ヘッダーに `ja` が含まれる場合は `/ja`)。
 

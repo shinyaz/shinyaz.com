@@ -61,30 +61,20 @@ This blog supports Japanese (`ja`) and English (`en`) with English as the defaul
 
 ### URL Structure
 
-All pages are served under a locale prefix:
+All pages are served under a locale prefix (`[locale]` = `en` | `ja`):
 
-- `/en/` - English home
-- `/ja/` - Japanese home
-- `/en/blog` - English blog listing
-- `/ja/blog/2026/02/22/hello-world` - Japanese blog post
-- `/en/projects` - English projects page
-- `/ja/projects` - Japanese projects page
-- `/en/uses` - English uses page
-- `/ja/uses` - Japanese uses page
-- `/en/about` - English about page
-- `/ja/about` - Japanese about page
-- `/en/search` - English search page
-- `/ja/search` - Japanese search page
-- `/en/category` - English category index
-- `/ja/category` - Japanese category index
-- `/en/tag` - English tag index
-- `/ja/tag` - Japanese tag index
-- `/en/tag/nextjs` - English tag listing
-- `/ja/tag/nextjs` - Japanese tag listing
-- `/en/feed.xml` - English RSS feed
-- `/ja/feed.xml` - Japanese RSS feed
-- `/en/atom.xml` - English Atom feed
-- `/ja/atom.xml` - Japanese Atom feed
+- `/[locale]/` - Home
+- `/[locale]/blog` - Blog listing
+- `/[locale]/blog/2026/02/22/hello-world` - Blog post
+- `/[locale]/projects` - Projects page
+- `/[locale]/uses` - Uses page
+- `/[locale]/about` - About page
+- `/[locale]/search` - Search page
+- `/[locale]/category` - Category index
+- `/[locale]/tag` - Tag index
+- `/[locale]/tag/nextjs` - Tag listing
+- `/[locale]/feed.xml` - RSS feed
+- `/[locale]/atom.xml` - Atom feed
 
 Accessing `/` without a locale prefix redirects to `/en` (or `/ja` if the browser's `Accept-Language` header contains `ja`).
 
