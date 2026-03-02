@@ -263,7 +263,7 @@ src/
     layout/                    # Header, Footer, LanguageSwitcher
     theme/                     # ThemeProvider, ThemeToggle
     pwa/                       # SerwistProvider
-    blog/                      # PostCard, PostList, Pagination, CategoryBadge, TagBadge, SocialShare, TableOfContents
+    blog/                      # PostCard, PostList, Pagination, CategoryBadge, TagBadge, SocialShare, TableOfContents, RelatedPosts
     search/                    # SearchPageClient
     projects/                  # ProjectCard
     mdx/                       # MdxContent, MdxComponents
@@ -271,7 +271,7 @@ src/
   lib/
     i18n.ts                    # ロケール型, 辞書, getDictionary()
     constants.ts               # サイト URL, 著者名, 1ページあたり記事数, OG 画像パス, ソーシャルリンク
-    posts.ts                   # コンテンツクエリユーティリティ (ロケール対応)
+    posts.ts                   # コンテンツクエリユーティリティ (ロケール対応, getRelatedPosts() を含む)
     search.ts                  # クライアントサイド検索ロジック (AND マッチ, 大小文字区別なし)
     toc.ts                     # 目次用の見出し抽出
     feed.ts                    # RSS 2.0 / Atom 1.0 XML 生成

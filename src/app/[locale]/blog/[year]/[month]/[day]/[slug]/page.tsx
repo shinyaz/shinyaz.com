@@ -1,11 +1,12 @@
 import type { Metadata } from "next";
 import { notFound } from "next/navigation";
-import { getPostBySlug } from "@/lib/posts";
+import { getPostBySlug, getRelatedPosts } from "@/lib/posts";
 import { formatDate } from "@/lib/utils";
 import { MdxContent } from "@/components/mdx/mdx-content";
 import { CategoryBadge } from "@/components/blog/category-badge";
 import { TagBadge } from "@/components/blog/tag-badge";
 import { SocialShare } from "@/components/blog/social-share";
+import { RelatedPosts } from "@/components/blog/related-posts";
 import { SITE_URL, AUTHOR } from "@/lib/constants";
 import { locales, isValidLocale, getDictionary } from "@/lib/i18n";
 import { extractHeadings } from "@/lib/toc";
@@ -59,6 +60,7 @@ export default async function PostPage({ params }: PostPageProps) {
   if (!post) notFound();
 
   const headings = extractHeadings(post.content);
+  const relatedPosts = getRelatedPosts(post);
 
   const blogPostingJsonLd = {
     "@context": "https://schema.org",
@@ -155,6 +157,7 @@ export default async function PostPage({ params }: PostPageProps) {
           locale={locale}
         />
       </article>
+      <RelatedPosts posts={relatedPosts} locale={locale} />
     </div>
   );
 }

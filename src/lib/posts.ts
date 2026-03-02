@@ -1,4 +1,5 @@
 import { posts, categories, pages, projects } from "#site/content";
+import type { Post } from "#site/content";
 import { POSTS_PER_PAGE } from "./constants";
 import type { Locale } from "./i18n";
 
@@ -63,6 +64,33 @@ export function getAllTags(locale?: Locale) {
 
 export function getPostsByTag(tag: string, locale?: Locale) {
   return getPublishedPosts(locale).filter((post) => post.tags.includes(tag));
+}
+
+export function getRelatedPosts(post: Post, limit = 3): Post[] {
+  const candidates = getPublishedPosts(post.locale as Locale).filter(
+    (p) => p.permalink !== post.permalink
+  );
+
+  const scored = candidates.map((p) => {
+    let score = 0;
+    for (const cat of p.categories) {
+      if (post.categories.includes(cat)) score += 2;
+    }
+    for (const tag of p.tags) {
+      if (post.tags.includes(tag)) score += 1;
+    }
+    return { post: p, score };
+  });
+
+  return scored
+    .filter((s) => s.score > 0)
+    .sort(
+      (a, b) =>
+        b.score - a.score ||
+        new Date(b.post.date).getTime() - new Date(a.post.date).getTime()
+    )
+    .slice(0, limit)
+    .map((s) => s.post);
 }
 
 export function getPageBySlug(slug: string, locale?: Locale) {

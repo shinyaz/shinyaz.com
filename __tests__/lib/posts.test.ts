@@ -14,6 +14,7 @@ import {
   getAllCategories,
   getCategoryBySlug,
   getPageBySlug,
+  getRelatedPosts,
 } from "@/lib/posts";
 
 describe("getPublishedPosts", () => {
@@ -214,6 +215,53 @@ describe("getCategoryBySlug", () => {
 
   it("returns undefined for non-existent slug", () => {
     expect(getCategoryBySlug("nope")).toBeUndefined();
+  });
+});
+
+describe("getRelatedPosts", () => {
+  const firstPost = getPostBySlug("2026", "01", "15", "first-post", "en")!;
+  const jaPost = getPostBySlug("2026", "02", "20", "japanese-post", "ja")!;
+
+  it("does not include the post itself", () => {
+    const related = getRelatedPosts(firstPost);
+    expect(related.find((p) => p.permalink === firstPost.permalink)).toBeUndefined();
+  });
+
+  it("returns only same-locale posts", () => {
+    const related = getRelatedPosts(firstPost);
+    expect(related.every((p) => p.locale === "en")).toBe(true);
+  });
+
+  it("prioritizes category matches over tag matches", () => {
+    // first-post: categories=["programming"], tags=["typescript","react"]
+    // second-post: categories=["programming"], tags=["docker","container"] → score = 2
+    // unrelated-post: categories=["devops"], tags=["kubernetes"] → score = 0
+    const related = getRelatedPosts(firstPost);
+    expect(related.length).toBeGreaterThan(0);
+    expect(related[0].slugName).toBe("second-post");
+  });
+
+  it("excludes posts with score 0", () => {
+    const related = getRelatedPosts(firstPost);
+    expect(related.find((p) => p.slugName === "unrelated-post")).toBeUndefined();
+  });
+
+  it("respects the limit parameter", () => {
+    const related = getRelatedPosts(firstPost, 1);
+    expect(related.length).toBeLessThanOrEqual(1);
+  });
+
+  it("returns empty array when no related posts exist", () => {
+    const unrelatedPost = getPublishedPosts("en").find(
+      (p) => p.slugName === "unrelated-post"
+    )!;
+    const related = getRelatedPosts(unrelatedPost);
+    expect(related).toEqual([]);
+  });
+
+  it("works for Japanese locale posts", () => {
+    const related = getRelatedPosts(jaPost);
+    expect(related.every((p) => p.locale === "ja")).toBe(true);
   });
 });
 
