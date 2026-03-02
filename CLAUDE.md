@@ -23,6 +23,7 @@ When modifying code, you **must** perform these steps before considering the tas
    - If the change is limited to content files (`content/`), styling only, or configuration that doesn't alter runtime logic, tests may be skipped.
 2. **Lint:** Run `npm run lint` and fix all errors.
 3. **Build:** Run `npm run build` and confirm it succeeds with no errors or warnings.
+   - If the build fails due to transient network errors (e.g., Google Fonts fetch failures from `fonts.gstatic.com`), clear the cache with `rm -rf .next` and retry. Retry up to 3 times before treating it as a real failure.
 4. **README update:** If the change affects architecture, directory structure, commands, dependencies, or user-facing behavior, update both `README.md` and `README.ja.md`.
 
 ## Architecture

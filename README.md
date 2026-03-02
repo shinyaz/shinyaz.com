@@ -263,7 +263,7 @@ src/
     layout/                    # Header, Footer, LanguageSwitcher
     theme/                     # ThemeProvider, ThemeToggle
     pwa/                       # SerwistProvider
-    blog/                      # PostCard, PostList, Pagination, CategoryBadge, TagBadge, SocialShare, TableOfContents
+    blog/                      # PostCard, PostList, Pagination, CategoryBadge, TagBadge, SocialShare, TableOfContents, RelatedPosts
     search/                    # SearchPageClient
     projects/                  # ProjectCard
     mdx/                       # MdxContent, MdxComponents
@@ -271,7 +271,7 @@ src/
   lib/
     i18n.ts                    # Locale types, dictionaries, getDictionary()
     constants.ts               # Site URL, author, posts per page, OG image path, social links
-    posts.ts                   # Content query utilities (locale-aware)
+    posts.ts                   # Content query utilities (locale-aware, includes getRelatedPosts())
     search.ts                  # Client-side search logic (AND match, case-insensitive)
     toc.ts                     # Table of contents heading extraction
     feed.ts                    # RSS 2.0 / Atom 1.0 XML generation

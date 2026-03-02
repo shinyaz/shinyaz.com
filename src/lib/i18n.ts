@@ -74,6 +74,9 @@ const dictionaries = {
     toc: {
       title: "目次",
     },
+    relatedPosts: {
+      title: "関連記事",
+    },
     about: {
       authorName: "田原 慎也",
     },
@@ -147,6 +150,9 @@ const dictionaries = {
     },
     toc: {
       title: "Table of Contents",
+    },
+    relatedPosts: {
+      title: "Related Posts",
     },
     about: {
       authorName: "Shinya Tahara",
