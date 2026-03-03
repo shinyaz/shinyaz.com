@@ -11,6 +11,7 @@ import { SITE_URL, AUTHOR } from "@/lib/constants";
 import { locales, isValidLocale, getDictionary } from "@/lib/i18n";
 import { extractHeadings } from "@/lib/toc";
 import { TableOfContents } from "@/components/blog/table-of-contents";
+import { ProfileCard } from "@/components/common/profile-card";
 import { generateBlogStaticParams } from "@/lib/blog-params";
 
 interface PostPageProps {
@@ -157,6 +158,9 @@ export default async function PostPage({ params }: PostPageProps) {
           locale={locale}
         />
       </article>
+      <div className="mt-12">
+        <ProfileCard locale={locale} />
+      </div>
       <RelatedPosts posts={relatedPosts} locale={locale} />
     </div>
   );
