@@ -12,13 +12,13 @@ export function ProfileCard({ locale }: ProfileCardProps) {
 
   return (
     <section className="rounded-lg border border-border bg-card p-6">
-      <div className="flex gap-4 sm:gap-5">
+      <div className="flex flex-col gap-4 sm:flex-row sm:gap-5">
         <Image
           src="/images/profile.jpeg"
           alt={t.about.authorName}
           width={80}
           height={80}
-          className="h-16 w-16 shrink-0 rounded-full object-cover sm:h-20 sm:w-20"
+          className="h-20 w-20 shrink-0 rounded-full object-cover"
         />
         <div className="min-w-0 space-y-2">
           <div>
