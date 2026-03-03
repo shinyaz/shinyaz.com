@@ -16,6 +16,10 @@ const dictionaries = {
       subtitle: "技術に関するメモや学びを記録するブログです。",
       latestPosts: "最新記事",
       allPosts: "すべての記事",
+      aboutRole: "ソリューションアーキテクト @ AWS",
+      aboutBio:
+        "AWS ソリューションアーキテクトとして金融業界のお客様を中心に技術支援を行っています。クラウドアーキテクチャや AI/ML に関する学びをこのブログで発信しています。",
+      aboutReadMore: "もっと見る",
     },
     blog: {
       title: "ブログ",
@@ -93,6 +97,10 @@ const dictionaries = {
       subtitle: "A blog where I record notes and learnings about technology.",
       latestPosts: "Latest Posts",
       allPosts: "All Posts",
+      aboutRole: "Solutions Architect @ AWS",
+      aboutBio:
+        "I'm a Solutions Architect at AWS, providing technical guidance primarily to financial industry customers. I share learnings about cloud architecture and AI/ML on this blog.",
+      aboutReadMore: "Read more",
     },
     blog: {
       title: "Blog",
