@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { getPublishedPosts } from "@/lib/posts";
 import { PostList } from "@/components/blog/post-list";
+import { ProfileCard } from "@/components/common/profile-card";
 import { getDictionary, isValidLocale } from "@/lib/i18n";
 import { SITE_URL } from "@/lib/constants";
 import { buildAlternateLanguages } from "@/lib/seo";
@@ -37,7 +38,8 @@ export default async function HomePage({ params }: HomePageProps) {
           {t.home.subtitle}
         </p>
       </section>
-      <section>
+      <ProfileCard locale={locale} />
+      <section className="mt-8 md:mt-12">
         <div className="flex items-center justify-between mb-4">
           <h2 className="text-xl font-semibold">{t.home.latestPosts}</h2>
           <Link href={`/${locale}/blog`} className="text-sm text-muted-foreground hover:text-foreground transition-colors">
