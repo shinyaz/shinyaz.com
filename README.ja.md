@@ -66,6 +66,8 @@ npm run test:e2e
 - `/[locale]/` - ホーム
 - `/[locale]/blog` - ブログ一覧
 - `/[locale]/blog/2026/02/22/hello-world` - ブログ記事
+- `/[locale]/til` - TIL 一覧
+- `/[locale]/til/2026/03/07/nextjs-use-cache-directive` - TIL エントリ
 - `/[locale]/projects` - Projects ページ
 - `/[locale]/uses` - Uses ページ
 - `/[locale]/about` - About ページ
@@ -95,6 +97,13 @@ content/posts/
   ja/
     hello-world.mdx
     docker-basics.mdx
+    ...
+content/tils/
+  en/
+    nextjs-use-cache-directive.mdx
+    ...
+  ja/
+    nextjs-use-cache-directive.mdx
     ...
 content/pages/
   en/
@@ -145,6 +154,27 @@ tags:
 ```
 
 ファイル名が URL スラッグになります (例: `hello-world.mdx` -> `/ja/blog/2026/01/01/hello-world`)。翻訳版を作成するには、もう一方のロケールディレクトリに同名ファイルを配置します。
+
+### TIL エントリの書き方
+
+`content/tils/en/` または `content/tils/ja/` に `.mdx` ファイルを作成します:
+
+```markdown
+---
+title: "今日学んだこと"
+description: "簡単な説明。"   # 任意
+date: 2026-03-07
+published: true
+tags:
+  - nextjs
+---
+
+TIL の本文をここに書きます。**Markdown** とコードブロックが使えます。
+```
+
+TIL はブログ記事よりシンプルです。カテゴリ・featured フラグ・カバー画像・更新日は不要です。ファイル名が URL スラッグになります (例: `nextjs-use-cache-directive.mdx` -> `/ja/til/2026/03/07/nextjs-use-cache-directive`)。
+
+TIL エントリは `/[locale]/search` の検索対象にも含まれます。
 
 ### 固定ページの書き方
 
@@ -248,6 +278,10 @@ src/
         page.tsx               # ブログ一覧 (ページネーション付き)
         [year]/[month]/[day]/[slug]/
           page.tsx             # 記事詳細 (SSG, JSON-LD に inLanguage 含む)
+      til/
+        page.tsx               # TIL 一覧 (ページネーション付き)
+        [year]/[month]/[day]/[slug]/
+          page.tsx             # TIL エントリ詳細
       category/
         page.tsx               # カテゴリ一覧 (全カテゴリ)
         [slug]/
@@ -272,8 +306,9 @@ src/
   lib/
     i18n.ts                    # ロケール型, 辞書, getDictionary()
     constants.ts               # サイト URL, 著者名, 1ページあたり記事数, OG 画像パス, ソーシャルリンク
-    posts.ts                   # コンテンツクエリユーティリティ (ロケール対応, getRelatedPosts() を含む)
-    search.ts                  # クライアントサイド検索ロジック (AND マッチ, 大小文字区別なし)
+    posts.ts                   # ブログクエリユーティリティ (ロケール対応, getRelatedPosts() を含む)
+    tils.ts                    # TIL クエリユーティリティ (ロケール対応)
+    search.ts                  # クライアントサイド検索ロジック (AND マッチ, 大小文字区別なし, 記事と TIL を対象)
     toc.ts                     # 目次用の見出し抽出
     feed.ts                    # RSS 2.0 / Atom 1.0 XML 生成
     seo.ts                     # SEO ヘルパー (hreflang alternate ビルダー)
@@ -282,6 +317,9 @@ content/
   posts/
     en/                        # 英語記事 (MDX)
     ja/                        # 日本語記事 (MDX)
+  tils/
+    en/                        # 英語 TIL エントリ (MDX)
+    ja/                        # 日本語 TIL エントリ (MDX)
   pages/
     en/                        # 英語固定ページ (MDX)
     ja/                        # 日本語固定ページ (MDX)

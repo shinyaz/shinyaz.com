@@ -96,6 +96,42 @@ const projects = defineCollection({
   }),
 });
 
+const tils = defineCollection({
+  name: "TIL",
+  pattern: "tils/**/*.mdx",
+  schema: s
+    .object({
+      title: s.string().max(200),
+      description: s.string().max(500).optional(),
+      date: s.isodate(),
+      published: s.boolean().default(true),
+      tags: s.array(s.string()).default([]),
+      filePath: s.path(),
+      metadata: s.metadata(),
+      content: s.markdown(),
+      body: s.mdx(),
+    })
+    .transform((data) => {
+      // filePath is like "tils/ja/nextjs-use-cache-directive"
+      const pathSegments = data.filePath.split("/");
+      const locale = pathSegments[1] as "ja" | "en";
+      const slugName = pathSegments[pathSegments.length - 1];
+      const dateObj = new Date(data.date);
+      const year = dateObj.getFullYear().toString();
+      const month = (dateObj.getMonth() + 1).toString().padStart(2, "0");
+      const day = dateObj.getDate().toString().padStart(2, "0");
+      return {
+        ...data,
+        locale,
+        slugName,
+        year,
+        month,
+        day,
+        permalink: `/${locale}/til/${year}/${month}/${day}/${slugName}`,
+      };
+    }),
+});
+
 export default defineConfig({
   root: "content",
   output: {
@@ -105,7 +141,7 @@ export default defineConfig({
     name: "[name]-[hash:6].[ext]",
     clean: true,
   },
-  collections: { posts, categories, pages, projects },
+  collections: { posts, categories, pages, projects, tils },
   markdown: {
     rehypePlugins: [rehypeSlug],
   },

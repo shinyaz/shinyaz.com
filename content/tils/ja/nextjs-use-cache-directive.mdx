@@ -1,0 +1,33 @@
+---
+title: "Next.js の 'use cache' ディレクティブでコンポーネントレベルのキャッシュが可能"
+description: "'use cache' ディレクティブを使うと、任意の非同期関数やコンポーネントの出力をキャッシュできます。fetch レベルのキャッシュオプションに代わる新しい仕組みです。"
+date: 2026-03-07
+published: true
+tags:
+  - nextjs
+  - caching
+---
+
+Next.js 15 以降では、任意の非同期関数や Server Component の先頭に `"use cache"` を追加することで、その出力をキャッシュできます:
+
+```tsx
+async function getData() {
+  "use cache";
+  const res = await fetch("https://api.example.com/data");
+  return res.json();
+}
+```
+
+これは従来の `fetch(..., { next: { revalidate: 60 } })` パターンを置き換えるもので、`fetch` に限らずあらゆる非同期ロジックに使えます。`cacheLife` でキャッシュ期間を制御することも可能です:
+
+```tsx
+import { cacheLife } from "next/cache";
+
+async function getData() {
+  "use cache";
+  cacheLife("hours");
+  // ...
+}
+```
+
+定義済みプロファイル: `"seconds"`, `"minutes"`, `"hours"`, `"days"`, `"weeks"`, `"max"`。

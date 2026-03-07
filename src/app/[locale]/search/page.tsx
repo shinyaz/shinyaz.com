@@ -2,6 +2,7 @@ import { Suspense } from "react";
 import type { Metadata } from "next";
 import { notFound } from "next/navigation";
 import { getPublishedPosts } from "@/lib/posts";
+import { getPublishedTils } from "@/lib/tils";
 import { getDictionary, isValidLocale, locales } from "@/lib/i18n";
 import { SITE_URL } from "@/lib/constants";
 import { buildAlternateLanguages } from "@/lib/seo";
@@ -38,14 +39,25 @@ export default async function SearchPage({ params }: SearchPageProps) {
   const t = getDictionary(locale);
 
   const allPosts = getPublishedPosts(locale);
-  const searchablePosts: SearchablePost[] = allPosts.map((post) => ({
-    title: post.title,
-    description: post.description,
-    date: post.date,
-    permalink: post.permalink,
-    categories: post.categories,
-    tags: post.tags,
-  }));
+  const allTils = getPublishedTils(locale);
+  const searchablePosts: SearchablePost[] = [
+    ...allPosts.map((post) => ({
+      title: post.title,
+      description: post.description,
+      date: post.date,
+      permalink: post.permalink,
+      categories: post.categories,
+      tags: post.tags,
+    })),
+    ...allTils.map((til) => ({
+      title: til.title,
+      description: til.description,
+      date: til.date,
+      permalink: til.permalink,
+      categories: [] as string[],
+      tags: til.tags,
+    })),
+  ].sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
 
   return (
     <div className="mx-auto max-w-3xl px-4 py-6 md:py-12">
