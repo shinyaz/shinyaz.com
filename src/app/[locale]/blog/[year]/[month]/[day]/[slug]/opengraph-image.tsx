@@ -62,7 +62,7 @@ export default async function OgImage({ params }: Props) {
         date={formattedDate}
         category={categoryName}
         author={AUTHOR}
-        siteName="shinyaz.com"
+        siteName="@shinyaz"
         locale={locale}
       />
     ),

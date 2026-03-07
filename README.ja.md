@@ -1,4 +1,4 @@
-# shinyaz.com
+# @shinyaz
 
 [English / 英語](./README.md)
 

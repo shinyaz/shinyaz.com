@@ -183,10 +183,10 @@ export const tils = [
 
 export const projects = [
   {
-    name: "shinyaz.com",
+    name: "@shinyaz",
     slug: "shinyaz-com",
     description: "Personal tech blog built with Next.js.",
-    nameJa: "shinyaz.com",
+    nameJa: "@shinyaz",
     descriptionJa: "Next.jsで構築した個人技術ブログ。",
     url: "https://shinyaz.com",
     github: "https://github.com/shinyaz/shinyaz.com",

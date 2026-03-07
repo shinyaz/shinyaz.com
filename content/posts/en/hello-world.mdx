@@ -56,12 +56,12 @@ I deliberately avoided libraries like `next-intl` or `react-i18next`. For a stat
 ```typescript title="src/lib/i18n.ts"
 const dictionaries = {
   ja: {
-    site: { name: "shinyaz.com", description: "..." },
+    site: { name: "@shinyaz", description: "..." },
     nav: { home: "ホーム", blog: "ブログ", ... },
     // ...
   },
   en: {
-    site: { name: "shinyaz.com", description: "..." },
+    site: { name: "@shinyaz", description: "..." },
     nav: { home: "Home", blog: "Blog", ... },
     // ...
   },
@@ -80,7 +80,7 @@ Tailwind CSS v4's CSS-first configuration made theming clean. All color tokens a
 
 ```typescript title="example.ts"
 function greet(name: string): string {
-  return `Hello, ${name}! Welcome to shinyaz.com.`;
+  return `Hello, ${name}! Welcome to @shinyaz.`;
 }
 
 console.log(greet("World"));
