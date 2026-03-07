@@ -1,0 +1,160 @@
+---
+title: "CLAUDE.md でAIコーディングアシスタントを最大活用する"
+description: "Claude Code（claude.ai/code）にプロジェクト固有のコンテキストを提供するCLAUDE.mdファイルの設計と実装。AIとの協働を効率化する実践的なガイドライン。"
+date: 2026-03-07
+published: true
+featured: false
+categories:
+  - programming
+tags:
+  - ai
+  - claude
+  - dx
+  - documentation
+---
+
+## 課題：AIアシスタントにプロジェクトのコンテキストが伝わらない
+
+Claude CodeやGitHub Copilotなど、AIコーディングアシスタントを使っていて「なぜそんなコードを生成するんだ」と思ったことはないだろうか。私のNext.jsブログでも、Claude Codeが提案するコードがプロジェクトの規約と合わないことが頻繁にあった。Tailwind CSS v4を使っているのにv3の書き方を提案したり、Veliteのコンテンツ構造を理解せずにファイルを直接読もうとしたり。
+
+問題の根本は、**AIにプロジェクト固有のコンテキストが不足している**ことだ。READMEはユーザー向けの説明であり、AIが必要とする技術的な詳細やコーディング規約は含まれていない。そこで導入したのが`CLAUDE.md`ファイル — Claude Codeがリポジトリのコンテキストを理解し、プロジェクトの規約に従ったコードを生成するための専用ガイドラインだ。
+
+## CLAUDE.md の構成と設計思想
+
+CLAUDE.mdは単なるドキュメントではなく、**AIとの協働を最適化するためのインターフェース**として設計した。全体を5つのセクションに構成し、AIが必要とする情報に素早くアクセスできるようにしている。
+
+### 1. Quick Reference — 即座に必要な情報
+
+```markdown title="CLAUDE.md（一部抜粋）"
+## Quick Reference
+
+### Commands
+```bash
+npm run dev          # Dev server (http://localhost:3000)
+npm run build        # Production build (next build --turbopack)
+npm start            # Start production server
+npm run lint         # ESLint + Prettier check
+npm test             # Unit/component tests (Vitest)
+npm run test:e2e     # E2E tests (Playwright, requires build)
+```
+
+### Code Change Checklist
+When modifying code, complete these steps in order:
+1. **Run tests if applicable:**
+   - `src/lib/` or `src/components/` changes → `npm test`
+   - Routing, pages, or i18n changes → `npm run test:e2e`
+```
+
+最初のセクションには、AIが頻繁に参照する情報を配置した。コマンドの一覧と、コード変更時の必須チェックリストだ。これにより、Claude Codeは「ビルドコマンドは何か」「テストはどう実行するか」といった基本的な質問に対して、正確な回答を即座に提供できる。
+
+### 2. Architecture — システムの全体像
+
+アーキテクチャセクションでは、**表形式とフロー図**を活用して視覚的に理解しやすくした。
+
+```markdown title="CLAUDE.md（Tech Stack部分）"
+### Tech Stack
+
+| Layer | Technology | Purpose |
+|-------|------------|---------|
+| **Framework** | Next.js 16 (App Router) | React framework with SSG support |
+| **Content** | Velite + MDX | Static content generation from Markdown |
+| **Styling** | Tailwind CSS v4 | Utility-first CSS with theme tokens |
+| **i18n** | Custom implementation | TypeScript dictionaries, no external lib |
+```
+
+特に重要なのは、**Content Pipeline**の説明だ。VeliteがMDXファイルをどのように処理し、Next.jsがどのように消費するかを、ディレクトリ構造とフロー図で明確に示している。これにより、Claude Codeは「新しいブログ記事を追加したい」という要求に対して、適切なディレクトリにMDXファイルを作成し、正しいfrontmatterを設定できる。
+
+### 3. Testing — テスト戦略の明確化
+
+```markdown title="CLAUDE.md（Test Conventions部分）"
+### Test Conventions
+
+- Mock `#site/content` → `__tests__/__mocks__/velite.ts`
+- New functions in `src/lib/` → add tests in `__tests__/lib/`
+- Component changes → add tests in `__tests__/components/<subdirectory>/`
+- Page/routing changes → add E2E tests in `e2e/`
+```
+
+テストセクションでは、**どの変更にどのテストが必要か**を明確にルール化した。これにより、Claude Codeは新しい機能を実装する際に、適切なテストも一緒に生成してくれる。
+
+### 4. Content Writing — スタイルガイドの統合
+
+このブログの大きな特徴の一つが、詳細なコンテンツスタイルガイドだ。CLAUDE.mdには、ブログ記事とTILエントリーの書き方を具体例と共に記載している。
+
+```markdown title="CLAUDE.md（Blog Post Structure）"
+### Blog Posts (`content/posts/{en,ja}/`)
+
+**Structure:**
+1. **Hook** (1–2 paragraphs) — Start with the problem or outcome
+2. **Body** — Logical sections with descriptive headings
+3. **Closing** — Transferable insights in 3–4 bullets
+
+**Voice:** First person ("I discovered"), share opinions, acknowledge limitations
+```
+
+これにより、Claude Codeに「この内容でブログ記事を書いて」と依頼すると、プロジェクトのスタイルガイドに準拠した記事を生成してくれる。タイトルの付け方、説明文の書き方、コードブロックの記法まで、すべて統一された形式で出力される。
+
+### 5. Development Guidelines — プロジェクト固有の規約
+
+最後のセクションでは、このプロジェクト特有の開発方針を明文化した。
+
+```markdown title="CLAUDE.md（Project-Specific Practices）"
+### Project-Specific Practices
+
+**This blog's patterns:**
+- **Content-first development** — Features exist to enhance content, not vice versa
+- **Progressive enhancement** — Core content readable without JavaScript
+- **Bilingual parity** — Features must work equally well in both locales
+- **Static-first** — Prefer build-time generation over runtime computation
+```
+
+これらの原則により、Claude Codeは単に動作するコードではなく、**プロジェクトの思想に沿ったコード**を生成する。例えば、新しい機能を実装する際も「JavaScriptが無効でもコンテンツが読めるか」「日英両方で同じように動作するか」を考慮した実装を提案してくれる。
+
+## 実際の効果：AIとの協働が劇的に改善
+
+CLAUDE.mdを導入してから、Claude Codeとの協働が劇的に改善した。具体的な効果を3つ紹介する。
+
+### 1. 正確なコマンド実行
+
+以前は「テストを実行して」と依頼すると、`npm run test`や`jest`など、プロジェクトに存在しないコマンドを提案することがあった。CLAUDE.md導入後は、常に正しいコマンド（`npm test`）を使用し、さらに変更内容に応じて適切なテスト（単体テストかE2Eテストか）を選択するようになった。
+
+### 2. 規約に準拠したコード生成
+
+Tailwind CSS v4の新しい記法、Veliteのコンテンツ構造、Server Componentsの使い分けなど、プロジェクト固有の技術スタックを正確に理解してコードを生成するようになった。特に、`#site/content`エイリアスの存在を理解し、Veliteが生成したコンテンツを適切にインポートできるようになったのは大きな改善だ。
+
+### 3. スタイルガイドに沿ったコンテンツ作成
+
+ブログ記事やTILエントリーの作成を依頼すると、タイトルの付け方、frontmatterの構成、本文の構造まで、すべてスタイルガイドに準拠した形で生成される。「具体的でアウトカム指向のタイトル」「第一人称での執筆」「transferable insightsでの締めくくり」など、細かい規約もきちんと反映される。
+
+## 実装のポイント：効果的なCLAUDE.mdの書き方
+
+CLAUDE.mdを書く際に意識した3つのポイントがある。
+
+### 1. 具体例を豊富に含める
+
+抽象的な説明より、具体的なコード例やコマンド例の方がAIには理解しやすい。「テストを書く」ではなく「`src/lib/`の変更なら`__tests__/lib/`にテストを追加」のように、具体的なパスとアクションを示す。
+
+### 2. 表とフロー図を活用する
+
+複雑な情報は、箇条書きより表やフロー図の方が構造を理解しやすい。Tech Stackの表、Content Pipelineのフロー図など、視覚的な表現を積極的に使用した。
+
+### 3. "Why"を明記する
+
+単なるルールの羅列ではなく、その背景にある理由も記載する。「Content-first development」の原則があるのはなぜか、「No external i18n library」を選択した理由は何か。これにより、AIは表面的なルールだけでなく、プロジェクトの思想を理解して適切な判断ができる。
+
+## CLAUDE.mdの限界と今後の展望
+
+CLAUDE.mdは万能ではない。現時点での限界もある。
+
+まず、**メンテナンスコスト**の問題だ。プロジェクトの構造が変わるたびにCLAUDE.mdも更新する必要がある。これを怠ると、AIに誤った情報を与えることになる。現在は、アーキテクチャ変更時にCLAUDE.mdの更新も必須タスクとしてチェックリストに含めることで対応している。
+
+また、**AIモデルによる理解度の差**もある。Claude Code向けに最適化されたガイドラインが、他のAIアシスタントでも同じように機能するとは限らない。将来的には、複数のAIアシスタントに対応した、より汎用的なフォーマットが必要になるかもしれない。
+
+## まとめ
+
+- **CLAUDE.mdはAIとの協働を最適化するインターフェース** — READMEとは異なり、AIが必要とする技術的詳細とコーディング規約を提供する専用ファイル。
+- **5つのセクションで構造化** — Quick Reference、Architecture、Testing、Content Writing、Development Guidelinesに整理し、AIが必要な情報に素早くアクセスできるように設計。
+- **具体例と視覚的表現が効果的** — 抽象的な説明より、コード例、コマンド例、表、フロー図を使った具体的な説明の方がAIには理解しやすい。
+- **メンテナンスは必須だが効果は大きい** — 更新の手間はあるが、AIとの協働効率が劇的に向上し、プロジェクトの規約に準拠したコード生成が可能になる。
+
+AIコーディングアシスタントを使っているなら、ぜひCLAUDE.mdの導入を検討してみてほしい。最初は簡単なコマンドリストとアーキテクチャの説明から始めて、徐々に充実させていけばいい。AIとの協働が、きっと今より快適になるはずだ。

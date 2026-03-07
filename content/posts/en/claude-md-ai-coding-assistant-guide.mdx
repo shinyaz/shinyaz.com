@@ -1,0 +1,160 @@
+---
+title: "Maximizing AI Coding Assistants with CLAUDE.md"
+description: "How to design and implement a CLAUDE.md file that provides project-specific context to Claude Code (claude.ai/code). A practical guide to more efficient AI collaboration."
+date: 2026-03-07
+published: true
+featured: false
+categories:
+  - programming
+tags:
+  - ai
+  - claude
+  - dx
+  - documentation
+---
+
+## The Problem: AI Assistants Lack Project Context
+
+Ever wondered why Claude Code or GitHub Copilot sometimes generates code that feels completely off? In my Next.js blog, Claude Code would frequently suggest patterns that didn't match our project conventions. It would propose Tailwind CSS v3 syntax when we're using v4, or try to read files directly instead of understanding our Velite content structure.
+
+The root issue is that **AI lacks project-specific context**. README files are written for human users and don't contain the technical details or coding conventions that AI needs. That's why I introduced `CLAUDE.md` — a dedicated guideline file that helps Claude Code understand repository context and generate code that follows project conventions.
+
+## CLAUDE.md Structure and Design Philosophy
+
+CLAUDE.md isn't just documentation — it's **an interface designed to optimize collaboration with AI**. I structured it into five sections, ensuring AI can quickly access the information it needs.
+
+### 1. Quick Reference — Immediately Needed Information
+
+```markdown title="CLAUDE.md (excerpt)"
+## Quick Reference
+
+### Commands
+```bash
+npm run dev          # Dev server (http://localhost:3000)
+npm run build        # Production build (next build --turbopack)
+npm start            # Start production server
+npm run lint         # ESLint + Prettier check
+npm test             # Unit/component tests (Vitest)
+npm run test:e2e     # E2E tests (Playwright, requires build)
+```
+
+### Code Change Checklist
+When modifying code, complete these steps in order:
+1. **Run tests if applicable:**
+   - `src/lib/` or `src/components/` changes → `npm test`
+   - Routing, pages, or i18n changes → `npm run test:e2e`
+```
+
+The first section contains information AI references frequently: command list and mandatory code change checklist. This enables Claude Code to instantly provide accurate answers to basic questions like "What's the build command?" or "How do I run tests?"
+
+### 2. Architecture — System Overview
+
+In the architecture section, I used **tables and flow diagrams** for visual clarity.
+
+```markdown title="CLAUDE.md (Tech Stack section)"
+### Tech Stack
+
+| Layer | Technology | Purpose |
+|-------|------------|---------|
+| **Framework** | Next.js 16 (App Router) | React framework with SSG support |
+| **Content** | Velite + MDX | Static content generation from Markdown |
+| **Styling** | Tailwind CSS v4 | Utility-first CSS with theme tokens |
+| **i18n** | Custom implementation | TypeScript dictionaries, no external lib |
+```
+
+The **Content Pipeline** explanation is particularly important. It clearly shows how Velite processes MDX files and how Next.js consumes them, using directory structure and flow diagrams. This enables Claude Code to properly create MDX files in the right directory with correct frontmatter when asked to "add a new blog post."
+
+### 3. Testing — Clear Test Strategy
+
+```markdown title="CLAUDE.md (Test Conventions section)"
+### Test Conventions
+
+- Mock `#site/content` → `__tests__/__mocks__/velite.ts`
+- New functions in `src/lib/` → add tests in `__tests__/lib/`
+- Component changes → add tests in `__tests__/components/<subdirectory>/`
+- Page/routing changes → add E2E tests in `e2e/`
+```
+
+The testing section clearly defines **which changes require which tests**. This helps Claude Code generate appropriate tests alongside new features.
+
+### 4. Content Writing — Integrated Style Guide
+
+One of this blog's key features is its detailed content style guide. CLAUDE.md includes writing guidelines for blog posts and TIL entries with concrete examples.
+
+```markdown title="CLAUDE.md (Blog Post Structure)"
+### Blog Posts (`content/posts/{en,ja}/`)
+
+**Structure:**
+1. **Hook** (1–2 paragraphs) — Start with the problem or outcome
+2. **Body** — Logical sections with descriptive headings
+3. **Closing** — Transferable insights in 3–4 bullets
+
+**Voice:** First person ("I discovered"), share opinions, acknowledge limitations
+```
+
+When I ask Claude Code to "write a blog post about this topic," it generates content that adheres to the project's style guide. Everything from title formatting to description writing to code block notation follows a consistent format.
+
+### 5. Development Guidelines — Project-Specific Conventions
+
+The final section documents this project's unique development principles.
+
+```markdown title="CLAUDE.md (Project-Specific Practices)"
+### Project-Specific Practices
+
+**This blog's patterns:**
+- **Content-first development** — Features exist to enhance content, not vice versa
+- **Progressive enhancement** — Core content readable without JavaScript
+- **Bilingual parity** — Features must work equally well in both locales
+- **Static-first** — Prefer build-time generation over runtime computation
+```
+
+These principles help Claude Code generate not just working code, but **code that aligns with the project's philosophy**. When implementing new features, it considers questions like "Is content readable without JavaScript?" and "Does this work equally well in both Japanese and English?"
+
+## Real-World Impact: Dramatically Improved AI Collaboration
+
+Since introducing CLAUDE.md, collaboration with Claude Code has improved dramatically. Here are three specific improvements.
+
+### 1. Accurate Command Execution
+
+Previously, when asked to "run tests," Claude Code might suggest non-existent commands like `npm run test` or `jest`. After implementing CLAUDE.md, it consistently uses the correct command (`npm test`) and selects appropriate tests (unit vs E2E) based on the changes.
+
+### 2. Convention-Compliant Code Generation
+
+Claude Code now accurately understands project-specific tech stack details: Tailwind CSS v4's new syntax, Velite's content structure, and Server Component distinctions. Notably, it now understands the `#site/content` alias and properly imports Velite-generated content — a significant improvement.
+
+### 3. Style Guide-Compliant Content Creation
+
+When asked to create blog posts or TIL entries, everything from title formatting to frontmatter structure to body organization follows the style guide. It properly implements details like "specific and outcome-oriented titles," "first-person writing," and "closing with transferable insights."
+
+## Implementation Tips: Writing Effective CLAUDE.md
+
+Here are three key points I focused on when writing CLAUDE.md.
+
+### 1. Include Abundant Concrete Examples
+
+AI understands concrete code and command examples better than abstract descriptions. Instead of "write tests," specify "`src/lib/` changes → add tests in `__tests__/lib/`" with concrete paths and actions.
+
+### 2. Use Tables and Flow Diagrams
+
+Complex information is easier to understand in tables and flow diagrams than bullet points. I actively used visual representations like the Tech Stack table and Content Pipeline flow diagram.
+
+### 3. Explain the "Why"
+
+Don't just list rules — include the reasoning behind them. Why do we have a "Content-first development" principle? Why did we choose "No external i18n library"? This helps AI understand not just surface-level rules but the project's philosophy, enabling better decision-making.
+
+## CLAUDE.md Limitations and Future Outlook
+
+CLAUDE.md isn't perfect. It has current limitations.
+
+First, there's the **maintenance cost** issue. Every time the project structure changes, CLAUDE.md needs updating. Neglecting this means giving AI incorrect information. I currently address this by including CLAUDE.md updates as a mandatory task in our architecture change checklist.
+
+There's also **variance in AI model comprehension**. Guidelines optimized for Claude Code might not work equally well with other AI assistants. In the future, we might need a more universal format that works across multiple AI assistants.
+
+## Summary
+
+- **CLAUDE.md is an interface for optimizing AI collaboration** — Unlike README, it's a dedicated file providing technical details and coding conventions that AI needs.
+- **Structured in five sections** — Organized into Quick Reference, Architecture, Testing, Content Writing, and Development Guidelines for quick AI access to needed information.
+- **Concrete examples and visual representations are effective** — AI better understands concrete code examples, commands, tables, and flow diagrams than abstract descriptions.
+- **Maintenance is required but highly effective** — Despite the update overhead, AI collaboration efficiency improves dramatically, enabling convention-compliant code generation.
+
+If you're using AI coding assistants, definitely consider implementing CLAUDE.md. Start simple with a command list and architecture description, then gradually expand it. Your AI collaboration will surely become more comfortable.
