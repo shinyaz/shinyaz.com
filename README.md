@@ -66,6 +66,8 @@ All pages are served under a locale prefix (`[locale]` = `en` | `ja`):
 - `/[locale]/` - Home
 - `/[locale]/blog` - Blog listing
 - `/[locale]/blog/2026/02/22/hello-world` - Blog post
+- `/[locale]/til` - TIL listing
+- `/[locale]/til/2026/03/07/nextjs-use-cache-directive` - TIL entry
 - `/[locale]/projects` - Projects page
 - `/[locale]/uses` - Uses page
 - `/[locale]/about` - About page
@@ -95,6 +97,13 @@ content/posts/
   ja/
     hello-world.mdx
     docker-basics.mdx
+    ...
+content/tils/
+  en/
+    nextjs-use-cache-directive.mdx
+    ...
+  ja/
+    nextjs-use-cache-directive.mdx
     ...
 content/pages/
   en/
@@ -145,6 +154,27 @@ Your content here. Supports **Markdown**, code blocks with syntax highlighting, 
 ```
 
 The filename becomes the URL slug (e.g., `hello-world.mdx` -> `/en/blog/2026/01/01/hello-world`). To create a translated version, place a file with the same name in the other locale directory.
+
+### Writing TIL Entries
+
+Create a new `.mdx` file in `content/tils/en/` or `content/tils/ja/`:
+
+```markdown
+---
+title: "Something I Learned Today"
+description: "A brief summary."   # optional
+date: 2026-03-07
+published: true
+tags:
+  - nextjs
+---
+
+Short TIL content here. Supports **Markdown** and code blocks.
+```
+
+TIL entries are simpler than blog posts: no categories, featured flag, cover image, or updated date. The filename becomes the URL slug (e.g., `nextjs-use-cache-directive.mdx` -> `/en/til/2026/03/07/nextjs-use-cache-directive`).
+
+TIL entries are also included in the search results at `/[locale]/search`.
 
 ### Writing Pages
 
@@ -248,6 +278,10 @@ src/
         page.tsx               # Blog listing with pagination
         [year]/[month]/[day]/[slug]/
           page.tsx             # Post detail (SSG, JSON-LD with inLanguage)
+      til/
+        page.tsx               # TIL listing with pagination
+        [year]/[month]/[day]/[slug]/
+          page.tsx             # TIL entry detail
       category/
         page.tsx               # Category index (all categories)
         [slug]/
@@ -272,8 +306,9 @@ src/
   lib/
     i18n.ts                    # Locale types, dictionaries, getDictionary()
     constants.ts               # Site URL, author, posts per page, OG image path, social links
-    posts.ts                   # Content query utilities (locale-aware, includes getRelatedPosts())
-    search.ts                  # Client-side search logic (AND match, case-insensitive)
+    posts.ts                   # Blog query utilities (locale-aware, includes getRelatedPosts())
+    tils.ts                    # TIL query utilities (locale-aware)
+    search.ts                  # Client-side search logic (AND match, case-insensitive, covers posts + TILs)
     toc.ts                     # Table of contents heading extraction
     feed.ts                    # RSS 2.0 / Atom 1.0 XML generation
     seo.ts                     # SEO helpers (hreflang alternate builder)
@@ -282,6 +317,9 @@ content/
   posts/
     en/                        # English articles (MDX)
     ja/                        # Japanese articles (MDX)
+  tils/
+    en/                        # English TIL entries (MDX)
+    ja/                        # Japanese TIL entries (MDX)
   pages/
     en/                        # English pages (MDX)
     ja/                        # Japanese pages (MDX)

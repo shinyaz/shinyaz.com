@@ -1,0 +1,33 @@
+---
+title: "Next.js 'use cache' directive enables component-level caching"
+description: "The new 'use cache' directive in Next.js lets you cache the output of any async function or component, replacing the old fetch-level cache options."
+date: 2026-03-07
+published: true
+tags:
+  - nextjs
+  - caching
+---
+
+In Next.js 15+, you can add `"use cache"` at the top of any async function or Server Component to cache its output:
+
+```tsx
+async function getData() {
+  "use cache";
+  const res = await fetch("https://api.example.com/data");
+  return res.json();
+}
+```
+
+This replaces the old `fetch(..., { next: { revalidate: 60 } })` pattern and works for any async logic — not just `fetch`. You can also control the cache lifetime with `cacheLife`:
+
+```tsx
+import { cacheLife } from "next/cache";
+
+async function getData() {
+  "use cache";
+  cacheLife("hours");
+  // ...
+}
+```
+
+Predefined profiles: `"seconds"`, `"minutes"`, `"hours"`, `"days"`, `"weeks"`, `"max"`.

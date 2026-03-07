@@ -1,0 +1,70 @@
+import type { Metadata } from "next";
+import { notFound } from "next/navigation";
+import { getPublishedTils, getPaginatedTils } from "@/lib/tils";
+import { PostList } from "@/components/blog/post-list";
+import { Pagination } from "@/components/blog/pagination";
+import { getDictionary, isValidLocale } from "@/lib/i18n";
+import { SITE_URL } from "@/lib/constants";
+import { buildAlternateLanguages } from "@/lib/seo";
+
+interface TilPageProps {
+  params: Promise<{ locale: string }>;
+  searchParams: Promise<{ page?: string }>;
+}
+
+export async function generateMetadata({ params }: TilPageProps): Promise<Metadata> {
+  const { locale } = await params;
+  if (!isValidLocale(locale)) return {};
+  const t = getDictionary(locale);
+  return {
+    title: t.til.title,
+    description: t.til.description,
+    openGraph: {
+      title: t.til.title,
+      description: t.til.description,
+      url: `${SITE_URL}/${locale}/til`,
+      type: "website",
+    },
+    alternates: {
+      canonical: `${SITE_URL}/${locale}/til`,
+      languages: buildAlternateLanguages((l) => `/${l}/til`),
+    },
+  };
+}
+
+export default async function TilPage({ params, searchParams }: TilPageProps) {
+  const { locale } = await params;
+  if (!isValidLocale(locale)) notFound();
+  const t = getDictionary(locale);
+  const { page: pageParam } = await searchParams;
+  const page = Math.max(1, Number(pageParam) || 1);
+  const allTils = getPublishedTils(locale);
+  const { tils, totalPages, currentPage } = getPaginatedTils(page, allTils);
+
+  const tilsAsPostCards = tils.map((til) => ({
+    title: til.title,
+    description: til.description,
+    date: til.date,
+    permalink: til.permalink,
+    categories: [] as string[],
+    tags: til.tags,
+    metadata: { readingTime: til.metadata.readingTime },
+  }));
+
+  return (
+    <div className="mx-auto max-w-3xl px-4 py-6 md:py-12">
+      <header className="mb-8">
+        <h1 className="text-2xl font-bold tracking-tight md:text-3xl">{t.til.title}</h1>
+        <p className="mt-2 text-muted-foreground">{t.til.description}</p>
+      </header>
+      {tils.length === 0 ? (
+        <p className="text-muted-foreground">{t.til.empty}</p>
+      ) : (
+        <>
+          <PostList posts={tilsAsPostCards} locale={locale} />
+          <Pagination currentPage={currentPage} totalPages={totalPages} basePath={`/${locale}/til`} locale={locale} />
+        </>
+      )}
+    </div>
+  );
+}

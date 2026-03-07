@@ -29,8 +29,15 @@ const dictionaries = {
       browseCategories: "カテゴリ一覧",
       browseTags: "タグ一覧",
     },
+    til: {
+      title: "TIL",
+      description: "Today I Learned — 日々の学びを記録",
+      empty: "TIL がありません。",
+      browseTags: "タグ一覧",
+    },
     nav: {
       blog: "ブログ",
+      til: "TIL",
       projects: "プロジェクト",
       uses: "使用ツール",
       about: "自己紹介",
@@ -111,8 +118,15 @@ const dictionaries = {
       browseCategories: "Categories",
       browseTags: "Tags",
     },
+    til: {
+      title: "TIL",
+      description: "Today I Learned — Daily learnings",
+      empty: "No TILs found.",
+      browseTags: "Tags",
+    },
     nav: {
       blog: "Blog",
+      til: "TIL",
       projects: "Projects",
       uses: "Uses",
       about: "About",
