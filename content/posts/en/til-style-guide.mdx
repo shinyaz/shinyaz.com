@@ -1,0 +1,109 @@
+---
+title: "Designing a TIL Style Guide — Drop Perfectionism, Aim for 30-Second Reads"
+description: "Designed a dedicated style guide for the TIL (Today I Learned) section, separate from blog posts. The core philosophy: lower the barrier to write, raise the value to read. Covers the boundary with blog posts, title patterns, and tone calibration."
+date: 2026-03-07
+published: true
+featured: false
+categories:
+  - programming
+tags:
+  - blog
+  - writing
+---
+
+## Overview
+
+After creating the blog post style guide, I realized the TIL (Today I Learned) section needed its own. But a scaled-down copy of the blog guide would miss the point. TILs serve a fundamentally different purpose.
+
+Blog posts are about **communicating deep insights with structure** — titles, hooks, body organization, closing takeaways. TILs are about **sharing a single discovery in 30 seconds**. What needs optimizing isn't just the reader's time but also the **writer's barrier to publish**.
+
+Getting this balance right was the hardest part of designing the guide.
+
+## Why TILs Need a Separate Style Guide
+
+The first thing I noticed after creating the TIL section: having internalized blog post conventions made writing short entries surprisingly hard. "Should I add more context?" "Should I compare alternatives?" "Do I need a summary section?" — all impulses that need to be actively suppressed.
+
+The biggest enemy of TILs is **perfectionism**. "I'll research a bit more first." "I'll clean it up later." By the time you're ready, the discovery's freshness is gone and it never gets published. The style guide's most important job is defining what "good enough" looks like, lowering the psychological barrier to hit publish.
+
+## The Boundary with Blog Posts
+
+The two most practical boundary markers between TILs and blog posts:
+
+1. **If you need `##` headings, it's a blog post** — Wanting to add section headings is a sign the content doesn't fit a single discovery
+2. **If it's past 500 words, it's a blog post** — Beyond this, "quick read" no longer applies
+
+Conversely, **100–300 words is the sweet spot**. Many TILs are complete with a single code block and a few lines of explanation. If you think "is this too short?", it's probably just right.
+
+Looking at this blog's existing TILs: `prose-table-nowrap` is about 150 words, `use-cache` is about 200 words. Both deliver clear value to readers.
+
+## Titles: State the Discovery Itself
+
+TIL titles are even more critical than blog post titles. TILs are short, so readers decide entirely based on the title. And if the title is informative enough, **you can learn something from the title alone**.
+
+The pattern is `[Technology/Context] + [what you learned / what works]`:
+
+| Avoid | Prefer |
+| --- | --- |
+| Table column issue | Fix Markdown table column wrapping with CSS white-space: nowrap |
+| Caching in Next.js | Next.js 'use cache' directive enables component-level caching |
+
+Bad titles tell you "what it's about." Good titles tell you "what you'll learn." This difference directly affects search result CTR.
+
+## Structure: Natural Flow, Not a Template
+
+TILs don't need the rigorous structure of blog posts. But there is a natural flow:
+
+1. **Context (1–2 sentences)** — What were you doing when you hit this? A brief scene that makes the reader think "I do that too"
+2. **The discovery (the core)** — What you learned. A code example adds credibility
+3. **Brief takeaway (optional)** — Why it matters or what it replaces. Omit if the entry stands on its own
+
+**Don't write a "Summary" section.** TILs are short enough that the reader already has the full picture. End with the last useful piece of information.
+
+## Tone: Closer to a Slack Message
+
+This is the biggest differentiation point from the blog post style guide.
+
+Blog posts aim for a "conversational but precise" tone. TILs shift further toward casual — closer to posting "did you know this?" in a team Slack channel than publishing an article.
+
+Specifically:
+
+- **Share the surprise as-is** — "This works on any async function, not just fetch?" or "Markdown-side fixes had zero effect." Sharing that "huh, neat" moment is what makes a TIL memorable.
+- **Mention what didn't work** — If the obvious first approach failed, say so in a sentence or two. It saves readers from the same dead end.
+- **Let the code speak** — A short code example is often more eloquent than a paragraph. Don't repeat in prose what the code already shows.
+
+This casualness isn't just a style choice — it **directly affects publishing frequency**. Less pressure to be polished means shorter time from discovery to publication, which means more TILs.
+
+## Searchability: Write for Your Future Self
+
+TILs frequently get found by the author themselves, months later, searching for "what was that fix again?" Keeping this use case in mind changes how you write:
+
+- **Quote error messages verbatim** — Developers paste exact error messages into search engines
+- **Use precise technical terms** — Function names, directive names, CSS property names, CLI flags. Vague paraphrases don't match search queries
+- **Describe symptoms concretely** — "Two-character Japanese columns wrapping vertically" rather than "table layout issue"
+
+The `prose-table-nowrap` TIL exemplifies this well: it includes both the concrete symptom and the exact CSS property name.
+
+## Code Blocks: 1–2, Max 3
+
+**1–2 code blocks** is the sweet spot for TILs. The "what didn't work → what worked" two-block pattern works naturally.
+
+3 blocks can work when the flow demands it — "what I tried → configuration change → result." But if you need 4 or more, the entry is probably a blog post in disguise.
+
+## What Makes a Good TIL Topic
+
+The style guide lists six topic categories, but they share a common trait: **things you wouldn't notice just by reading the official docs.**
+
+- **Non-obvious API behaviors** — `use-cache` working on any async function, not just `fetch`
+- **Configuration options buried in docs** — `cacheLife` predefined profiles
+- **CSS rendering workarounds** — `white-space: nowrap` for table column wrapping
+- **Behavior changes across versions** — Differences you discover during upgrades
+
+What *doesn't* fit: step-by-step tutorials, multi-option comparisons, things already prominently documented. Those belong in blog posts or just as a link to the docs.
+
+## Reflecting on the Style Guide
+
+The core insight of the TIL style guide is a paradox: **lowering the barrier to write raises the value to read.**
+
+A TIL that never gets published because the author wanted it to be perfect has zero value to readers. A rough 100-word TIL, once published, might save someone 30 minutes. The style guide minimizes friction from discovery to publication by making "good enough" explicit.
+
+If blog posts are a medium for "optimizing the reader's time," TILs are a medium for "minimizing barriers for both writer and reader." The end goal — delivering value to readers — is the same. The approach is different.

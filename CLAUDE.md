@@ -147,6 +147,8 @@ tags:                 # lowercase, hyphenated; technology names or well-known te
 ---
 ```
 
+**featured** should be `true` only for posts that represent a major milestone, a foundational explanation of the blog's architecture, or an insight with unusually broad applicability. Most posts should be `false`. When in doubt, leave it `false` — featuring too many posts dilutes the signal.
+
 **description** should convey the unique value of the post — what makes it worth reading. Avoid generic templates like "Learn how to...", "A step-by-step guide to...", or "〜の方法を解説".
 
 - Good: `"Next.js の opengraph-image.tsx を使い、ビルド時に記事ごとの OG 画像を自動生成する。Satori のレイアウト制約とフォント埋め込みの実践知見。"`
@@ -175,14 +177,16 @@ Titles must be **specific and outcome-oriented**. The reader should know what th
 
 Not every post is a step-by-step tutorial. Choose the structure that best fits the content:
 
-| Type | When to use | Example title |
-|------|-------------|---------------|
-| **Build log** | You built something and want to share the process | `Adding a TIL Section to a Velite & Next.js Blog` |
-| **Problem → Solution** | You solved a specific issue worth documenting | `Fixing Hydration Mismatches in next-themes with App Router` |
-| **Deep dive** | Exploring how something works under the hood | `How Next.js Static Generation Works with Dynamic Routes` |
-| **Comparison / Decision** | Evaluating options and explaining your choice | `Choosing a Content Layer: Velite vs. Contentlayer vs. MDX Bundler` |
-| **Migration / Upgrade** | Moving between versions, tools, or architectures | `Migrating Next.js PWA to @serwist/turbopack for Faster Builds` |
-| **Lessons learned** | Reflecting on what worked, what didn't, and why | `What I Learned Building a Bilingual Blog with Next.js` |
+| Type | When to use | Example from this blog |
+|------|-------------|------------------------|
+| **Build log** | You built something and want to share the process | *Velite × Next.js でブログに TIL セクションを追加する* |
+| **Problem → Solution** | You solved a specific issue worth documenting | *Next.js ブログのレスポンシブ対応 — backdrop-filter の罠で全部壊れた話* |
+| **Deep dive** | Exploring how something works under the hood | *Next.js 16・Velite・MDX でバイリンガル技術ブログを構築する* |
+| **Comparison / Decision** | Evaluating options and explaining your choice | (not yet published — e.g., comparing content layer options) |
+| **Migration / Upgrade** | Moving between versions, tools, or architectures | *Next.js PWA を @serwist/turbopack に移行してビルドを高速化する* |
+| **Lessons learned** | Reflecting on what worked, what didn't, and why | (not yet published — e.g., reflecting on bilingual blog design) |
+
+Most posts in this blog combine elements from multiple types. The table helps you choose a **primary structure**, not a rigid category. For example, the responsive post is primarily "Problem → Solution" but includes build-log elements for the hamburger menu.
 
 ### Article Structure
 
@@ -219,9 +223,11 @@ End with **transferable insights** — things the reader can apply to their own 
 
 ```
 ## まとめ / Summary
-- **[Insight]** — What the reader should take away.
-- **[Insight]** — What the reader should take away.
+- **[Insight in bold]** — Explanation that the reader can apply to their own projects.
+- **[Insight in bold]** — Explanation that the reader can apply to their own projects.
 ```
+
+Each bullet should lead with a **bold phrase** summarizing the insight, followed by a dash and a sentence explaining why it matters or how to apply it. Aim for 3–4 bullets. Avoid simply restating what was done ("Added feature X") — instead, extract the transferable lesson ("Feature flags via schema defaults eliminate migration cost").
 
 ### Voice and Tone
 
@@ -255,7 +261,7 @@ End with **transferable insights** — things the reader can apply to their own 
 - **Keep code examples focused** — Show only the relevant parts. Use `// ...existing code` to indicate omitted context. Surround code with enough explanation that the reader knows what to look for.
 - **Write for scanners first, readers second** — Use descriptive headings, bold key terms, and short paragraphs. Most readers will skim before deciding to read in depth.
 - **Avoid restating documentation** — Don't repeat what's already in official docs. Link to them and focus on what's unique to your experience: gotchas, real-world context, and opinions.
-- **One post, one core insight** — Every post should have a single main takeaway that the reader remembers. If you find yourself covering too many unrelated topics, split into multiple posts.
+- **One post, one core insight** — Every post should have a single main takeaway that the reader remembers. A post may cover multiple related topics (e.g., responsive spacing + touch targets), but it needs a clear **anchor insight** that ties them together and gives the post its identity (e.g., the `backdrop-filter` containing block gotcha). If the topics don't share a thread, split into multiple posts.
 
 ### Code Blocks
 
@@ -269,6 +275,14 @@ Code blocks that don't represent a specific file (shell commands, build output, 
 
 Aim for **3–5 code blocks per post** as a rough guideline. If you have more than 7, consider whether some can be replaced with prose descriptions or collapsed into a single annotated block.
 
+### Post Length
+
+Aim for **800–1500 words** (Japanese) or **600–1200 words** (English) for the body text, excluding code blocks. This is a guideline, not a hard limit — some topics naturally need more. If a post grows beyond 2000 words, consider whether it should be split or whether some sections can be condensed.
+
+### Bilingual Pairs
+
+Every post should be published in both Japanese and English (`content/posts/ja/` and `content/posts/en/` with the same slug). The two versions are **parallel but not literal translations** — adapt examples, phrasing, and cultural references to read naturally in each language. The technical content, code examples, and structure should stay aligned so that readers switching between languages find the same information.
+
 ### Tags
 
 Use lowercase, hyphenated names. Prefer well-known technology names (`nextjs`, `velite`, `typescript`, `tailwindcss`) but established abbreviations and domain terms are also acceptable (`seo`, `pwa`, `a11y`, `i18n`). Avoid overly generic words like "frontend" or "tutorial".
@@ -281,7 +295,7 @@ TIL entries live in `content/tils/{en,ja}/`. TILs capture the **"oh, I didn't kn
 
 The biggest enemy of TILs is perfectionism that prevents publishing. Unlike blog posts, TILs don't need careful outlining or thorough analysis. **The freshness of the discovery is the greatest value** — write it up quickly and publish it.
 
-- **Short is fine** — A single code block plus a few lines of explanation can be a complete TIL.
+- **Short is fine** — A single code block plus a few lines of explanation can be a complete TIL. Aim for **100–300 words** — long enough to be useful, short enough to not agonize over.
 - **Rough is fine** — No need for the full context, alternative analysis, or trade-off discussion that blog posts require.
 - **Volume matters** — Ten small discoveries add more value to the site than one elaborate post.
 
@@ -315,14 +329,16 @@ The title itself should be a summary of the discovery. Readers decide whether to
 
 **Pattern:** `[Technology/Context] + [what you learned or what works]`
 
-**Japanese:** State the discovery directly. Natural patterns: `〜できる`, `〜で解決する`, `〜は〜だった`.
+**Japanese:** State the discovery directly. Natural patterns: `〜できる`, `〜で解決する`, `〜は〜だった`, `〜には〜を使う`.
 - Good: `Next.js の 'use cache' ディレクティブでコンポーネントレベルのキャッシュが可能`
 - Good: `Markdown テーブルの列幅制御は CSS の white-space: nowrap で解決する`
+- Good: `git stash の変更は別ブランチにも適用できる`
 - Avoid: `Next.js のキャッシュについて` / `テーブルの問題`
 
 **English:** State the fact or technique. The title should be informative on its own.
 - Good: `Next.js 'use cache' directive enables component-level caching`
 - Good: `Fix Markdown table column wrapping with CSS white-space: nowrap`
+- Good: `git stash changes can be applied to a different branch`
 - Avoid: `Caching in Next.js` / `Table column issue`
 
 ### Structure
@@ -337,14 +353,14 @@ Section headings (`##`) are unnecessary in most TILs. Use them only when the ent
 
 Don't end with "In summary..." or "まとめ" — TILs are short enough that the reader already has the full picture. End with the last useful piece of information.
 
-### Voice and Tone — Enjoy Sharing Discoveries
+### Voice and Tone — More Casual Than Blog Posts
 
-TILs are neither documentation nor textbooks. They are **a developer sharing "did you know this?" with fellow developers**.
+TILs are neither documentation nor textbooks. They are **a developer sharing "did you know this?" with fellow developers**. The tone should be noticeably more relaxed than blog posts — closer to a Slack message to a teammate than a published article.
 
-- **Convey the surprise** — "This works for any async function, not just fetch?" or "Markdown-side fixes had zero effect." When the reader re-experiences that same "huh, neat" moment, the entry becomes memorable.
+- **Convey the surprise** — "This works for any async function, not just fetch?" or "Markdown-side fixes had zero effect." When the reader re-experiences that same "huh, neat" moment, the entry becomes memorable. Reactions like "驚いた" or "I didn't expect this" are welcome.
 - **Briefly mention what didn't work** — If the obvious first approach failed, say so in a sentence or two. This saves readers from the same dead end (the `prose-table-nowrap` entry is a good example of this pattern).
 - **Let the code speak** — A short code example often communicates more than a paragraph of explanation. Don't over-explain what the code already shows.
-- **Link to sources** — If the discovery came from official docs, an RFC, a GitHub issue, or a blog post, link to it. This gives readers a path to dig deeper.
+- **Link to sources when they exist** — If the discovery came from official docs, an RFC, a GitHub issue, or a blog post, link to it. This gives readers a path to dig deeper. But don't hunt for a source link if the discovery was purely experiential — the TIL itself is the source.
 
 ### Write TILs That Are Searchable
 
@@ -356,10 +372,10 @@ TILs serve as a reference for your future self and for developers who hit the sa
 
 ### Good TIL Topics
 
-- Non-obvious API behaviors or parameters
-- Useful configuration options buried in documentation
+- Non-obvious API behaviors or parameters → *e.g., `use-cache` directive working on any async function*
+- Useful configuration options buried in documentation → *e.g., `cacheLife` predefined profiles*
 - Error messages: what they actually mean and how to fix them
-- CSS rendering workarounds for specific issues
+- CSS rendering workarounds for specific issues → *e.g., `white-space: nowrap` for table columns*
 - A simpler way to do something you've been doing the long way
 - Behavior changes across library or framework versions
 
@@ -371,7 +387,8 @@ TILs serve as a reference for your future self and for developers who hit the sa
 
 ### Code Blocks
 
-- **1–2 blocks** is the sweet spot. If you need 3 or more, consider whether this should be a blog post.
+- **1–2 blocks** is the sweet spot. **3 blocks is acceptable** when the natural pattern demands it (e.g., "what I tried → what failed → what worked", or "before → configuration → after").
+- If you need 4 or more, the entry is likely a blog post in disguise.
 - Use `title=` for file-specific code, same conventions as blog posts.
 - Show only the minimum code needed to make the point.
 - A "what didn't work → what worked" two-block pattern is natural and effective.

@@ -1,0 +1,135 @@
+---
+title: "Designing a Style Guide for a Technical Blog — 8 Principles for Optimizing Reader Time"
+description: "After writing 8 posts, I codified the implicit rules into a style guide. The central design principle: optimize for the reader's time. Covers title format, structure, code density, and closing sections with the reasoning behind each rule."
+date: 2026-03-07
+published: true
+featured: false
+categories:
+  - programming
+tags:
+  - blog
+  - writing
+---
+
+## Overview
+
+After writing 8 posts for this blog, I noticed implicit patterns forming in how I write. Title conventions, opening hooks, code block density, closing structure — the same patterns kept recurring. So I codified them into a reusable style guide.
+
+The purpose of a style guide isn't uniformity. It's **optimizing for the reader's time.** Tech blog readers are busy developers who rarely read posts front to back. They judge by the title, assess value from the opening, skim via headings, study the code blocks, and collect takeaways from the closing. A post optimized for this scanning behavior is the goal.
+
+Below, I explain the *reasoning* behind each rule rather than the rules themselves. For the full rules, see [CLAUDE.md](https://github.com/shinyaz/shinyaz.com/blob/main/CLAUDE.md).
+
+## Principle 1: Titles Should Convey What the Reader Gets
+
+The difference is obvious when you compare side by side:
+
+| Avoid | Prefer |
+| --- | --- |
+| About OG Images | Auto-Generating Dynamic OG Images for a Next.js Blog |
+| Introduction to PWA | Migrating Next.js PWA to @serwist/turbopack for Faster Builds |
+| Table column issue | Fix Markdown table column wrapping with CSS white-space: nowrap |
+
+Three rules: **name the technology**, **lead with the outcome**, **cut filler** ("How to", "Introduction to", "A Guide to").
+
+This filter alone changes click-through rates from search results and social media. Readers decide whether a post solves their problem based on the title alone. A vague title means a great post goes unread.
+
+## Principle 2: Descriptions Should State the Unique Value
+
+The description is the 120–200 characters shown in search results and social cards. A generic summary wastes this space.
+
+```
+# Avoid
+"Learn how to dynamically generate OG images in Next.js."
+
+# Prefer
+"Use opengraph-image.tsx and Satori to statically generate per-post OG images
+at build time. The biggest gotcha: Satori only supports inline styles — no
+Tailwind, no className."
+```
+
+A good description has two elements: **what it does** (static OG image generation) and **the unique insight** (Satori's inline-style constraint). The latter is decisive — it tells readers "this is why this post exists" in under 30 characters.
+
+## Principle 3: The Opening Must Justify Reading Within 3 Sentences
+
+The opening is where readers decide to continue or close the tab. Posts that start with "This blog uses X" don't address the reader's interest.
+
+The style guide uses two opening patterns:
+
+- **`## The Problem`** — When there's a clear problem to solve. Readers think "I have the same problem" and keep reading.
+- **`## Overview`** — When adding a feature or explaining architecture, where motivation precedes a specific problem.
+
+Both patterns present **the value the reader will get** within the first 1–2 paragraphs. Implementation details belong in the body.
+
+Looking back at this blog's posts, 6 out of 8 open with a problem statement. Problem-driven openings are easier to write — stating the problem is often enough to hook the reader.
+
+## Principle 4: Choose Structure by Article Type
+
+Not every post is a step-by-step tutorial. This blog primarily uses five types:
+
+- **Build log** — Sharing the process of building something (TIL section, featured posts)
+- **Problem → Solution** — Following from investigation to fix (responsive design, backdrop-filter gotcha)
+- **Deep dive** — Building understanding progressively (overall blog architecture)
+- **Migration** — Motivation, steps, and results of a migration (Serwist/Turbopack)
+- **Comparison** — Evaluating options and explaining the decision (not yet published)
+
+The important thing is that most posts blend multiple types. The responsive design post is primarily "Problem → Solution" but its hamburger menu section reads like a build log. Types are a **guide for choosing the primary structure**, not rigid categories.
+
+## Principle 5: Show the Interesting Parts, Skip the Obvious
+
+The most valuable content in a technical post is what isn't in the official docs.
+
+**Include:**
+- Gotchas and surprising behaviors — these save readers hours of debugging
+- "I chose X over Y because..." — the reasoning behind design decisions
+- Before/after comparisons — make improvements tangible
+- Error messages and symptoms — for readers arriving via search
+
+**Skip:**
+- Full file listings — show the interesting 20%, summarize the rest in prose
+- Complete test code — unless the testing approach itself is the topic, state what was tested
+- "Files changed" tables — these belong in PRs
+- Boilerplate setup steps — link to docs
+
+The target is **3–5 code blocks per post**. Beyond 7, consider replacing some with prose or consolidating into a single annotated block.
+
+## Principle 6: Closings Extract Transferable Insights
+
+The closing section isn't a summary. It's where you **extract insights the reader can take to their own projects.**
+
+The format is consistent: bold lead phrase + dash + explanation, as a bulleted list.
+
+```markdown
+## Summary
+- **Bold insight** — Why it matters and how to apply it.
+- **Bold insight** — Why it matters and how to apply it.
+```
+
+A bad closing enumerates actions: "Added X", "Fixed Y." A good closing extracts principles that transcend the article's context: "Schema defaults with `default(false)` make field additions safe and migration-free."
+
+3–4 items is the sweet spot. If a post has 5+ major insights, the scope is probably too broad.
+
+## Principle 7: One Anchor Insight Per Post
+
+Every post needs a single **anchor insight** that readers remember.
+
+Take the responsive design post as an example. It covers the hamburger menu, spacing, typography, and touch targets — multiple topics. But the anchor is clear: "`backdrop-filter` creates a containing block for `fixed` children." The title reflects this: "backdrop-filter broke everything."
+
+Covering multiple topics in one post is fine. But **they need a connecting thread**. Without one, split into separate posts.
+
+## Principle 8: Bilingual Means Parallel, Not Literal
+
+This blog publishes in Japanese and English. The style guide defines the two versions as **parallel but not literal translations.**
+
+Technical content, code examples, and article structure stay aligned. But prose, phrasing, and idioms adapt to read naturally in each language. What matters is that readers switching languages find the same information — word-for-word correspondence does not.
+
+## Reflecting on the Style Guide
+
+All 8 principles converge on a single point: **respect the reader's time.**
+
+- Title + description → 5-second decision on whether to read
+- Opening → value proposition in 3 sentences or fewer
+- Headings + structure → skimmable for the full picture
+- Code density → focus on what matters
+- Closing → takeaways at a glance
+
+A style guide isn't a finished artifact. Implicit rules update with every post, and the codification cycle continues. But the central principle — optimizing for the reader's time — won't change. When you filter decisions through this lens, individual rules follow naturally.
