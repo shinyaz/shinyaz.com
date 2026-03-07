@@ -1,0 +1,34 @@
+---
+title: "Markdown テーブルの列幅制御は CSS の white-space: nowrap で解決する"
+date: 2026-03-07
+published: true
+tags:
+  - css
+  - mdx
+---
+
+MDX ブログで Markdown テーブルを書いたとき、日本語2文字の列（「新規」「変更」など）が縦に折り返されてしまった。
+
+最初に試したのは Markdown 側のアプローチ — セパレーター行のダッシュ数を増やし、セル内にスペースパディングを追加した：
+
+```markdown
+| 区分   | ファイル | 内容 |
+|--------|---------|------|
+| 新規   | `src/lib/tils.ts` | TIL クエリ関数 |
+```
+
+効果なし。多くの Markdown レンダラーはセパレーター幅を列幅のヒントとして扱わず、セル内の余白もトリムされる。
+
+解決策は `.prose` の CSS にテーブルスタイルを追加すること：
+
+```css title="src/app/globals.css"
+.prose {
+  & table {
+    & td:first-child {
+      white-space: nowrap;
+    }
+  }
+}
+```
+
+`white-space: nowrap` を最初の列に適用すれば、内容の長さに関係なく折り返しが発生しない。Markdown 側で無理にスペースを入れるより、CSS で制御する方が確実で保守しやすい。

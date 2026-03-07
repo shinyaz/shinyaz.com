@@ -1,0 +1,34 @@
+---
+title: "Fix Markdown table column wrapping with CSS white-space: nowrap"
+date: 2026-03-07
+published: true
+tags:
+  - css
+  - mdx
+---
+
+In an MDX blog, a Markdown table with short Japanese text in the first column ("新規", "変更" — two full-width characters each) was wrapping vertically, putting each character on its own line.
+
+My first attempt was a Markdown-side fix — widening the separator dashes and adding space padding in cells:
+
+```markdown
+| 区分   | ファイル | 内容 |
+|--------|---------|------|
+| 新規   | `src/lib/tils.ts` | TIL query functions |
+```
+
+It didn't work. Most Markdown renderers ignore separator width as a column-width hint, and cell padding gets trimmed.
+
+The fix was adding table styles to `.prose` in CSS:
+
+```css title="src/app/globals.css"
+.prose {
+  & table {
+    & td:first-child {
+      white-space: nowrap;
+    }
+  }
+}
+```
+
+Applying `white-space: nowrap` to the first column prevents wrapping regardless of content length. CSS is the right layer for this — Markdown has no reliable column-width mechanism.
