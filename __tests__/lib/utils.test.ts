@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { cn, formatDate } from "@/lib/utils";
+import { cn, formatDate, formatReadingTime } from "@/lib/utils";
 
 describe("cn", () => {
   it("merges class names", () => {
@@ -34,5 +34,15 @@ describe("formatDate", () => {
   it("defaults to ja locale", () => {
     const result = formatDate("2026-06-01T00:00:00.000Z");
     expect(result).toContain("2026");
+  });
+});
+
+describe("formatReadingTime", () => {
+  it("formats for en locale", () => {
+    expect(formatReadingTime(5, "en")).toBe("5 min read");
+  });
+
+  it("formats for ja locale", () => {
+    expect(formatReadingTime(5, "ja")).toBe("約5分");
   });
 });

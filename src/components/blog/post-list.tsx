@@ -8,6 +8,7 @@ interface Post {
   permalink: string;
   categories: string[];
   tags: string[];
+  metadata?: { readingTime?: number };
 }
 
 interface PostListProps {
@@ -25,7 +26,12 @@ export function PostList({ posts, locale }: PostListProps) {
   return (
     <div>
       {posts.map((post) => (
-        <PostCard key={post.permalink} {...post} locale={locale} />
+        <PostCard
+          key={post.permalink}
+          {...post}
+          locale={locale}
+          readingTime={post.metadata?.readingTime}
+        />
       ))}
     </div>
   );

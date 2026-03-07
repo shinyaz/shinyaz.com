@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { formatDate } from "@/lib/utils";
+import { formatDate, formatReadingTime } from "@/lib/utils";
 import { CategoryBadge } from "./category-badge";
 import { TagBadge } from "./tag-badge";
 import type { Locale } from "@/lib/i18n";
@@ -12,11 +12,12 @@ interface PostCardProps {
   categories: string[];
   tags: string[];
   locale: Locale;
+  readingTime?: number;
 }
 
 const MAX_TAGS = 3;
 
-export function PostCard({ title, description, date, permalink, categories, tags, locale }: PostCardProps) {
+export function PostCard({ title, description, date, permalink, categories, tags, locale, readingTime }: PostCardProps) {
   return (
     <article className="group border-b border-border py-6 first:pt-0 last:border-b-0">
       <Link href={permalink} className="block">
@@ -33,6 +34,11 @@ export function PostCard({ title, description, date, permalink, categories, tags
         <time dateTime={date} className="text-xs text-muted-foreground">
           {formatDate(date, locale)}
         </time>
+        {readingTime != null && (
+          <span className="text-xs text-muted-foreground">
+            {formatReadingTime(readingTime, locale)}
+          </span>
+        )}
         {categories.length > 0 && (
           <div className="flex gap-1.5">
             {categories.map((cat) => (
