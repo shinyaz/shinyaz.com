@@ -66,4 +66,20 @@ describe("PostCard", () => {
     render(<PostCard {...defaultProps} tags={["a", "b", "c"]} />);
     expect(screen.queryByText(/^\+/)).toBeNull();
   });
+
+  it("renders reading time when provided", () => {
+    render(<PostCard {...defaultProps} readingTime={5} />);
+    expect(screen.getByText("5 min read")).toBeDefined();
+  });
+
+  it("renders reading time in ja locale", () => {
+    render(<PostCard {...defaultProps} locale="ja" readingTime={3} />);
+    expect(screen.getByText("約3分")).toBeDefined();
+  });
+
+  it("does not render reading time when not provided", () => {
+    render(<PostCard {...defaultProps} />);
+    expect(screen.queryByText(/min read/)).toBeNull();
+    expect(screen.queryByText(/約/)).toBeNull();
+  });
 });

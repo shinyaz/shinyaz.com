@@ -1,7 +1,7 @@
 import type { Metadata } from "next";
 import { notFound } from "next/navigation";
 import { getPostBySlug, getRelatedPosts } from "@/lib/posts";
-import { formatDate } from "@/lib/utils";
+import { formatDate, formatReadingTime } from "@/lib/utils";
 import { MdxContent } from "@/components/mdx/mdx-content";
 import { CategoryBadge } from "@/components/blog/category-badge";
 import { TagBadge } from "@/components/blog/tag-badge";
@@ -130,6 +130,9 @@ export default async function PostPage({ params }: PostPageProps) {
           </h1>
           <div className="mt-3 flex flex-wrap items-center gap-2 text-xs text-muted-foreground md:gap-3">
             <time dateTime={post.date}>{formatDate(post.date, locale)}</time>
+            {post.metadata.readingTime != null && (
+              <span>{formatReadingTime(post.metadata.readingTime, locale)}</span>
+            )}
             {post.categories.length > 0 && (
               <div className="flex gap-1.5">
                 {post.categories.map((cat) => (

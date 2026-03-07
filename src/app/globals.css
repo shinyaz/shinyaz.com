@@ -203,7 +203,8 @@ body {
     background: var(--muted);
     color: var(--muted-foreground);
 
-    & + pre {
+    & + pre,
+    & + div > pre {
       border-top-left-radius: 0;
       border-top-right-radius: 0;
     }

@@ -1,7 +1,13 @@
 import Image from "next/image";
 import type { MDXComponents } from "mdx/types";
+import { CodeBlock } from "./code-block";
 
 export const mdxComponents: MDXComponents = {
+  pre: ({ children, ...props }) => (
+    <CodeBlock {...(props as React.HTMLAttributes<HTMLPreElement>)}>
+      {children}
+    </CodeBlock>
+  ),
   img: ({ src, alt, ...props }) => {
     if (!src) return null;
     return (
