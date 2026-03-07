@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
-import { getPublishedPosts } from "@/lib/posts";
+import { getPublishedPosts, getFeaturedPosts } from "@/lib/posts";
 import { PostList } from "@/components/blog/post-list";
+import { FeaturedPostCard } from "@/components/blog/featured-post-card";
 import { ProfileCard } from "@/components/common/profile-card";
 import { getDictionary, isValidLocale } from "@/lib/i18n";
 import { SITE_URL } from "@/lib/constants";
@@ -28,6 +29,7 @@ export default async function HomePage({ params }: HomePageProps) {
   const { locale } = await params;
   if (!isValidLocale(locale)) notFound();
   const t = getDictionary(locale);
+  const featuredPosts = getFeaturedPosts(locale);
   const posts = getPublishedPosts(locale).slice(0, 5);
 
   return (
@@ -39,6 +41,16 @@ export default async function HomePage({ params }: HomePageProps) {
         </p>
       </section>
       <ProfileCard locale={locale} />
+      {featuredPosts.length > 0 && (
+        <section className="mt-8 md:mt-12">
+          <h2 className="text-xl font-semibold mb-4">{t.home.featuredPosts}</h2>
+          <div className="grid gap-3 sm:grid-cols-2">
+            {featuredPosts.map((post) => (
+              <FeaturedPostCard key={post.permalink} {...post} locale={locale} />
+            ))}
+          </div>
+        </section>
+      )}
       <section className="mt-8 md:mt-12">
         <div className="flex items-center justify-between mb-4">
           <h2 className="text-xl font-semibold">{t.home.latestPosts}</h2>

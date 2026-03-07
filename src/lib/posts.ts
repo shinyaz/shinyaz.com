@@ -9,6 +9,10 @@ export function getPublishedPosts(locale?: Locale) {
     .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
 }
 
+export function getFeaturedPosts(locale?: Locale) {
+  return getPublishedPosts(locale).filter((post) => post.featured);
+}
+
 export function getPostBySlug(year: string, month: string, day: string, slug: string, locale?: Locale) {
   return posts.find(
     (post) =>

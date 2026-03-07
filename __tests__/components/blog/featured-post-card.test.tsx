@@ -1,55 +1,55 @@
 import { describe, it, expect } from "vitest";
 import { render, screen } from "@testing-library/react";
-import { PostCard } from "@/components/blog/post-card";
+import { FeaturedPostCard } from "@/components/blog/featured-post-card";
 
 const defaultProps = {
-  title: "Test Post",
-  description: "A test description",
+  title: "Featured Post",
+  description: "A featured post description",
   date: "2026-01-15T00:00:00.000Z",
-  permalink: "/en/blog/2026/01/15/test-post",
+  permalink: "/en/blog/2026/01/15/featured-post",
   categories: ["programming"],
   tags: ["typescript"],
   locale: "en" as const,
 };
 
-describe("PostCard", () => {
+describe("FeaturedPostCard", () => {
   it("renders title", () => {
-    render(<PostCard {...defaultProps} />);
-    expect(screen.getByText("Test Post")).toBeDefined();
+    render(<FeaturedPostCard {...defaultProps} />);
+    expect(screen.getByText("Featured Post")).toBeDefined();
   });
 
   it("renders description", () => {
-    render(<PostCard {...defaultProps} />);
-    expect(screen.getByText("A test description")).toBeDefined();
+    render(<FeaturedPostCard {...defaultProps} />);
+    expect(screen.getByText("A featured post description")).toBeDefined();
   });
 
   it("renders formatted date", () => {
-    render(<PostCard {...defaultProps} />);
+    render(<FeaturedPostCard {...defaultProps} />);
     expect(screen.getByText(/January/)).toBeDefined();
   });
 
   it("links to permalink", () => {
-    render(<PostCard {...defaultProps} />);
+    render(<FeaturedPostCard {...defaultProps} />);
     const links = screen.getAllByRole("link");
     const permalinkLink = links.find(
-      (l) => l.getAttribute("href") === "/en/blog/2026/01/15/test-post"
+      (l) => l.getAttribute("href") === "/en/blog/2026/01/15/featured-post"
     );
     expect(permalinkLink).toBeDefined();
   });
 
   it("renders category badges", () => {
-    render(<PostCard {...defaultProps} />);
+    render(<FeaturedPostCard {...defaultProps} />);
     expect(screen.getByText("programming")).toBeDefined();
   });
 
   it("renders tag badges", () => {
-    render(<PostCard {...defaultProps} />);
+    render(<FeaturedPostCard {...defaultProps} />);
     expect(screen.getByText("#typescript")).toBeDefined();
   });
 
   it("shows at most 3 tags and a +N indicator for overflow", () => {
     render(
-      <PostCard
+      <FeaturedPostCard
         {...defaultProps}
         tags={["a", "b", "c", "d", "e"]}
       />
@@ -63,7 +63,7 @@ describe("PostCard", () => {
   });
 
   it("does not show +N when tags are within the limit", () => {
-    render(<PostCard {...defaultProps} tags={["a", "b", "c"]} />);
+    render(<FeaturedPostCard {...defaultProps} tags={["a", "b", "c"]} />);
     expect(screen.queryByText(/^\+/)).toBeNull();
   });
 });

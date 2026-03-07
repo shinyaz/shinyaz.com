@@ -14,6 +14,7 @@ const dictionaries = {
     },
     home: {
       subtitle: "技術に関するメモや学びを記録するブログです。",
+      featuredPosts: "注目記事",
       latestPosts: "最新記事",
       allPosts: "すべての記事",
       aboutRole: "ソリューションアーキテクト @ AWS",
@@ -95,6 +96,7 @@ const dictionaries = {
     },
     home: {
       subtitle: "A blog where I record notes and learnings about technology.",
+      featuredPosts: "Featured",
       latestPosts: "Latest Posts",
       allPosts: "All Posts",
       aboutRole: "Solutions Architect @ AWS",

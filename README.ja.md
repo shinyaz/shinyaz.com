@@ -132,6 +132,7 @@ title: "記事タイトル"
 description: "記事の簡単な説明。"
 date: 2026-01-01
 published: true
+featured: true               # 任意: トップページの「注目記事」セクションに表示
 updated: 2026-01-15          # 任意: 最終更新日
 cover: "/images/cover.png"   # 任意: カバー画像
 categories:
