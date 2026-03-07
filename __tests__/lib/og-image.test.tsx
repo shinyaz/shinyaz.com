@@ -6,7 +6,7 @@ describe("OgImageLayout", () => {
     title: "Test Blog Post",
     date: "January 15, 2026",
     author: "shinyaz",
-    siteName: "shinyaz.com",
+    siteName: "@shinyaz",
     locale: "en" as const,
   };
 
@@ -55,7 +55,7 @@ describe("OgImageLayout", () => {
     const authorDiv = footer.props.children[0];
     const siteDiv = footer.props.children[1];
     expect(authorDiv.props.children).toBe("shinyaz");
-    expect(siteDiv.props.children).toBe("shinyaz.com");
+    expect(siteDiv.props.children).toBe("@shinyaz");
   });
 
   it("renders date text", () => {

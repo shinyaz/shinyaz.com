@@ -9,7 +9,7 @@ export function isValidLocale(value: string): value is Locale {
 const dictionaries = {
   ja: {
     site: {
-      name: "shinyaz.com",
+      name: "@shinyaz",
       description: "shinyazの個人技術ブログ",
     },
     home: {
@@ -98,7 +98,7 @@ const dictionaries = {
   },
   en: {
     site: {
-      name: "shinyaz.com",
+      name: "@shinyaz",
       description: "A personal tech blog by shinyaz",
     },
     home: {

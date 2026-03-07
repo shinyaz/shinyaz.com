@@ -18,7 +18,7 @@ vi.mock("@/components/layout/mobile-nav", () => ({
 describe("Header", () => {
   it("renders site name", () => {
     render(<Header locale="en" />);
-    expect(screen.getByText("shinyaz.com")).toBeDefined();
+    expect(screen.getByText("@shinyaz")).toBeDefined();
   });
 
   it("renders navigation links", () => {
@@ -43,7 +43,7 @@ describe("Header", () => {
 
   it("site name links to locale root", () => {
     render(<Header locale="en" />);
-    const homeLink = screen.getByText("shinyaz.com").closest("a");
+    const homeLink = screen.getByText("@shinyaz").closest("a");
     expect(homeLink?.getAttribute("href")).toBe("/en");
   });
 
