@@ -1,7 +1,7 @@
 ---
 title: "Migrating Next.js PWA to @serwist/turbopack for Faster Builds"
 description: "How I replaced a broken 3-stage build pipeline with @serwist/turbopack's Route Handler approach — finally making precaching work and unlocking Turbopack as the default bundler."
-date: 2026-02-28
+date: 2026-02-24
 published: true
 featured: true
 categories:
@@ -27,13 +27,13 @@ Here's what surprised me most about `@serwist/turbopack`: it doesn't hook into t
 
 By treating the SW as "just another route," it sidesteps the entire webpack-vs-Turbopack question. It also means the SW build participates in Next.js's own static generation, so you get source maps, proper caching headers, and all the other niceties for free. This is an elegant design choice.
 
-| Aspect | @serwist/next (webpack) | @serwist/turbopack |
-|---|---|---|
-| SW build | Webpack plugin auto-generates | Route Handler via esbuild |
-| SW URL | `/sw.js` (output to public/) | `/serwist/sw.js` (Route Handler path) |
-| Precache manifest | Injected by webpack plugin | Injected by `createSerwistRoute` |
-| SW registration | Automatic via `register` option | Explicit via `SerwistProvider` component |
-| Turbopack support | No | Native |
+| Aspect            | @serwist/next (webpack)         | @serwist/turbopack                       |
+| ----------------- | ------------------------------- | ---------------------------------------- |
+| SW build          | Webpack plugin auto-generates   | Route Handler via esbuild                |
+| SW URL            | `/sw.js` (output to public/)    | `/serwist/sw.js` (Route Handler path)    |
+| Precache manifest | Injected by webpack plugin      | Injected by `createSerwistRoute`         |
+| SW registration   | Automatic via `register` option | Explicit via `SerwistProvider` component |
+| Turbopack support | No                              | Native                                   |
 
 ## Migration
 
@@ -63,8 +63,9 @@ import { spawnSync } from "node:child_process";
 import { createSerwistRoute } from "@serwist/turbopack";
 
 const revision =
-  spawnSync("git", ["rev-parse", "HEAD"], { encoding: "utf-8" })
-    .stdout.trim() || crypto.randomUUID();
+  spawnSync("git", ["rev-parse", "HEAD"], {
+    encoding: "utf-8",
+  }).stdout.trim() || crypto.randomUUID();
 
 export const { dynamic, dynamicParams, revalidate, generateStaticParams, GET } =
   createSerwistRoute({
@@ -111,6 +112,6 @@ The build output after migration:
 
 ## Takeaways
 
-- **Fight the framework less.** The Route Handler approach works because it uses Next.js's own primitives instead of fighting the build system. When evaluating tools, look for designs that work *with* the framework rather than around it.
+- **Fight the framework less.** The Route Handler approach works because it uses Next.js's own primitives instead of fighting the build system. When evaluating tools, look for designs that work _with_ the framework rather than around it.
 - **Broken features hide in plain sight.** Precaching had been silently non-functional for weeks. If something is supposed to work but you've never verified it, it probably doesn't. Check the actual build output.
 - **Explicit beats automatic.** Having to add `SerwistProvider` manually felt like a downgrade at first, but it's actually clearer — I can see exactly where and how the SW gets registered, which makes debugging easier.

@@ -1,7 +1,7 @@
 ---
 title: "Making a Next.js Blog Responsive — And the backdrop-filter Trap That Broke Everything"
 description: "I added a hamburger menu, responsive spacing, and touch targets to a Next.js blog. The real lesson was discovering that CSS backdrop-filter silently turns parent elements into containing blocks for fixed-position children."
-date: 2026-02-28
+date: 2026-02-25
 published: true
 featured: false
 categories:
@@ -58,7 +58,10 @@ export function MobileNav({ locale, t }: MobileNavProps) {
 
   return (
     <div className="md:hidden">
-      <button className="relative z-50 inline-flex h-9 w-9 ..." aria-expanded={isOpen}>
+      <button
+        className="relative z-50 inline-flex h-9 w-9 ..."
+        aria-expanded={isOpen}
+      >
         {/* Hamburger icon */}
       </button>
 
@@ -114,7 +117,7 @@ These changes were less dramatic but impactful in aggregate:
 
 ```tsx
 // Social share button — 44px on mobile, 36px on desktop
-"inline-flex h-11 w-11 ... md:h-9 md:w-9"
+"inline-flex h-11 w-11 ... md:h-9 md:w-9";
 ```
 
 **Viewport** — Added `maximumScale: 5` to the Next.js `Viewport` export. Using `maximumScale: 1` disables pinch-to-zoom and violates WCAG accessibility guidelines.

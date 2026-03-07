@@ -1,7 +1,7 @@
 ---
 title: "Designing a Style Guide for a Technical Blog — 8 Principles for Optimizing Reader Time"
 description: "After writing 8 posts, I codified the implicit rules into a style guide. The central design principle: optimize for the reader's time. Covers title format, structure, code density, and closing sections with the reasoning behind each rule."
-date: 2026-03-07
+date: 2026-03-06
 published: true
 featured: false
 categories:
@@ -17,17 +17,17 @@ After writing 8 posts for this blog, I noticed implicit patterns forming in how 
 
 The purpose of a style guide isn't uniformity. It's **optimizing for the reader's time.** Tech blog readers are busy developers who rarely read posts front to back. They judge by the title, assess value from the opening, skim via headings, study the code blocks, and collect takeaways from the closing. A post optimized for this scanning behavior is the goal.
 
-Below, I explain the *reasoning* behind each rule rather than the rules themselves. For the full rules, see [CLAUDE.md](https://github.com/shinyaz/shinyaz.com/blob/main/CLAUDE.md).
+Below, I explain the _reasoning_ behind each rule rather than the rules themselves. For the full rules, see [CLAUDE.md](https://github.com/shinyaz/shinyaz.com/blob/main/CLAUDE.md).
 
 ## Principle 1: Titles Should Convey What the Reader Gets
 
 The difference is obvious when you compare side by side:
 
-| Avoid | Prefer |
-| --- | --- |
-| About OG Images | Auto-Generating Dynamic OG Images for a Next.js Blog |
-| Introduction to PWA | Migrating Next.js PWA to @serwist/turbopack for Faster Builds |
-| Table column issue | Fix Markdown table column wrapping with CSS white-space: nowrap |
+| Avoid               | Prefer                                                          |
+| ------------------- | --------------------------------------------------------------- |
+| About OG Images     | Auto-Generating Dynamic OG Images for a Next.js Blog            |
+| Introduction to PWA | Migrating Next.js PWA to @serwist/turbopack for Faster Builds   |
+| Table column issue  | Fix Markdown table column wrapping with CSS white-space: nowrap |
 
 Three rules: **name the technology**, **lead with the outcome**, **cut filler** ("How to", "Introduction to", "A Guide to").
 
@@ -79,12 +79,14 @@ The important thing is that most posts blend multiple types. The responsive desi
 The most valuable content in a technical post is what isn't in the official docs.
 
 **Include:**
+
 - Gotchas and surprising behaviors — these save readers hours of debugging
 - "I chose X over Y because..." — the reasoning behind design decisions
 - Before/after comparisons — make improvements tangible
 - Error messages and symptoms — for readers arriving via search
 
 **Skip:**
+
 - Full file listings — show the interesting 20%, summarize the rest in prose
 - Complete test code — unless the testing approach itself is the topic, state what was tested
 - "Files changed" tables — these belong in PRs
@@ -100,6 +102,7 @@ The format is consistent: bold lead phrase + dash + explanation, as a bulleted l
 
 ```markdown
 ## Summary
+
 - **Bold insight** — Why it matters and how to apply it.
 - **Bold insight** — Why it matters and how to apply it.
 ```

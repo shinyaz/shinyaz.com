@@ -1,7 +1,7 @@
 ---
 title: "Adding a Featured Posts Section to the Home Page with Velite & Next.js"
 description: "Three patterns worth reusing: Velite's default(false) for safe schema evolution, a MAX_TAGS overflow indicator, and conditionally rendering sections that hide themselves when empty."
-date: 2026-03-07
+date: 2026-03-04
 published: true
 featured: false
 categories:
@@ -53,12 +53,18 @@ Posts with many tags can break card layouts. The fix: show at most N tags and di
 ```tsx title="src/components/blog/featured-post-card.tsx"
 const MAX_TAGS = 3;
 
-{tags.slice(0, MAX_TAGS).map((tag) => (
-  <TagBadge key={tag} slug={tag} locale={locale} />
-))}
-{tags.length > MAX_TAGS && (
-  <span className="text-xs text-muted-foreground">+{tags.length - MAX_TAGS}</span>
-)}
+{
+  tags
+    .slice(0, MAX_TAGS)
+    .map((tag) => <TagBadge key={tag} slug={tag} locale={locale} />);
+}
+{
+  tags.length > MAX_TAGS && (
+    <span className="text-xs text-muted-foreground">
+      +{tags.length - MAX_TAGS}
+    </span>
+  );
+}
 ```
 
 Extracting the limit into a constant means a single edit updates both the slice and the overflow count. I applied the same pattern to the regular `PostCard` component to keep behavior consistent.
@@ -68,16 +74,18 @@ Extracting the limit into a constant means a single edit updates both the slice 
 The featured section on the home page only renders when there's at least one featured post:
 
 ```tsx title="src/app/[locale]/page.tsx"
-{featuredPosts.length > 0 && (
-  <section className="mt-8 md:mt-12">
-    <h2 className="text-xl font-semibold mb-4">{t.home.featuredPosts}</h2>
-    <div className="grid gap-3 sm:grid-cols-2">
-      {featuredPosts.map((post) => (
-        <FeaturedPostCard key={post.permalink} {...post} locale={locale} />
-      ))}
-    </div>
-  </section>
-)}
+{
+  featuredPosts.length > 0 && (
+    <section className="mt-8 md:mt-12">
+      <h2 className="text-xl font-semibold mb-4">{t.home.featuredPosts}</h2>
+      <div className="grid gap-3 sm:grid-cols-2">
+        {featuredPosts.map((post) => (
+          <FeaturedPostCard key={post.permalink} {...post} locale={locale} />
+        ))}
+      </div>
+    </section>
+  );
+}
 ```
 
 This means removing all `featured: true` markers simply hides the section — no code changes needed, no UI breakage. The feature is purely additive: it exists when there's content for it and disappears when there isn't.

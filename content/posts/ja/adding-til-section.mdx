@@ -1,7 +1,7 @@
 ---
 title: "Velite × Next.js でブログに TIL セクションを追加する"
 description: "Velite に新しいコレクションを定義し、既存コンポーネントを最小限の適応で再利用して TIL セクションを実装。検索統合まで含めて、新しい依存関係はゼロだった。"
-date: 2026-03-07
+date: 2026-03-05
 published: true
 featured: false
 categories:
@@ -27,17 +27,19 @@ tags:
 const tils = defineCollection({
   name: "TIL",
   pattern: "tils/**/*.mdx",
-  schema: s.object({
-    title: s.string().max(200),
-    description: s.string().max(500).optional(),
-    date: s.isodate(),
-    published: s.boolean().default(true),
-    tags: s.array(s.string()).default([]),
-    // ...filePath, metadata, content, body
-  }).transform((data) => {
-    // パスからロケールを抽出、year/month/day/slug を計算、permalink を生成
-    // → /{locale}/til/{year}/{month}/{day}/{slug}
-  }),
+  schema: s
+    .object({
+      title: s.string().max(200),
+      description: s.string().max(500).optional(),
+      date: s.isodate(),
+      published: s.boolean().default(true),
+      tags: s.array(s.string()).default([]),
+      // ...filePath, metadata, content, body
+    })
+    .transform((data) => {
+      // パスからロケールを抽出、year/month/day/slug を計算、permalink を生成
+      // → /{locale}/til/{year}/{month}/{day}/{slug}
+    }),
 });
 ```
 
@@ -61,9 +63,12 @@ Velite にコレクションを追加するのは、スキーマ定義と `defin
 const searchablePosts: SearchablePost[] = [
   ...allPosts.map((post) => ({ ...post })),
   ...allTils.map((til) => ({
-    title: til.title, description: til.description,
-    date: til.date, permalink: til.permalink,
-    categories: [] as string[], tags: til.tags,
+    title: til.title,
+    description: til.description,
+    date: til.date,
+    permalink: til.permalink,
+    categories: [] as string[],
+    tags: til.tags,
   })),
 ].sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
 ```

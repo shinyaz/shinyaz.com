@@ -1,7 +1,7 @@
 ---
 title: "Auto-Generating Dynamic OG Images for a Next.js Blog"
 description: "Each blog post now gets a unique OG image at build time using Next.js's opengraph-image.tsx convention and Satori. The biggest gotcha? Satori only supports inline Flexbox styles — no Tailwind, no className."
-date: 2026-03-01
+date: 2026-02-28
 published: true
 featured: false
 categories:
@@ -22,11 +22,11 @@ I wanted each post to have a unique OG image that includes the title, category, 
 
 There are several ways to generate dynamic OG images. I went with the **Next.js App Router `opengraph-image.tsx` file convention** because it required zero additional dependencies:
 
-| Approach | Pros | Cons |
-| --- | --- | --- |
-| External service (Cloudinary, etc.) | Easy setup | External dependency, cost |
-| Canvas API | Flexible | Complex setup in Node.js |
-| **opengraph-image.tsx** | Built into Next.js, zero dependencies | Satori layout constraints |
+| Approach                            | Pros                                  | Cons                      |
+| ----------------------------------- | ------------------------------------- | ------------------------- |
+| External service (Cloudinary, etc.) | Easy setup                            | External dependency, cost |
+| Canvas API                          | Flexible                              | Complex setup in Node.js  |
+| **opengraph-image.tsx**             | Built into Next.js, zero dependencies | Satori layout constraints |
 
 The key advantages: `next/og` (Satori + Resvg) ships with Next.js, placing the file in a route segment auto-generates all the `og:image` meta tags, and `generateStaticParams` makes everything static at build time. No changes to `generateMetadata` required.
 
@@ -47,14 +47,26 @@ Here's what the docs don't emphasize enough: **Satori only supports inline style
 I defined the layout as a React component in `src/lib/og-image.tsx`, keeping the blog's monochrome design:
 
 ```tsx title="src/lib/og-image.tsx"
-export function OgImageLayout({ title, date, category, author, siteName }: OgImageLayoutProps) {
+export function OgImageLayout({
+  title,
+  date,
+  category,
+  author,
+  siteName,
+}: OgImageLayoutProps) {
   return (
-    <div style={{
-      width: "1200px", height: "630px",
-      display: "flex", flexDirection: "column", justifyContent: "space-between",
-      padding: "60px 80px", backgroundColor: "#fafafa",
-      fontFamily: "IBM Plex Sans, IBM Plex Sans JP",
-    }}>
+    <div
+      style={{
+        width: "1200px",
+        height: "630px",
+        display: "flex",
+        flexDirection: "column",
+        justifyContent: "space-between",
+        padding: "60px 80px",
+        backgroundColor: "#fafafa",
+        fontFamily: "IBM Plex Sans, IBM Plex Sans JP",
+      }}
+    >
       {/* Top: category badge + date */}
       {/* Center: title (auto-sizes from 52px to 42px for long titles) */}
       {/* Bottom: author + site name */}
@@ -64,6 +76,7 @@ export function OgImageLayout({ title, date, category, author, siteName }: OgIma
 ```
 
 A few design details worth noting:
+
 - **Title auto-sizing**: titles over 40 characters automatically shrink from 52px to 42px
 - **Colors**: Background `#fafafa`, text `#111111`, subtext `#737373` — matching the blog's monochrome theme
 - **Size**: 1200x630px, the recommended OG image dimensions

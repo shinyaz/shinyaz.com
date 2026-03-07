@@ -1,7 +1,7 @@
 ---
 title: "Next.js PWA を @serwist/turbopack に移行してビルドを高速化する"
 description: "壊れていた3段階ビルドを @serwist/turbopack の Route Handler ベース設計に置き換え、プリキャッシュを修復しつつ Turbopack を有効化した過程と、そこから得た知見。"
-date: 2026-02-28
+date: 2026-02-24
 published: true
 featured: true
 categories:
@@ -67,8 +67,9 @@ import { spawnSync } from "node:child_process";
 import { createSerwistRoute } from "@serwist/turbopack";
 
 const revision =
-  spawnSync("git", ["rev-parse", "HEAD"], { encoding: "utf-8" })
-    .stdout.trim() || crypto.randomUUID();
+  spawnSync("git", ["rev-parse", "HEAD"], {
+    encoding: "utf-8",
+  }).stdout.trim() || crypto.randomUUID();
 
 export const { dynamic, dynamicParams, revalidate, generateStaticParams, GET } =
   createSerwistRoute({
@@ -115,6 +116,6 @@ export { SerwistProvider } from "@serwist/turbopack/react";
 
 ## まとめ
 
-- **フレームワークと戦わない設計を選ぶ。** Route Handler アプローチが機能するのは、ビルドシステムを迂回せず Next.js 自身のプリミティブを使っているからだ。ツール選定では、フレームワークの *外* ではなく *中* で動く設計を優先したい。
+- **フレームワークと戦わない設計を選ぶ。** Route Handler アプローチが機能するのは、ビルドシステムを迂回せず Next.js 自身のプリミティブを使っているからだ。ツール選定では、フレームワークの _外_ ではなく _中_ で動く設計を優先したい。
 - **壊れた機能は静かに潜む。** プリキャッシュが数週間にわたって無機能だったことに気づかなかった。「動いているはず」のものは実際のビルド出力で検証しないと、たいてい動いていない。
 - **明示的は暗黙的に勝る。** `SerwistProvider` を手動で追加するのは最初ダウングレードに感じたが、SW がどこでどう登録されるかが一目瞭然になり、デバッグが楽になった。

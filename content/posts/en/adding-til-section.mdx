@@ -1,7 +1,7 @@
 ---
 title: "Adding a TIL Section to a Velite & Next.js Blog"
 description: "How I added a lightweight TIL (Today I Learned) content type by defining a new Velite collection, reusing existing components with minimal adaptation, and integrating into search — all without a single new dependency."
-date: 2026-03-07
+date: 2026-03-05
 published: true
 featured: false
 categories:
@@ -27,17 +27,19 @@ The `tils` collection in `velite.config.ts` reuses the same MDX pipeline as post
 const tils = defineCollection({
   name: "TIL",
   pattern: "tils/**/*.mdx",
-  schema: s.object({
-    title: s.string().max(200),
-    description: s.string().max(500).optional(),
-    date: s.isodate(),
-    published: s.boolean().default(true),
-    tags: s.array(s.string()).default([]),
-    // ...filePath, metadata, content, body
-  }).transform((data) => {
-    // Extract locale from path, compute year/month/day/slug, build permalink
-    // → /{locale}/til/{year}/{month}/{day}/{slug}
-  }),
+  schema: s
+    .object({
+      title: s.string().max(200),
+      description: s.string().max(500).optional(),
+      date: s.isodate(),
+      published: s.boolean().default(true),
+      tags: s.array(s.string()).default([]),
+      // ...filePath, metadata, content, body
+    })
+    .transform((data) => {
+      // Extract locale from path, compute year/month/day/slug, build permalink
+      // → /{locale}/til/{year}/{month}/{day}/{slug}
+    }),
 });
 ```
 
@@ -61,9 +63,12 @@ The search page (`/[locale]/search`) merges blog posts and TIL entries into a si
 const searchablePosts: SearchablePost[] = [
   ...allPosts.map((post) => ({ ...post })),
   ...allTils.map((til) => ({
-    title: til.title, description: til.description,
-    date: til.date, permalink: til.permalink,
-    categories: [] as string[], tags: til.tags,
+    title: til.title,
+    description: til.description,
+    date: til.date,
+    permalink: til.permalink,
+    categories: [] as string[],
+    tags: til.tags,
   })),
 ].sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
 ```
@@ -92,5 +97,5 @@ Content-only changes can be committed directly to `main`.
 
 - **Velite collections are cheap to add** — a schema definition and one `collections` entry. The transform pattern (extracting locale from path, computing permalink) is the same across content types.
 - **Component reuse validates your abstractions** — `PostList`, `PostCard`, `Pagination`, `MdxContent`, `SocialShare`, and `ProfileCard` all worked without modification. The `categories: []` adapter was the only concession.
-- **New content types should be intentionally simpler** — TIL entries skip categories, featured flags, TOC, and related posts. Knowing what to *leave out* is as important as knowing what to include.
+- **New content types should be intentionally simpler** — TIL entries skip categories, featured flags, TOC, and related posts. Knowing what to _leave out_ is as important as knowing what to include.
 - **Search integration is trivial when you have a shared type** — mapping TILs to `SearchablePost` was a few lines. The existing search logic handled the rest.
