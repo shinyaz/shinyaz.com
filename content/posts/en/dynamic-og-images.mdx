@@ -1,8 +1,9 @@
 ---
 title: "Auto-Generating Dynamic OG Images for a Next.js Blog"
-description: "Learn how to generate unique Open Graph images per blog post using Next.js App Router's opengraph-image.tsx file convention and Satori, with static generation at build time."
+description: "Each blog post now gets a unique OG image at build time using Next.js's opengraph-image.tsx convention and Satori. The biggest gotcha? Satori only supports inline Flexbox styles — no Tailwind, no className."
 date: 2026-03-01
 published: true
+featured: false
 categories:
   - programming
 tags:
@@ -13,13 +14,13 @@ tags:
 
 ## The Problem
 
-This blog was using a single default OG image (`/icons/og-default.png`) across all pages. When sharing articles on social media, the same generic image appeared regardless of the post content — making it impossible to distinguish between articles at a glance.
+When I shared blog posts on social media, every article showed the same generic image. It was impossible to tell articles apart at a glance — not great for a blog that publishes regularly in two languages.
 
-Ideally, each post should have a unique OGP image that includes the article title, category, date, and author name.
+I wanted each post to have a unique OG image that includes the title, category, date, and author name, generated automatically at build time with zero runtime cost.
 
 ## Choosing an Approach
 
-There are several ways to generate dynamic OGP images. I chose the **Next.js App Router `opengraph-image.tsx` file convention**.
+There are several ways to generate dynamic OG images. I went with the **Next.js App Router `opengraph-image.tsx` file convention** because it required zero additional dependencies:
 
 | Approach | Pros | Cons |
 | --- | --- | --- |
@@ -27,16 +28,49 @@ There are several ways to generate dynamic OGP images. I chose the **Next.js App
 | Canvas API | Flexible | Complex setup in Node.js |
 | **opengraph-image.tsx** | Built into Next.js, zero dependencies | Satori layout constraints |
 
-Why this approach:
+The key advantages: `next/og` (Satori + Resvg) ships with Next.js, placing the file in a route segment auto-generates all the `og:image` meta tags, and `generateStaticParams` makes everything static at build time. No changes to `generateMetadata` required.
 
-- `next/og` (Satori + Resvg) is bundled with Next.js — no additional packages needed
-- Placing `opengraph-image.tsx` in a route segment automatically sets `og:image`, `og:image:width`, `og:image:height`, and `twitter:image` meta tags
-- No manual changes to `generateMetadata` required
-- `generateStaticParams` enables static generation of all images at build time
+## How opengraph-image.tsx Works
 
-## Font Preparation
+This is the part I found most elegant. When you place an `opengraph-image.tsx` file in a route segment, Next.js automatically:
 
-Satori cannot use CSS `@font-face` — font data must be passed as an `ArrayBuffer`. Since this blog uses IBM Plex Sans / IBM Plex Sans JP, the Bold TTF files were bundled in the project.
+1. Calls the default export function to produce an `ImageResponse`
+2. Serves the generated image as a `.png` at the route
+3. Injects `og:image`, `og:image:width`, `og:image:height`, and `twitter:image` meta tags into the page's `<head>`
+
+No manual meta tag management needed. The file-based Metadata API handles everything.
+
+## The Satori Gotcha: Inline Styles Only
+
+Here's what the docs don't emphasize enough: **Satori only supports inline styles with Flexbox layout.** No `className`, no Tailwind, no CSS-in-JS. Every style must be a `style={{ }}` object. This is the single biggest constraint when designing OG image layouts.
+
+I defined the layout as a React component in `src/lib/og-image.tsx`, keeping the blog's monochrome design:
+
+```tsx title="src/lib/og-image.tsx"
+export function OgImageLayout({ title, date, category, author, siteName }: OgImageLayoutProps) {
+  return (
+    <div style={{
+      width: "1200px", height: "630px",
+      display: "flex", flexDirection: "column", justifyContent: "space-between",
+      padding: "60px 80px", backgroundColor: "#fafafa",
+      fontFamily: "IBM Plex Sans, IBM Plex Sans JP",
+    }}>
+      {/* Top: category badge + date */}
+      {/* Center: title (auto-sizes from 52px to 42px for long titles) */}
+      {/* Bottom: author + site name */}
+    </div>
+  );
+}
+```
+
+A few design details worth noting:
+- **Title auto-sizing**: titles over 40 characters automatically shrink from 52px to 42px
+- **Colors**: Background `#fafafa`, text `#111111`, subtext `#737373` — matching the blog's monochrome theme
+- **Size**: 1200x630px, the recommended OG image dimensions
+
+## Font Handling
+
+Satori can't use CSS `@font-face` — font data must be passed as an `ArrayBuffer`. Since this blog uses IBM Plex Sans / IBM Plex Sans JP, I bundled the Bold TTF files locally:
 
 ```
 src/assets/fonts/
@@ -44,357 +78,17 @@ src/assets/fonts/
   IBMPlexSansJP-Bold.ttf    # Japanese (~5.5MB)
 ```
 
-While fetching from an external URL is possible, local bundling avoids network dependencies during builds.
+Fetching from an external URL is possible, but local bundling avoids network dependencies during builds. The font loading function caches in module-level variables to avoid repeated disk reads when generating images for multiple posts.
 
-## OG Image Layout Design
+## The Route Implementation
 
-The layout is defined as a React component in `src/lib/og-image.tsx`, following the blog's monochrome design language.
+The `opengraph-image.tsx` file lives in the same directory as the blog post page. The interesting part is that both `page.tsx` and `opengraph-image.tsx` need identical `generateStaticParams` logic — I extracted this into a shared `generateBlogStaticParams()` utility to avoid duplication.
 
-```tsx title="src/lib/og-image.tsx"
-interface OgImageLayoutProps {
-  title: string;
-  date: string;
-  category?: string;
-  author: string;
-  siteName: string;
-  locale: Locale;
-}
-
-export function OgImageLayout({
-  title,
-  date,
-  category,
-  author,
-  siteName,
-}: OgImageLayoutProps) {
-  return (
-    <div
-      style={{
-        width: "1200px",
-        height: "630px",
-        display: "flex",
-        flexDirection: "column",
-        justifyContent: "space-between",
-        padding: "60px 80px",
-        backgroundColor: "#fafafa",
-        fontFamily: "IBM Plex Sans, IBM Plex Sans JP",
-      }}
-    >
-      {/* Top: category badge + date */}
-      <div style={{ display: "flex", alignItems: "center", gap: "16px" }}>
-        {category && (
-          <div
-            style={{
-              fontSize: "20px",
-              color: "#111111",
-              backgroundColor: "#e5e5e5",
-              padding: "4px 16px",
-              borderRadius: "4px",
-              fontWeight: 700,
-            }}
-          >
-            {category}
-          </div>
-        )}
-        <div style={{ fontSize: "20px", color: "#737373" }}>{date}</div>
-      </div>
-
-      {/* Center: title */}
-      <div style={{ display: "flex", flex: 1, alignItems: "center" }}>
-        <div
-          style={{
-            fontSize: title.length > 40 ? "42px" : "52px",
-            fontWeight: 700,
-            color: "#111111",
-            lineHeight: 1.3,
-            overflow: "hidden",
-            textOverflow: "ellipsis",
-            wordBreak: "break-word",
-          }}
-        >
-          {title}
-        </div>
-      </div>
-
-      {/* Bottom: author + site name */}
-      <div
-        style={{
-          display: "flex",
-          justifyContent: "space-between",
-          alignItems: "center",
-        }}
-      >
-        <div style={{ fontSize: "24px", color: "#737373", fontWeight: 700 }}>
-          {author}
-        </div>
-        <div style={{ fontSize: "24px", color: "#737373" }}>{siteName}</div>
-      </div>
-    </div>
-  );
-}
-```
-
-Design details:
-
-- **Size**: 1200x630px (recommended OGP dimensions)
-- **Colors**: Background `#fafafa`, text `#111111`, subtext `#737373` — matching the blog's monochrome theme
-- **Title auto-sizing**: Titles over 40 characters automatically shrink from 52px to 42px
-- **Category badge**: Only rendered when the post has a category
-
-Note that Satori requires inline styles with Flexbox layout — `className` and Tailwind are not supported.
-
-## Sharing generateStaticParams
-
-Both `page.tsx` and `opengraph-image.tsx` live in the same route segment and need identical `generateStaticParams` logic. To avoid duplication, this was extracted into a shared utility.
-
-```typescript title="src/lib/blog-params.ts"
-import { getPublishedPosts } from "./posts";
-import { locales } from "./i18n";
-
-export function generateBlogStaticParams() {
-  const allParams: {
-    locale: string;
-    year: string;
-    month: string;
-    day: string;
-    slug: string;
-  }[] = [];
-  for (const locale of locales) {
-    const posts = getPublishedPosts(locale);
-    for (const post of posts) {
-      allParams.push({
-        locale,
-        year: post.year,
-        month: post.month,
-        day: post.day,
-        slug: post.slugName,
-      });
-    }
-  }
-  return allParams;
-}
-```
-
-The `page.tsx` change is a one-line import swap.
-
-```typescript title="src/app/[locale]/blog/[year]/[month]/[day]/[slug]/page.tsx"
-import { generateBlogStaticParams } from "@/lib/blog-params";
-
-export const generateStaticParams = generateBlogStaticParams;
-```
-
-## OG Image Route Implementation
-
-The `opengraph-image.tsx` file is placed in the same directory as the blog post page, following Next.js file conventions.
-
-```tsx title="src/app/[locale]/blog/[year]/[month]/[day]/[slug]/opengraph-image.tsx"
-import { ImageResponse } from "next/og";
-import { readFile } from "node:fs/promises";
-import { join } from "node:path";
-import { getPostBySlug, getCategoryBySlug, getCategoryName } from "@/lib/posts";
-import { formatDate } from "@/lib/utils";
-import { isValidLocale } from "@/lib/i18n";
-import { AUTHOR } from "@/lib/constants";
-import { generateBlogStaticParams } from "@/lib/blog-params";
-import { OgImageLayout } from "@/lib/og-image";
-
-export const alt = "Blog post";
-export const size = { width: 1200, height: 630 };
-export const contentType = "image/png";
-
-export const generateStaticParams = generateBlogStaticParams;
-
-let fontSansCache: Buffer | null = null;
-let fontSansJPCache: Buffer | null = null;
-
-async function loadFonts() {
-  if (!fontSansCache) {
-    fontSansCache = await readFile(
-      join(process.cwd(), "src/assets/fonts/IBMPlexSans-Bold.ttf")
-    );
-  }
-  if (!fontSansJPCache) {
-    fontSansJPCache = await readFile(
-      join(process.cwd(), "src/assets/fonts/IBMPlexSansJP-Bold.ttf")
-    );
-  }
-  return { fontSans: fontSansCache, fontSansJP: fontSansJPCache };
-}
-
-export default async function OgImage({ params }: Props) {
-  const { locale, year, month, day, slug } = await params;
-
-  if (!isValidLocale(locale)) {
-    return new ImageResponse(<div>Not Found</div>, { ...size });
-  }
-
-  const post = getPostBySlug(year, month, day, slug, locale);
-  if (!post) {
-    return new ImageResponse(<div>Not Found</div>, { ...size });
-  }
-
-  const { fontSans, fontSansJP } = await loadFonts();
-
-  const categorySlug = post.categories[0];
-  const category = categorySlug
-    ? getCategoryBySlug(categorySlug)
-    : undefined;
-  const categoryName = category
-    ? getCategoryName(category, locale)
-    : undefined;
-
-  return new ImageResponse(
-    (
-      <OgImageLayout
-        title={post.title}
-        date={formatDate(post.date, locale)}
-        category={categoryName}
-        author={AUTHOR}
-        siteName="shinyaz.com"
-        locale={locale}
-      />
-    ),
-    {
-      ...size,
-      fonts: [
-        {
-          name: "IBM Plex Sans",
-          data: fontSans,
-          weight: 700,
-          style: "normal",
-        },
-        {
-          name: "IBM Plex Sans JP",
-          data: fontSansJP,
-          weight: 700,
-          style: "normal",
-        },
-      ],
-    }
-  );
-}
-```
-
-Key implementation details:
-
-- **Font caching**: `loadFonts()` caches in module-level variables to avoid repeated disk reads across multiple posts during build
-- **Reusing existing functions**: `getPostBySlug`, `getCategoryBySlug`, `getCategoryName`, and `formatDate` are used directly
-- **Static generation**: The shared `generateBlogStaticParams` generates images for all posts at build time
-- **Export conventions**: Named exports for `alt`, `size`, and `contentType` tell Next.js how to generate meta tags
-
-## How opengraph-image.tsx Works
-
-When you place an `opengraph-image.tsx` file in a route segment, Next.js automatically:
-
-1. Calls the `default export` function to produce an `ImageResponse`
-2. Serves the generated image as a `.png` at the route (e.g., `/en/blog/2026/03/01/hello-world/opengraph-image.png`)
-3. Injects these meta tags into the parent layout's `<head>`:
-
-```html
-<meta property="og:image" content="https://shinyaz.com/en/blog/.../opengraph-image.png" />
-<meta property="og:image:width" content="1200" />
-<meta property="og:image:height" content="630" />
-<meta property="og:image:type" content="image/png" />
-<meta name="twitter:image" content="https://shinyaz.com/en/blog/.../opengraph-image.png" />
-```
-
-No need to manually set `openGraph.images` in `generateMetadata` — the file-based Metadata API handles it.
-
-## Testing
-
-### Unit Tests
-
-The `OgImageLayout` component's JSX output is tested directly.
-
-```tsx title="__tests__/lib/og-image.test.tsx"
-describe("OgImageLayout", () => {
-  it("renders category badge when category is provided", () => {
-    const result = OgImageLayout({ ...baseProps, category: "Programming" });
-    const topBar = result.props.children[0];
-    const categoryBadge = topBar.props.children[0];
-    expect(categoryBadge.props.children).toBe("Programming");
-  });
-
-  it("uses smaller font size for long titles", () => {
-    const longTitle = "This is a very long title that exceeds forty characters";
-    const result = OgImageLayout({ ...baseProps, title: longTitle });
-    const centerSection = result.props.children[1];
-    const titleDiv = centerSection.props.children;
-    expect(titleDiv.props.style.fontSize).toBe("42px");
-  });
-});
-```
-
-Tests for `generateBlogStaticParams` verify that only published posts are included and drafts are excluded.
-
-### E2E Tests
-
-Playwright tests validate the actual build output.
-
-```typescript title="e2e/og-image.spec.ts"
-test.describe("OG Image", () => {
-  test("English blog post has og:image meta tag", async ({ page }) => {
-    await page.goto("/en/blog");
-    const firstPostLink = page.locator("article a").first();
-    await page.goto(await firstPostLink.getAttribute("href")!);
-
-    const ogImage = page.locator('meta[property="og:image"]');
-    await expect(ogImage).toHaveCount(1);
-    expect(await ogImage.getAttribute("content")).toContain("opengraph-image");
-  });
-
-  test("OG image URL returns a PNG image", async ({ page, request, baseURL }) => {
-    // ...get og:image URL from the post page
-    const localUrl = imageUrl.replace(/^https?:\/\/[^\/]+/, baseURL!);
-    const response = await request.get(localUrl);
-    expect(response.status()).toBe(200);
-    expect(response.headers()["content-type"]).toContain("image/png");
-  });
-
-  test("og:image:width and og:image:height are set", async ({ page }) => {
-    // ...
-    expect(await ogWidth.getAttribute("content")).toBe("1200");
-    expect(await ogHeight.getAttribute("content")).toBe("630");
-  });
-});
-```
-
-A key E2E testing detail: the `og:image` URL uses the production domain, so tests rewrite it to the local server URL before making requests.
-
-## Build Output
-
-Running `npm run build` shows OG images being statically generated as SSG routes.
-
-```
-● /[locale]/blog/[year]/[month]/[day]/[slug]/opengraph-image
-  ├ /ja/blog/2026/03/01/category-tag-index-pages/opengraph-image
-  ├ /ja/blog/2026/02/28/responsive-mobile-optimization/opengraph-image
-  ├ /ja/blog/2026/02/28/serwist-turbopack-migration/opengraph-image
-  └ [+5 more paths]
-```
-
-## Files Changed
-
-| Type | File | Description |
-| --- | --- | --- |
-| New | `src/assets/fonts/IBMPlexSans-Bold.ttf` | Latin font |
-| New | `src/assets/fonts/IBMPlexSansJP-Bold.ttf` | Japanese font |
-| New | `src/lib/og-image.tsx` | OG image layout component |
-| New | `src/lib/blog-params.ts` | Shared generateStaticParams utility |
-| New | `opengraph-image.tsx` | OG image generation route |
-| Modified | `page.tsx` | Replaced generateStaticParams with shared function |
-| New | `__tests__/lib/og-image.test.tsx` | Layout unit tests (8 tests) |
-| New | `__tests__/lib/blog-params.test.ts` | Params generation unit tests (5 tests) |
-| New | `e2e/og-image.spec.ts` | E2E tests (5 tests) |
-
-Zero new dependencies added.
+The route itself loads fonts, fetches the post data using existing helper functions (`getPostBySlug`, `getCategoryName`, `formatDate`), and returns an `ImageResponse` with the layout component and font configuration. Named exports for `alt`, `size`, and `contentType` tell Next.js how to generate the meta tags.
 
 ## Summary
 
-By leveraging the `opengraph-image.tsx` file convention in Next.js App Router, each blog post now gets a unique OGP image automatically:
-
-- **Zero additional dependencies**: `next/og` is bundled with Next.js
-- **Automatic meta tags**: No `generateMetadata` changes needed
-- **Static generation at build time**: No runtime image generation overhead
-- **Bilingual support**: Japanese font bundled for proper CJK rendering
-- **Reuse of existing code**: Layout and image generation separated for testability
+- **File-based Metadata API is powerful** — placing `opengraph-image.tsx` in a route segment handles all meta tag generation automatically. This is one of the underrated features of Next.js App Router.
+- **Satori's inline-style constraint is the main challenge** — plan your layout around Flexbox and inline styles from the start. Don't try to reuse your Tailwind components.
+- **Bundle fonts locally for bilingual sites** — CJK fonts are large (~5.5MB for Japanese), but the alternative is build-time network failures. Cache the font data at module level to avoid repeated reads.
+- **Share `generateStaticParams` when multiple files need it** — extracting it into a utility prevents drift between `page.tsx` and `opengraph-image.tsx`.

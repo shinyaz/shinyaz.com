@@ -1,8 +1,9 @@
 ---
-title: "Next.js ブログをレスポンシブ対応 — ハンバーガーメニューとモバイル最適化"
-description: "外部ライブラリゼロで実装するモバイルナビゲーション。ハンバーガーメニュー、レスポンシブスペーシング、タッチターゲット最適化など、Next.js App Router ブログのモバイル UX 改善手順を詳しく解説します。"
+title: "Next.js ブログのレスポンシブ対応 — backdrop-filter の罠で全部壊れた話"
+description: "ハンバーガーメニュー、レスポンシブスペーシング、タッチターゲットを追加。最大の学びは、CSS の backdrop-filter が fixed 子要素の包含ブロックを暗黙的に作るという仕様だった。"
 date: 2026-02-28
 published: true
+featured: false
 categories:
   - programming
 tags:
@@ -12,170 +13,42 @@ tags:
   - a11y
 ---
 
-## はじめに
+## 課題
 
-このブログは Next.js 16 + Tailwind CSS v4 で構築していますが、レスポンシブ対応がほぼ未実装の状態でした。デスクトップでは問題なく閲覧できるものの、モバイルでは以下の課題がありました。
+このブログをスマートフォンで初めて開いたとき、すぐに問題が目についた。ナビゲーションリンクが横に溢れている。パディングがデスクトップサイズのまま。ボタンが小さすぎてタップしにくい。見出しが不釣り合いに大きい。
 
-- ナビゲーションリンクがすべて横並びで、狭い画面では溢れる
-- パディング・マージンが固定値で、モバイルでは余白が大きすぎる
-- ボタンやリンクのタッチターゲットが小さく、タップしにくい
-- 見出しのフォントサイズが大きく、モバイルではバランスが悪い
+修正は4つの領域に及んだ：ハンバーガーメニュー、レスポンシブスペーシング、レスポンシブタイポグラフィ、WCAG 準拠のタッチターゲット。すべて Tailwind CSS のユーティリティクラスと標準の React hooks で実装し、外部ライブラリは使っていない。
 
-今回、**外部依存関係ゼロ**で以下のレスポンシブ最適化を実装しました。
+だが、この作業で最も学びが大きかったのはレスポンシブデザインとは無関係だった。ドロワーの実装を静かに壊した CSS 仕様のエッジケースの話だ。
 
-1. ハンバーガーメニュー（モバイルナビゲーション）
-2. レスポンシブスペーシング（モバイルファースト）
-3. レスポンシブタイポグラフィ
-4. タッチターゲットの最適化
-5. アクセシビリティ対応
+## backdrop-filter の罠
 
-## viewport メタデータ
+誰かに先に教えてほしかったと思う落とし穴だ。デバッグに数時間かかった。モバイルメニューを作らなくても、知っておく価値がある。
 
-まず、Next.js の `Viewport` export を追加して、モバイルブラウザでの正しいスケーリングを保証します。
+### 前提
 
-```typescript title="src/app/layout.tsx"
-import type { Viewport } from "next";
+ブログのヘッダーは `sticky top-0 z-50` に `backdrop-blur-sm`（すりガラス効果）を適用している。`MobileNav` コンポーネントはこのヘッダーの子要素。ドロワーを `fixed` で配置し、ヘッダーの下からビューポート下端まで覆うつもりだった。
 
-export const viewport: Viewport = {
-  width: "device-width",
-  initialScale: 1,
-  maximumScale: 5,
-};
-```
+### 問題 1: z-index スタッキングコンテキスト
 
-`maximumScale: 5` は、ユーザーが拡大操作できることを保証するためのアクセシビリティ配慮です。`maximumScale: 1` にするとピンチズームが無効になり、WCAG に違反します。
+最初の実装ではオーバーレイを `fixed inset-0 z-40` にした。2つの問題が発生：
 
-## ハンバーガーメニューの実装
+1. オーバーレイがヘッダー領域まで覆ってしまう — `inset-0` はビューポート全体を対象にするため、ヘッダーのブラーの上にさらにブラーが重なり表示が崩れた
+2. ハンバーガーボタンが操作不能になる — ボタンの z-index は実質 0 で、z-40 のオーバーレイの下に隠れてしまった
 
-### アーキテクチャ
+オーバーレイの範囲を `top-14 right-0 bottom-0 left-0` に変更し、ボタンに `relative z-50` を追加した。
 
-Header コンポーネントはサーバーコンポーネントのまま維持し、インタラクティブなモバイルナビゲーションだけを `"use client"` コンポーネントとして分離しました。
+### 問題 2: 本当の驚き
 
-```
-Header (Server Component)
-├── Desktop Nav (hidden md:flex) — 既存のナビゲーション
-└── MobileNav (Client Component, md:hidden) — 新規
-    ├── ハンバーガーボタン
-    ├── オーバーレイ
-    └── ドロワー（右からスライドイン）
-```
+ドロワーの**縦幅がヘッダーの高さ（約 57px）と同じ**になり、ビューポート下端まで伸びない。メニューがほとんど見えない。
 
-この設計のポイントは：
+原因はヘッダーの `backdrop-blur-sm` だった。これは `backdrop-filter: blur(4px)` を生成するが、CSS 仕様上 **`backdrop-filter` を持つ要素は `fixed` 子要素の包含ブロック（containing block）になる。** つまり `fixed top-14 bottom-0` は「ビューポートの上端から 56px〜下端」ではなく、「**ヘッダーの上端から 56px〜ヘッダーの下端**」として解釈される。ドロワーの高さは実質ゼロだ。
 
-- **Server Component を活かす**: Header 全体をクライアントコンポーネントにせず、必要な部分だけを分離
-- **辞書を props で渡す**: `getDictionary(locale)` の結果を MobileNav に props で渡し、クライアント側で i18n ライブラリを不要に
+この挙動は `transform`、`perspective`、`filter`、`backdrop-filter`、`will-change` で発生する。仕様には書いてあるが、実践的なチュートリアルではほとんど言及されない。
 
-### MobileNav コンポーネント
+### 解決策: createPortal
 
-```tsx title="src/components/layout/mobile-nav.tsx"
-"use client";
-
-import { useState, useEffect } from "react";
-import Link from "next/link";
-import type { Dictionary, Locale } from "@/lib/i18n";
-import { ThemeToggle } from "@/components/theme/theme-toggle";
-import { LanguageSwitcher } from "@/components/layout/language-switcher";
-
-interface MobileNavProps {
-  locale: Locale;
-  t: Dictionary;
-}
-
-export function MobileNav({ locale, t }: MobileNavProps) {
-  const [isOpen, setIsOpen] = useState(false);
-
-  // Lock body scroll when open
-  useEffect(() => {
-    if (isOpen) {
-      document.body.style.overflow = "hidden";
-    } else {
-      document.body.style.overflow = "";
-    }
-    return () => {
-      document.body.style.overflow = "";
-    };
-  }, [isOpen]);
-
-  // Close on Escape key
-  useEffect(() => {
-    if (!isOpen) return;
-    function handleKeyDown(e: KeyboardEvent) {
-      if (e.key === "Escape") {
-        setIsOpen(false);
-      }
-    }
-    document.addEventListener("keydown", handleKeyDown);
-    return () => document.removeEventListener("keydown", handleKeyDown);
-  }, [isOpen]);
-
-  // ...
-}
-```
-
-実装のポイントをいくつか解説します。
-
-### スクロールロック
-
-ドロワーが開いている間、`document.body.style.overflow = "hidden"` で背面のスクロールを無効化します。`useEffect` のクリーンアップでアンマウント時に確実にリセットします。
-
-### キーボード操作
-
-Escape キーでドロワーを閉じられるようにしています。`isOpen` が `false` のときはイベントリスナーを登録しないことで、不要なリスナーを避けています。
-
-### ルート変更時の自動クローズ
-
-リンクの `onClick` ハンドラで `setIsOpen(false)` を呼び、ページ遷移時にドロワーを閉じます。
-
-```tsx
-<Link
-  href={link.href}
-  onClick={() => setIsOpen(false)}
->
-  {link.label}
-</Link>
-```
-
-当初は `usePathname()` の変化を `useEffect` で監視して自動クローズする方式を実装しましたが、React 19 の ESLint ルール `react-hooks/set-state-in-effect` に抵触しました。Effect 内での `setState` はカスケードレンダリングを引き起こす可能性があるため、onClick での明示的なクローズに切り替えています。
-
-### アクセシビリティ
-
-```tsx
-<button
-  aria-expanded={isOpen}
-  aria-label={isOpen ? t.nav.closeMenu : t.nav.menu}
->
-```
-
-- `aria-expanded` でスクリーンリーダーに開閉状態を伝達
-- `aria-label` で「メニュー」「メニューを閉じる」をバイリンガルで提供
-- `motion-reduce:transition-none` で `prefers-reduced-motion` を尊重
-
-### fixed 配置と backdrop-filter の罠
-
-実装中に2つの落とし穴にハマったので共有します。
-
-#### 問題1: z-index スタッキングコンテキスト
-
-Header は `sticky top-0 z-50` でスタッキングコンテキストを形成しています。MobileNav はその子要素なので、オーバーレイやドロワーに `fixed` + `z-index` を指定しても、z-index は **Header のスタッキングコンテキスト内**で解決されます。
-
-最初の実装では、オーバーレイを `fixed inset-0 z-40` としていました。これには2つの問題がありました。
-
-1. **オーバーレイがヘッダー領域まで覆ってしまう** — `inset-0` は viewport 全体を対象とするため、ヘッダーの `bg-background/80 backdrop-blur-sm` の上にさらに半透明 + ブラーが重なり、表示が崩れる
-2. **ハンバーガーボタンが操作不能になる** — ボタンの z-index は auto（0相当）なので、z-40 のオーバーレイの下に隠れてしまう
-
-応急処置として、オーバーレイの範囲を `top-14 right-0 bottom-0 left-0` に変更し、ハンバーガーボタンに `relative z-50` を追加しました。
-
-#### 問題2: backdrop-filter が fixed の包含ブロックになる
-
-しかし、これだけでは不十分でした。ドロワーの**縦幅がヘッダーの高さ（約57px）と同じ**になり、メニューがほとんど表示されなかったのです。
-
-原因は Header の `backdrop-blur-sm` です。これは `backdrop-filter: blur(4px)` を生成しますが、CSS 仕様上 **`backdrop-filter` を持つ要素は `fixed` 子要素の包含ブロック（containing block）になります**。つまり、`fixed top-14 bottom-0` は「ビューポートの上から56px 〜 下端」ではなく、「**Header の上から56px 〜 Header の下端**」として解釈され、ドロワーの高さはほぼ 0 になります。
-
-これは `transform`、`perspective`、`filter`、`backdrop-filter`、`will-change` などのプロパティで発生する、あまり知られていない CSS の仕様です。
-
-#### 解決策: createPortal
-
-最終的に、`createPortal` でオーバーレイとドロワーを `document.body` に直接レンダリングする方式に切り替えました。これにより、Header の `backdrop-filter` や `z-index` スタッキングコンテキストの影響を完全に回避できます。
+最終的に、オーバーレイとドロワーをヘッダーの DOM ツリーの外にレンダリングする方式に切り替えた：
 
 ```tsx title="src/components/layout/mobile-nav.tsx"
 import { createPortal } from "react-dom";
@@ -185,10 +58,7 @@ export function MobileNav({ locale, t }: MobileNavProps) {
 
   return (
     <div className="md:hidden">
-      <button
-        className="relative z-50 inline-flex h-9 w-9 ..."
-        aria-expanded={isOpen}
-      >
+      <button className="relative z-50 inline-flex h-9 w-9 ..." aria-expanded={isOpen}>
         {/* ハンバーガーアイコン */}
       </button>
 
@@ -211,192 +81,47 @@ export function MobileNav({ locale, t }: MobileNavProps) {
 }
 ```
 
-`sticky` ヘッダーの中にモーダルやドロワーを配置する場合、`backdrop-filter` の存在を見落としがちです。`fixed` の配置が想定通りにならないときは、親要素のスタイルを確認するか、`createPortal` で DOM ツリーの外に逃がすのが確実です。
+`document.body` にポータルすることで、ドロワーの `fixed` 配置がビューポートに対して解決され、ヘッダーの `backdrop-filter` 包含ブロックを完全にバイパスできる。
 
-### Header の変更
+**教訓**: `sticky` ヘッダーの中で `fixed` 配置が期待通りに動かないとき、親要素の `backdrop-filter`、`transform`、`filter` を確認すること。あるいは `createPortal` で問題ごと回避するのが確実だ。
 
-既存のデスクトップナビゲーションに `hidden md:flex` を追加してモバイルで非表示にし、MobileNav を追加するだけです。
+## ハンバーガーメニューのアーキテクチャ
 
-```tsx title="src/components/layout/header.tsx"
-<nav className="hidden items-center gap-4 md:flex">
-  {/* 既存のデスクトップナビ */}
-</nav>
-<MobileNav locale={locale} t={t} />
+Header コンポーネントはサーバーコンポーネントのまま維持。インタラクティブなモバイルナビゲーションだけを `"use client"` コンポーネントとして分離した：
+
+```
+Header (Server Component)
+├── Desktop Nav (hidden md:flex) — 既存
+└── MobileNav (Client Component, md:hidden) — 新規
+    ├── ハンバーガーボタン
+    ├── オーバーレイ（body にポータル）
+    └── ドロワー（body にポータル）
 ```
 
-## レスポンシブスペーシング
+辞書（`getDictionary(locale)` の結果）は MobileNav に props で渡し、クライアントコンポーネントが i18n ライブラリに依存しないようにしている。
 
-すべてのページコンテナの `py-12` を `py-6 md:py-12` に変更しました。Tailwind CSS のモバイルファーストアプローチに従い、小さい値をデフォルトにしてブレークポイントで拡大します。
+主な挙動：ドロワー展開時にボディスクロールをロック、Escape キーでクローズ、各リンクの `onClick` で `setIsOpen(false)` を呼ぶ。当初 `usePathname()` の変化を `useEffect` で監視する方式を実装したが、React 19 の `react-hooks/set-state-in-effect` ルールに抵触した。明示的な `onClick` ハンドラの方がクリーンだ。
+
+## レスポンシブスペーシング・タイポグラフィ・タッチターゲット
+
+これらは地味だが、合わせると効果は大きい。
+
+**スペーシング** — すべてのページコンテナを `py-12` から `py-6 md:py-12` に変更。11ファイルにわたってモバイルの縦パディングを半減させ、コンテンツの可視領域を大幅に改善した。
+
+**タイポグラフィ** — `.prose` 内の見出しサイズを CSS `@media` クエリでモバイル時に縮小（例: h1 を `2rem` → `1.625rem`）。コードブロックのフォントサイズも `0.8125rem` → `0.875rem` で段階を付けた。
+
+**タッチターゲット** — WCAG 2.5.5 は最低 44x44 CSS ピクセルを推奨。ソーシャルシェアボタン、ページネーション、フッターアイコンをモバイルで `h-11 w-11`（44px）に拡大し、`md` で元のサイズに戻す：
 
 ```tsx
-// Before
-<div className="mx-auto max-w-3xl px-4 py-12">
-
-// After
-<div className="mx-auto max-w-3xl px-4 py-6 md:py-12">
-```
-
-変更対象は 11 ファイル（9 つの通常ページ + not-found + offline）です。一見地味な変更ですが、モバイルでは上下のパディングが半分になり、コンテンツの可視領域が大幅に改善されます。
-
-## レスポンシブタイポグラフィ
-
-`.prose` クラス内の見出しサイズをモバイルで縮小しました。CSS のネイティブ `@media` クエリを使用しています。
-
-```css title="src/app/globals.css"
-.prose {
-  & h1 {
-    font-size: 1.625rem;
-
-    @media (min-width: 768px) {
-      font-size: 2rem;
-    }
-  }
-
-  & h2 {
-    font-size: 1.25rem;
-    margin-top: 1.5rem;
-
-    @media (min-width: 768px) {
-      font-size: 1.5rem;
-      margin-top: 2rem;
-    }
-  }
-
-  & h3 {
-    font-size: 1.125rem;
-    margin-top: 1.25rem;
-
-    @media (min-width: 768px) {
-      font-size: 1.25rem;
-      margin-top: 1.5rem;
-    }
-  }
-}
-```
-
-コードブロックのフォントサイズも `0.8125rem` → `0.875rem`（md以上）に段階を付けています。
-
-## タッチターゲットの最適化
-
-WCAG 2.5.5 では、タッチターゲットのサイズは最低 44x44 CSS ピクセルが推奨されています。以下のコンポーネントでモバイル時のサイズを拡大しました。
-
-### ソーシャルシェアボタン
-
-```tsx
-// Before
-"inline-flex h-9 w-9 ..."
-
-// After
+// ソーシャルシェアボタン — モバイル 44px、デスクトップ 36px
 "inline-flex h-11 w-11 ... md:h-9 md:w-9"
 ```
 
-`h-11 w-11` は 44px に相当し、WCAG の推奨サイズを満たします。
-
-### ページネーション
-
-```tsx
-// Before
-"px-3 py-1.5"
-
-// After
-"px-4 py-2 md:px-3 md:py-1.5"
-```
-
-### フッターのソーシャルリンク
-
-```tsx
-// Before
-className="text-muted-foreground hover:text-foreground transition-colors"
-
-// After
-className="inline-flex h-11 w-11 items-center justify-center text-muted-foreground hover:text-foreground transition-colors md:h-auto md:w-auto"
-```
-
-16px のアイコンに 44px のタッチエリアを確保しつつ、デスクトップではコンパクトな表示に戻します。
-
-### メタデータの折り返し
-
-投稿カードと記事ページのメタデータ行に `flex-wrap` を追加し、カテゴリバッジやタグが多い場合に改行されるようにしました。
-
-```tsx
-// Before
-<div className="flex items-center gap-3">
-
-// After
-<div className="flex flex-wrap items-center gap-2 md:gap-3">
-```
-
-## テスト戦略
-
-### ユニットテスト
-
-MobileNav コンポーネントのテストでは、以下を検証しています。
-
-```typescript title="__tests__/components/layout/mobile-nav.test.tsx"
-describe("MobileNav", () => {
-  it("renders hamburger button");
-  it("hamburger button has aria-expanded=false initially");
-  it("opens drawer on click and sets aria-expanded=true");
-  it("shows nav links when drawer is open");
-  it("nav links have correct hrefs for en locale");
-  it("nav links have correct hrefs for ja locale");
-  it("closes drawer on Escape key");
-  it("locks body scroll when open");
-  it("unlocks body scroll when closed");
-});
-```
-
-### E2E テスト
-
-Playwright にモバイルビューポート（375x667）での E2E テストを追加しました。
-
-```typescript title="e2e/mobile-navigation.spec.ts"
-test.use({ viewport: { width: 375, height: 667 } });
-
-test.describe("Mobile Navigation", () => {
-  test("hamburger menu is visible on mobile");
-  test("desktop nav is hidden on mobile");
-  test("opens drawer and shows nav links");
-  test("navigates to blog via mobile menu");
-  test("drawer closes after navigation");
-  test("closes drawer with Escape key");
-  test("closes drawer when clicking overlay");
-  test("Japanese locale mobile menu");
-});
-```
-
-Playwright の設定には `mobile-chrome` プロジェクトを追加し、モバイル専用テストだけをこのプロジェクトで実行するようにしています。
-
-```typescript title="playwright.config.ts"
-projects: [
-  {
-    name: "chromium",
-    use: { ...devices["Desktop Chrome"] },
-  },
-  {
-    name: "mobile-chrome",
-    use: { ...devices["Pixel 5"] },
-    testMatch: "mobile-*.spec.ts",
-  },
-],
-```
-
-## 変更ファイル一覧
-
-| 区分 | ファイル数 | 内容 |
-| --- | --- | --- |
-| 新規 | 3 | MobileNav コンポーネント、ユニットテスト、E2E テスト |
-| 変更 | 22 | レイアウト、i18n、ページ、コンポーネント、CSS、テスト設定 |
-
-外部依存関係の追加はゼロです。
+**Viewport** — Next.js の `Viewport` export に `maximumScale: 5` を追加。`maximumScale: 1` はピンチズームを無効にし、WCAG のアクセシビリティガイドラインに違反する。
 
 ## まとめ
 
-今回のレスポンシブ最適化は、大きく分けて4つの改善を行いました。
-
-1. **ハンバーガーメニュー**: サーバーコンポーネントを維持しつつ、クライアントコンポーネントを最小限に分離
-2. **レスポンシブスペーシング**: モバイルファーストの `py-6 md:py-12` パターンでコンテンツ可視領域を改善
-3. **レスポンシブタイポグラフィ**: CSS `@media` クエリで見出し・コードブロックのサイズを段階的に調整
-4. **タッチターゲット**: WCAG 推奨の 44px をモバイルで確保しつつ、デスクトップではコンパクトに
-
-外部ライブラリなしで、Tailwind CSS のユーティリティクラスと標準の React hooks だけで実現できます。同様の構成の Next.js ブログをお持ちの方は、参考にしてみてください。
+- **`backdrop-filter` は `fixed` 子要素の包含ブロックを作る** — この記事で最も覚えておくべきこと。CSS 仕様にあるがほとんど議論されない。`transform`、`filter`、`will-change` も同様。親要素の中で `fixed` 配置が壊れたら、`createPortal` が確実な回避策だ。
+- **Server Component をデフォルトに** — `"use client"` が必要だったのはハンバーガーメニューだけ。ヘッダー、ナビリンク、すべてのページレイアウトはサーバーレンダリングのまま。
+- **モバイルファーストのスペーシングは積み重ねが効く** — `py-6 md:py-12` はファイルあたり些細な変更だが、全ページに適用するとモバイルの読書体験が目に見えて改善する。
+- **WCAG タッチターゲットは簡単に実装できる** — `h-11 w-11 md:h-9 md:w-9` でモバイル 44px を確保しつつ、デスクトップデザインは変えない。

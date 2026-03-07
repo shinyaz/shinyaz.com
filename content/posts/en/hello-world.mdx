@@ -1,6 +1,6 @@
 ---
-title: "Hello World - Welcome to shinyaz.com"
-description: "The first post on shinyaz.com. A detailed look at the blog's features: bilingual support, dark mode, full-text search, PWA, SEO, and more."
+title: "Building a Bilingual Tech Blog with Next.js 16, Velite, and MDX"
+description: "A deep dive into the architecture behind shinyaz.com — why I chose Velite over Contentlayer, how I handle bilingual content without an i18n library, and the design decisions behind a minimal, monochrome developer blog."
 date: 2026-02-22
 published: true
 featured: true
@@ -16,13 +16,11 @@ tags:
   - seo
 ---
 
-## Introduction
+## Overview
 
-Welcome to shinyaz.com! This is a minimal, monochrome personal tech blog built with Next.js 16 and MDX.
+Most developer blogs look the same: a Next.js + Markdown setup, maybe Contentlayer, some syntax highlighting, call it a day. When I set out to build shinyaz.com, I wanted something more opinionated — a bilingual blog that treats Japanese and English as first-class citizens, runs entirely as a static site, and stays fast without a CMS or database.
 
-In this post, I'll walk through the technologies and features that power this blog.
-
-## Tech Stack
+This post walks through the key architectural decisions and what I learned building it. Here's the stack at a glance:
 
 | Category | Technology |
 |---|---|
@@ -36,11 +34,26 @@ In this post, I'll walk through the technologies and features that power this bl
 | Testing | Vitest + Playwright |
 | Deployment | Vercel |
 
-## Bilingual Support (Japanese / English)
+## Why Velite for Content
 
-Every page on this blog is available in both Japanese and English. Instead of relying on an external i18n library, translations are handled by a simple TypeScript dictionary object.
+The biggest decision was the content pipeline. Contentlayer was the obvious choice for MDX + Next.js, but it's been effectively unmaintained. [Velite](https://velite.js.org/) offered a similar developer experience — type-safe content collections, build-time processing — while being actively maintained and more flexible.
 
-```typescript
+The pipeline is straightforward: MDX files go through Velite as a prebuild step, which outputs typed JSON that Next.js imports directly.
+
+```
+content/posts/{en,ja}/*.mdx
+  → Velite (prebuild)
+    → .velite/ (static data)
+      → Next.js (App Router)
+```
+
+MDX processing chains three plugins: **rehype-slug** for heading anchors, **remark-math** + **rehype-katex** for math rendering, and **rehype-pretty-code** (Shiki) for syntax highlighting with dual light/dark themes. What I like about this setup is that everything resolves at build time — no client-side JavaScript for content rendering.
+
+## Bilingual Without an i18n Library
+
+I deliberately avoided libraries like `next-intl` or `react-i18next`. For a static blog with a fixed set of UI strings, they add complexity without much benefit. Instead, all translations live in a single TypeScript dictionary:
+
+```typescript title="src/lib/i18n.ts"
 const dictionaries = {
   ja: {
     site: { name: "shinyaz.com", description: "..." },
@@ -55,16 +68,15 @@ const dictionaries = {
 };
 ```
 
-- A language switcher button ("EN / JP") in the header toggles between locales while staying on the same page
-- URLs always include a locale prefix (e.g., `/en/blog/...`, `/ja/blog/...`)
-- Bare paths automatically redirect based on the browser's `Accept-Language` header
-- Content files are organized by locale (`content/posts/en/`, `content/posts/ja/`)
+Every route lives under `/[locale]/`, and content files are split by directory (`content/posts/en/`, `content/posts/ja/`). A language switcher in the header lets you toggle between locales on the same page, and bare paths redirect based on the browser's `Accept-Language` header.
 
-## Dark Mode
+The tradeoff is obvious: this approach doesn't scale to dozens of languages. But for two languages, it's simple, type-safe, and has zero runtime cost.
 
-The blog supports class-based dark mode toggling via `next-themes`. Theme tokens are defined as CSS custom properties, switching between `:root` (light) and `.dark` (dark).
+## Visual Design: Monochrome, IBM Plex, and Dark Mode
 
-Code blocks also adapt automatically, using Shiki's dual theme (github-light / github-dark) that responds to the active theme.
+I wanted the design to get out of the way. Monochrome colors, generous whitespace, and the [IBM Plex](https://www.ibm.com/plex/) font family — Sans for body text, Mono for code, and Sans JP for Japanese. The Japanese font is lazy-loaded (`preload: false`) since it's significantly larger than the Latin variants.
+
+Tailwind CSS v4's CSS-first configuration made theming clean. All color tokens are CSS custom properties that swap between `:root` and `.dark`, and `next-themes` handles the toggle. Code blocks follow the theme automatically via Shiki's dual theme support (github-light / github-dark):
 
 ```typescript title="example.ts"
 function greet(name: string): string {
@@ -74,26 +86,11 @@ function greet(name: string): string {
 console.log(greet("World"));
 ```
 
-## Content Pipeline
+## Content Capabilities
 
-Posts are written as MDX files and transformed into static data at build time by [Velite](https://velite.js.org/).
+One of the benefits of the MDX + Shiki + KaTeX stack is rich content support out of the box.
 
-```
-content/posts/{en,ja}/*.mdx
-  → Velite (prebuild)
-    → .velite/ (static data)
-      → Next.js (App Router)
-```
-
-MDX content is processed through the following plugin chain:
-
-1. **rehype-slug** — Automatically adds IDs to headings for anchor links
-2. **remark-math** + **rehype-katex** — Math rendering
-3. **rehype-pretty-code** (Shiki) — Syntax highlighting with dual themes
-
-## Code Highlighting
-
-Syntax highlighting supports multiple languages with optional filename display.
+Syntax highlighting works across languages with optional filename display:
 
 ```python title="fibonacci.py"
 def fibonacci(n: int) -> list[int]:
@@ -108,83 +105,36 @@ def fibonacci(n: int) -> list[int]:
 print(fibonacci(10))
 ```
 
-Inline code works too: `const x: number = 42;`
-
-## Math Rendering
-
-LaTeX-style math expressions are fully supported.
-
-Inline math: $E = mc^2$
-
-Block math:
+LaTeX-style math expressions are fully supported. Inline: $E = mc^2$. Block:
 
 $$
 \int_{-\infty}^{\infty} e^{-x^2} dx = \sqrt{\pi}
 $$
 
-The quadratic formula:
-
 $$
 x = \frac{-b \pm \sqrt{b^2 - 4ac}}{2a}
 $$
 
-## Auto-Generated Table of Contents
+Each post also gets an auto-generated table of contents with scroll-spy highlighting, and a fully client-side search engine that supports AND matching across titles, descriptions, categories, and tags.
 
-Each post displays a table of contents automatically generated from its headings (h2, h3). An `IntersectionObserver`-based scroll spy highlights the section currently in view.
+## Discoverability: SEO, Feeds, and PWA
 
-## Client-Side Search
+For a personal blog, discoverability matters more than you might think. I invested time in several areas:
 
-The blog includes a fully client-side search engine with no external services.
+**SEO** — JSON-LD structured data (`WebSite`, `BlogPosting`, `BreadcrumbList`), Open Graph / Twitter Card meta tags, proper `hreflang` / `canonical` markup for translation pairs, and a dynamic sitemap. These are table stakes, but getting them right for a bilingual site required careful attention to locale handling.
 
-- Searches across four fields: title, description, categories, and tags
-- AND matching with space-separated tokens (only posts matching all tokens are shown)
-- Real-time filtering (results update as you type)
-- Syncs with URL query parameters (`?q=nextjs` for direct linking)
+**RSS / Atom feeds** — Auto-generated per locale (RSS 2.0 and Atom 1.0, latest 20 posts each). I still believe RSS is the best way to follow blogs, so this was non-negotiable.
 
-## Fonts
+**PWA** — [Serwist](https://serwist.pages.dev/) powers the service worker with build-time precaching and runtime caching strategies. The offline fallback page means the blog degrades gracefully without connectivity.
 
-The blog uses the [IBM Plex](https://www.ibm.com/plex/) font family throughout.
-
-- **IBM Plex Sans** — Latin text (weights: 400, 500, 600, 700)
-- **IBM Plex Mono** — Code blocks (weights: 400, 700)
-- **IBM Plex Sans JP** — Japanese text (weights: 400, 500, 700, lazy-loaded)
-
-The Japanese font is loaded with `preload: false` to optimize initial page load performance, since its file size is significantly larger.
-
-## SEO
-
-The blog implements several SEO best practices:
-
-- **Structured data (JSON-LD)**: `WebSite` schema on the layout, `BlogPosting` + `BreadcrumbList` schema on each post
-- **Open Graph / Twitter Cards**: Meta tags for social sharing
-- **hreflang / canonical**: Proper markup for translation pairs across locales
-- **Sitemap**: Dynamic sitemap covering all locales
-- **RSS / Atom feeds**: Auto-generated RSS 2.0 and Atom 1.0 per locale (latest 20 posts)
-
-## PWA & Offline Support
-
-The blog is a Progressive Web App powered by [Serwist](https://serwist.pages.dev/).
-
-- Precache manifest is automatically injected at build time, precaching static assets
-- An offline fallback page is displayed when there's no network connection
-- Runtime caching strategies optimally cache Next.js pages and assets
-
-## Security
-
-HTTP security headers are applied to all routes:
-
-- **Content-Security-Policy** — Restricts resource origins
-- **Strict-Transport-Security** — Enforces HTTPS with a 2-year max-age
-- **X-Content-Type-Options** / **X-Frame-Options** — Prevents MIME sniffing and clickjacking
-- **Permissions-Policy** — Disables unnecessary APIs like camera, microphone, and geolocation
-
-## Testing
-
-Quality is maintained through a two-layer testing strategy:
-
-- **Unit / component tests** (Vitest) — Verify library functions and component behavior
-- **E2E tests** (Playwright) — Integration tests for navigation, blog, search, i18n, offline support, and security headers
+**Security headers** — CSP, HSTS (2-year max-age), X-Content-Type-Options, X-Frame-Options, and a restrictive Permissions-Policy are applied to all routes.
 
 ## Summary
 
-shinyaz.com packs a lot of technical detail behind its minimal design. I'll continue posting articles about technology on this blog. If any of these features interest you, feel free to explore the source code.
+Building a blog from scratch is never the most efficient path, but it's one of the most instructive. A few things I'd highlight for anyone considering a similar stack:
+
+- **Velite is a strong Contentlayer replacement** — actively maintained, flexible, and the type-safe content collections work well with App Router.
+- **You probably don't need an i18n library** — for a small number of languages with static content, a TypeScript dictionary is simpler and has no runtime cost.
+- **Tailwind CSS v4's CSS-first approach pairs naturally with theming** — CSS custom properties for theme tokens eliminate the need for a separate config file.
+- **Invest in build-time processing** — the more you resolve at build time (syntax highlighting, math rendering, content queries), the less JavaScript ships to the client.
+- **Testing from day one pays off** — Vitest for unit/component tests and Playwright for E2E tests catch regressions before they reach production.

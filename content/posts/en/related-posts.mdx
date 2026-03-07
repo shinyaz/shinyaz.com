@@ -1,8 +1,9 @@
 ---
 title: "Adding a Related Posts Section to a Next.js Blog"
-description: "Display related articles at the bottom of each blog post, scored by shared categories and tags. Learn how to implement a lightweight related posts feature using existing helper functions with zero new dependencies."
+description: "A simple metadata-based scoring algorithm that surfaces related articles using shared categories and tags. No ML, no full-text search — just weighted scores and existing helper functions."
 date: 2026-03-02
 published: true
+featured: false
 categories:
   - programming
 tags:
@@ -12,27 +13,28 @@ tags:
 
 ## The Problem
 
-Blog post pages on this site ended with a `SocialShare` component, offering readers no way to discover related content. Despite having categories and tags to classify posts, there was no navigation path to guide readers to similar articles.
+Every blog post on this site ended with a social share component, and then... nothing. The reader had no easy way to discover related content. Despite having categories and tags to classify every post, there was no navigation path to guide readers to similar articles. Most visitors were reading one post and bouncing.
 
-This update adds a **related posts section** at the bottom of each post, automatically populated based on shared categories and tags.
+I wanted a related posts section that surfaces relevant articles automatically — without overcomplicating things.
 
-## Design Approach
+## Why Simple Scoring Works
 
-The implementation uses a simple scoring algorithm based on existing metadata. No external libraries, machine learning, or full-text search is needed—metadata-based scoring provides sufficient accuracy for a blog of this scale.
+For a blog with tens of posts (not thousands), sophisticated recommendation systems are overkill. Machine learning, embeddings, or full-text similarity search would all be overengineering for this scale.
 
-- **Category match**: weight 2 (categories are broader classifications, so weighted higher)
+Instead, I went with a metadata-based scoring approach using what's already available: categories and tags.
+
+- **Category match**: weight 2 (categories are broader, so a shared category is a stronger signal)
 - **Tag match**: weight 1
-- **Score 0 posts are excluded** (completely unrelated posts are never shown)
-- **Tie-breaking by date** (newer posts first)
-- **Default limit of 3 posts**
+- **Score 0**: excluded entirely (completely unrelated posts never appear)
+- **Tie-breaking**: newer posts first
 
-## Implementing getRelatedPosts()
+Why weight categories higher? A shared category like "programming" means both posts are in the same broad domain. A shared tag like "nextjs" is more specific but less discriminating — many posts share popular tags. The 2:1 ratio felt right in practice, though for a larger blog you might want to experiment.
 
-The core scoring function is added to `src/lib/posts.ts`.
+## The Scoring Function
+
+The core logic is a single function in `src/lib/posts.ts`:
 
 ```typescript title="src/lib/posts.ts"
-import type { Post } from "#site/content";
-
 export function getRelatedPosts(post: Post, limit = 3): Post[] {
   const candidates = getPublishedPosts(post.locale as Locale).filter(
     (p) => p.permalink !== post.permalink
@@ -61,198 +63,19 @@ export function getRelatedPosts(post: Post, limit = 3): Post[] {
 }
 ```
 
-Key points:
+A few design decisions:
+- **Same-locale only**: `getPublishedPosts(post.locale)` restricts candidates to the current language. A Japanese reader doesn't want English recommendations.
+- **Self-exclusion via permalink**: simple and reliable.
+- **Score > 0 filter**: if a post shares nothing with the current one, it shouldn't appear — even if that means showing zero related posts.
 
-- `getPublishedPosts(post.locale)` restricts candidates to the **same locale**
-- Self-exclusion via `permalink` comparison
-- Category match (+2) and tag match (+1) scoring
-- Sorted by score descending, then date descending, returning the top `limit` results
-- The `filter` on score > 0 ensures completely unrelated posts never appear
+## Integration
 
-## i18n Dictionary Extension
+The `RelatedPosts` component reuses the existing `PostCard`, maintaining visual consistency with the blog listing page. It's a server component (no client JS), and returns `null` when the posts array is empty — the section simply disappears when there are no matches.
 
-Section headings are added to `src/lib/i18n.ts`.
-
-```typescript title="src/lib/i18n.ts"
-const dictionaries = {
-  ja: {
-    relatedPosts: {
-      title: "関連記事",
-    },
-  },
-  en: {
-    relatedPosts: {
-      title: "Related Posts",
-    },
-  },
-} as const;
-```
-
-## The RelatedPosts Component
-
-A new server component at `src/components/blog/related-posts.tsx` reuses the existing `PostCard` component.
-
-```tsx title="src/components/blog/related-posts.tsx"
-import type { Post } from "#site/content";
-import { PostCard } from "./post-card";
-import { getDictionary, type Locale } from "@/lib/i18n";
-
-interface RelatedPostsProps {
-  posts: Post[];
-  locale: Locale;
-}
-
-export function RelatedPosts({ posts, locale }: RelatedPostsProps) {
-  if (posts.length === 0) return null;
-
-  const t = getDictionary(locale);
-
-  return (
-    <section className="mt-12 border-t border-border pt-8">
-      <h2 className="mb-6 text-xl font-bold tracking-tight">
-        {t.relatedPosts.title}
-      </h2>
-      <div className="divide-y divide-border">
-        {posts.map((post) => (
-          <PostCard
-            key={post.permalink}
-            title={post.title}
-            description={post.description}
-            date={post.date}
-            permalink={post.permalink}
-            categories={post.categories}
-            tags={post.tags}
-            locale={locale}
-          />
-        ))}
-      </div>
-    </section>
-  );
-}
-```
-
-Design decisions:
-
-- **Server component** — no `"use client"` needed, adding zero client-side JavaScript
-- **Returns `null` when posts is empty** — the section is completely hidden when there are no related posts
-- **Reuses `PostCard`** — maintains visual consistency with the blog listing page
-- **`border-t` and `mt-12`** — provides clear visual separation from the article content
-
-## Integration into the Blog Post Page
-
-The component is placed outside `<article>` in `src/app/[locale]/blog/[year]/[month]/[day]/[slug]/page.tsx`, as related posts are navigational rather than part of the article content.
-
-```tsx title="src/app/[locale]/blog/[year]/[month]/[day]/[slug]/page.tsx"
-import { getPostBySlug, getRelatedPosts } from "@/lib/posts";
-import { RelatedPosts } from "@/components/blog/related-posts";
-
-export default async function PostPage({ params }: PostPageProps) {
-  // ...existing logic
-  const post = getPostBySlug(year, month, day, slug, locale);
-  if (!post) notFound();
-
-  const relatedPosts = getRelatedPosts(post);
-
-  return (
-    <div className="mx-auto max-w-3xl px-4 py-6 md:py-12">
-      <article>
-        {/* ...existing article content */}
-        <SocialShare url={`${SITE_URL}${post.permalink}`} title={post.title} locale={locale} />
-      </article>
-      <RelatedPosts posts={relatedPosts} locale={locale} />
-    </div>
-  );
-}
-```
-
-## Testing
-
-### Unit Tests
-
-The scoring logic in `getRelatedPosts()` is thoroughly tested.
-
-```typescript title="__tests__/lib/posts.test.ts"
-describe("getRelatedPosts", () => {
-  const firstPost = getPostBySlug("2026", "01", "15", "first-post", "en")!;
-
-  it("does not include the post itself", () => {
-    const related = getRelatedPosts(firstPost);
-    expect(related.find((p) => p.permalink === firstPost.permalink)).toBeUndefined();
-  });
-
-  it("returns only same-locale posts", () => {
-    const related = getRelatedPosts(firstPost);
-    expect(related.every((p) => p.locale === "en")).toBe(true);
-  });
-
-  it("prioritizes category matches over tag matches", () => {
-    const related = getRelatedPosts(firstPost);
-    expect(related[0].slugName).toBe("second-post");
-  });
-
-  it("excludes posts with score 0", () => {
-    const related = getRelatedPosts(firstPost);
-    expect(related.find((p) => p.slugName === "unrelated-post")).toBeUndefined();
-  });
-
-  it("respects the limit parameter", () => {
-    const related = getRelatedPosts(firstPost, 1);
-    expect(related.length).toBeLessThanOrEqual(1);
-  });
-
-  it("returns empty array when no related posts exist", () => {
-    const unrelatedPost = getPublishedPosts("en").find(
-      (p) => p.slugName === "unrelated-post"
-    )!;
-    const related = getRelatedPosts(unrelatedPost);
-    expect(related).toEqual([]);
-  });
-});
-```
-
-### Component Tests
-
-The `RelatedPosts` component is tested for rendering and empty state behavior.
-
-```tsx title="__tests__/components/blog/related-posts.test.tsx"
-describe("RelatedPosts", () => {
-  it("renders nothing when posts array is empty", () => {
-    const { container } = render(<RelatedPosts posts={[]} locale="en" />);
-    expect(container.innerHTML).toBe("");
-  });
-
-  it("renders section with title when posts exist", () => {
-    render(<RelatedPosts posts={mockPosts} locale="en" />);
-    expect(screen.getByText("Related Posts")).toBeDefined();
-  });
-
-  it("renders Japanese title for ja locale", () => {
-    render(<RelatedPosts posts={mockPosts} locale="ja" />);
-    expect(screen.getByText("関連記事")).toBeDefined();
-  });
-});
-```
-
-## Files Changed
-
-| Type | File | Description |
-| --- | --- | --- |
-| Modified | `src/lib/posts.ts` | Added `getRelatedPosts()` function |
-| Modified | `src/lib/i18n.ts` | Added `relatedPosts` dictionary keys |
-| New | `src/components/blog/related-posts.tsx` | Related posts component |
-| Modified | `page.tsx` | Integrated related posts into blog post page |
-| Modified | `__tests__/__mocks__/velite.ts` | Added score-0 test post |
-| Modified | `__tests__/lib/posts.test.ts` | Tests for `getRelatedPosts` (7 tests) |
-| New | `__tests__/components/blog/related-posts.test.tsx` | Component tests (4 tests) |
-
-Zero new dependencies added.
+One deliberate semantic choice: the component is placed outside `<article>` in the page layout. Related posts are navigation, not part of the article's content.
 
 ## Summary
 
-By reusing the existing `getPublishedPosts()` and `PostCard`, a related posts section was implemented with minimal code.
-
-- **Scoring**: Category match (weight 2) + tag match (weight 1) — simple and effective
-- **Empty state**: Section is completely hidden when no related posts exist
-- **Bilingual**: i18n dictionary extension supports both Japanese and English
-- **Zero client JS**: Implemented as a server component
-- **Well-tested**: Covers both scoring logic and component rendering
+- **Metadata scoring is enough at small scale** — categories (weight 2) + tags (weight 1) produce surprisingly good results for a blog with fewer than 50 posts. Save the ML for when you actually need it.
+- **Same-locale filtering matters for bilingual sites** — without it, you'd recommend English articles to Japanese readers and vice versa.
+- **Show nothing rather than bad recommendations** — the score > 0 filter means unrelated posts never leak through. An empty section is better than irrelevant suggestions.

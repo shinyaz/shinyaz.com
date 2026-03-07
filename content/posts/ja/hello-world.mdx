@@ -1,6 +1,6 @@
 ---
-title: "Hello World - shinyaz.com へようこそ"
-description: "shinyaz.comの最初の記事です。バイリンガル対応、ダークモード、全文検索、PWA、SEOなど、本ブログの特徴を詳しく紹介します。"
+title: "Next.js 16・Velite・MDX でバイリンガル技術ブログを構築する"
+description: "shinyaz.com のアーキテクチャを深掘り — Contentlayer ではなく Velite を選んだ理由、i18n ライブラリなしで日英対応を実現した方法、ミニマルなモノトーンブログの設計判断を紹介する。"
 date: 2026-02-22
 published: true
 featured: true
@@ -18,11 +18,9 @@ tags:
 
 ## はじめに
 
-shinyaz.com へようこそ！このブログは Next.js 16 と MDX で構築されたミニマル・モノトーンの個人技術ブログです。
+開発者ブログの構成はどれも似通いがちだ。Next.js + Markdown、Contentlayer を入れて、シンタックスハイライトを足して完成 — そんなパターンが多い。shinyaz.com を作るにあたって、もう少し自分の意見を反映したものにしたかった。日本語と英語を対等に扱うバイリンガルブログで、CMS やデータベースなしの完全静的サイト、そして高速であること。
 
-この記事では、ブログを支える技術とその特徴を詳しく紹介します。
-
-## 技術スタック
+この記事では、主要なアーキテクチャ上の判断と、構築を通じて学んだことを紹介する。まずは技術スタックの全体像から。
 
 | カテゴリ         | 技術                       |
 | ---------------- | -------------------------- |
@@ -36,11 +34,26 @@ shinyaz.com へようこそ！このブログは Next.js 16 と MDX で構築さ
 | テスト           | Vitest + Playwright        |
 | デプロイ         | Vercel                     |
 
-## バイリンガル対応 (日本語 / English)
+## Velite を選んだ理由
 
-本ブログはすべてのページが日本語と英語の両方で提供されています。外部 i18n ライブラリを使わず、TypeScript の辞書オブジェクトだけで UI 翻訳を実現しています。
+最大の判断はコンテンツパイプラインだった。MDX + Next.js なら Contentlayer が定番だが、実質的にメンテナンスが止まっている。[Velite](https://velite.js.org/) は同様の開発体験 — 型安全なコンテンツコレクション、ビルド時処理 — を提供しつつ、活発にメンテナンスされており柔軟性も高い。
 
-```typescript
+パイプラインはシンプルだ。MDX ファイルをプリビルドステップで Velite に通し、型付き JSON を Next.js が直接インポートする。
+
+```
+content/posts/{en,ja}/*.mdx
+  → Velite (prebuild)
+    → .velite/ (静的データ)
+      → Next.js (App Router)
+```
+
+MDX の処理は3つのプラグインを連鎖させている。見出しアンカー用の **rehype-slug**、数式レンダリング用の **remark-math** + **rehype-katex**、そしてシンタックスハイライト用の **rehype-pretty-code**（Shiki、ライト/ダーク両対応）。この構成の良い点は、すべてがビルド時に解決されること — コンテンツレンダリングのためにクライアントサイド JavaScript は一切不要だ。
+
+## i18n ライブラリなしのバイリンガル対応
+
+`next-intl` や `react-i18next` は意図的に避けた。固定の UI 文字列しかない静的ブログでは、メリットに対して複雑さが大きすぎる。代わりに、すべての翻訳を単一の TypeScript 辞書に集約している。
+
+```typescript title="src/lib/i18n.ts"
 const dictionaries = {
   ja: {
     site: { name: "shinyaz.com", description: "..." },
@@ -55,16 +68,15 @@ const dictionaries = {
 };
 ```
 
-- ヘッダーの「EN / JP」ボタンで、同じページに留まったまま言語を切り替え可能
-- URL は常にロケールプレフィックス付き（例: `/ja/blog/...`、`/en/blog/...`）
-- ブラウザの `Accept-Language` ヘッダーから自動でリダイレクト
-- コンテンツファイルも言語ごとにディレクトリ分割（`content/posts/ja/`、`content/posts/en/`）
+すべてのルートは `/[locale]/` 配下に配置し、コンテンツファイルもディレクトリで分割（`content/posts/ja/`、`content/posts/en/`）。ヘッダーの言語切替ボタンで同じページのまま日英を切り替えられ、ロケールプレフィックスなしの URL はブラウザの `Accept-Language` ヘッダーに基づいて自動リダイレクトされる。
 
-## ダークモード
+トレードオフは明白で、この方法は何十言語にもスケールしない。ただし2言語なら、シンプルで型安全、ランタイムコストもゼロだ。
 
-`next-themes` によるクラスベースのダークモード切替に対応しています。テーマトークンは CSS カスタムプロパティで定義され、`:root`（ライト）と `.dark`（ダーク）で切り替わります。
+## ビジュアルデザイン: モノトーン・IBM Plex・ダークモード
 
-コードブロックも Shiki のデュアルテーマ（github-light / github-dark）を使い、テーマに連動して自動で切り替わります。
+デザインはコンテンツの邪魔をしないことを最優先にした。モノトーンの配色、十分な余白、そして [IBM Plex](https://www.ibm.com/plex/) フォントファミリー — 本文に Sans、コードに Mono、日本語に Sans JP を採用。日本語フォントはラテン文字版よりかなり大きいため、`preload: false` で遅延読み込みしている。
+
+Tailwind CSS v4 の CSS ファーストな設定がテーミングをクリーンにしてくれた。カラートークンはすべて CSS カスタムプロパティとして定義し、`:root` と `.dark` で切り替える。`next-themes` がトグルを管理し、コードブロックも Shiki のデュアルテーマ（github-light / github-dark）でテーマに自動追従する。
 
 ```typescript title="example.ts"
 function greet(name: string): string {
@@ -74,26 +86,11 @@ function greet(name: string): string {
 console.log(greet("World"));
 ```
 
-## コンテンツパイプライン
+## コンテンツ表現力
 
-記事は MDX ファイルで執筆し、[Velite](https://velite.js.org/) がビルド時に静的データへ変換します。
+MDX + Shiki + KaTeX のスタックにより、リッチなコンテンツがそのまま書ける。
 
-```
-content/posts/{en,ja}/*.mdx
-  → Velite (prebuild)
-    → .velite/ (静的データ)
-      → Next.js (App Router)
-```
-
-MDX は以下のプラグインチェーンで処理されます：
-
-1. **rehype-slug** — 見出しに自動で ID を付与（アンカーリンク用）
-2. **remark-math** + **rehype-katex** — 数式レンダリング
-3. **rehype-pretty-code** (Shiki) — シンタックスハイライト（デュアルテーマ）
-
-## コードハイライト
-
-複数の言語に対応したシンタックスハイライトです。ファイル名の表示も可能です。
+複数言語のシンタックスハイライトとファイル名表示:
 
 ```python title="fibonacci.py"
 def fibonacci(n: int) -> list[int]:
@@ -108,83 +105,36 @@ def fibonacci(n: int) -> list[int]:
 print(fibonacci(10))
 ```
 
-インラインコードも使えます: `const x: number = 42;`
-
-## 数式レンダリング
-
-LaTeX 記法による数式のレンダリングに対応しています。
-
-インライン数式: $E = mc^2$
-
-ブロック数式:
+LaTeX 記法の数式も完全対応。インライン: $E = mc^2$。ブロック:
 
 $$
 \int_{-\infty}^{\infty} e^{-x^2} dx = \sqrt{\pi}
 $$
 
-二次方程式の解の公式:
-
 $$
 x = \frac{-b \pm \sqrt{b^2 - 4ac}}{2a}
 $$
 
-## 目次の自動生成
+各記事にはスクロールスパイ付きの目次が自動生成され、タイトル・説明・カテゴリ・タグを横断する AND 検索対応のクライアントサイド検索も搭載している。
 
-各記事には見出し（h2, h3）から自動生成される目次が表示されます。`IntersectionObserver` によるスクロールスパイで、現在読んでいるセクションがハイライトされます。
+## 見つけてもらうために: SEO・フィード・PWA
 
-## クライアントサイド検索
+個人ブログでも、見つけてもらう仕組みは思った以上に重要だ。いくつかの領域に投資した。
 
-外部サービスを使わない、完全クライアントサイドの全文検索を搭載しています。
+**SEO** — JSON-LD 構造化データ（`WebSite`、`BlogPosting`、`BreadcrumbList`）、Open Graph / Twitter Card メタタグ、翻訳ペアの `hreflang` / `canonical` マークアップ、動的サイトマップ。いずれも定番だが、バイリンガルサイトで正しく実装するにはロケール処理に細心の注意が必要だった。
 
-- タイトル・説明・カテゴリ・タグの4フィールドを横断検索
-- スペース区切りの AND 検索（すべてのトークンにマッチする記事のみ表示）
-- リアルタイム絞り込み（タイプするたびに結果が更新）
-- URL クエリパラメータと同期（`?q=nextjs` で直接リンク可能）
+**RSS / Atom フィード** — ロケールごとに RSS 2.0 と Atom 1.0 を自動生成（各最新20件）。RSS はブログをフォローする最良の手段だと今でも思っているので、これは必須だった。
 
-## フォント
+**PWA** — [Serwist](https://serwist.pages.dev/) がサービスワーカーを提供し、ビルド時プリキャッシュとランタイムキャッシュ戦略で動作する。オフラインフォールバックページにより、接続がなくてもブログはグレースフルに動作する。
 
-[IBM Plex](https://www.ibm.com/plex/) ファミリーを採用しています。
-
-- **IBM Plex Sans** — 欧文テキスト用（400, 500, 600, 700）
-- **IBM Plex Mono** — コードブロック用（400, 700）
-- **IBM Plex Sans JP** — 日本語テキスト用（400, 500, 700、遅延読み込み）
-
-日本語フォントはファイルサイズが大きいため `preload: false` で遅延読み込みし、初期表示パフォーマンスを最適化しています。
-
-## SEO
-
-検索エンジン最適化のため、以下を実装しています：
-
-- **構造化データ (JSON-LD)**: `WebSite` スキーマ（レイアウト）、`BlogPosting` + `BreadcrumbList` スキーマ（各記事）
-- **Open Graph / Twitter Card**: ソーシャルシェア用のメタタグ
-- **hreflang / canonical**: 言語間の対訳ペアを正しくマークアップ
-- **サイトマップ**: 全ロケールの URL を含む動的サイトマップ
-- **RSS / Atom フィード**: ロケールごとに RSS 2.0 と Atom 1.0 を自動生成（最新20件）
-
-## PWA & オフライン対応
-
-[Serwist](https://serwist.pages.dev/) による Service Worker で PWA に対応しています。
-
-- ビルド時に precache manifest を自動注入し、静的アセットをプリキャッシュ
-- ネットワーク未接続時はオフラインフォールバックページを表示
-- ランタイムキャッシュ戦略で Next.js のページとアセットを最適にキャッシュ
-
-## セキュリティ
-
-すべてのルートに HTTP セキュリティヘッダーを適用しています：
-
-- **Content-Security-Policy** — リソースの読み込み元を制限
-- **Strict-Transport-Security** — HTTPS を強制（max-age 2年）
-- **X-Content-Type-Options** / **X-Frame-Options** — MIME スニッフィング・クリックジャッキング防止
-- **Permissions-Policy** — カメラ・マイク・位置情報など不要な API を無効化
-
-## テスト
-
-品質を担保するため、二層のテスト戦略を採用しています。
-
-- **ユニット / コンポーネントテスト** (Vitest) — ライブラリ関数とコンポーネントの振る舞いを検証
-- **E2E テスト** (Playwright) — ナビゲーション、ブログ、検索、i18n、オフライン、セキュリティヘッダーを統合検証
+**セキュリティヘッダー** — CSP、HSTS（max-age 2年）、X-Content-Type-Options、X-Frame-Options、制限的な Permissions-Policy をすべてのルートに適用している。
 
 ## まとめ
 
-shinyaz.com は、ミニマルなデザインの裏側で多くの技術的工夫を取り入れています。今後もこのブログで技術に関する記事を投稿していきます。気になる機能があれば、ぜひソースコードも覗いてみてください。
+ブログをゼロから構築するのは最も効率的な道ではないが、最も学びの多い道の一つだ。同じようなスタックを検討している人に向けて、いくつかポイントを挙げる。
+
+- **Velite は Contentlayer の有力な代替** — 活発にメンテナンスされ、柔軟で、型安全なコンテンツコレクションが App Router とうまく噛み合う。
+- **i18n ライブラリは必ずしも要らない** — 少数言語の静的コンテンツなら、TypeScript 辞書のほうがシンプルでランタイムコストもゼロ。
+- **Tailwind CSS v4 の CSS ファーストはテーミングと相性が良い** — CSS カスタムプロパティでテーマトークンを定義すれば、別途設定ファイルが不要になる。
+- **ビルド時処理への投資が効く** — シンタックスハイライト、数式レンダリング、コンテンツクエリをビルド時に解決するほど、クライアントに送る JavaScript は減る。
+- **テストは初日から** — Vitest のユニット/コンポーネントテストと Playwright の E2E テストが、リグレッションを本番到達前に捕捉してくれる。

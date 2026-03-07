@@ -1,6 +1,6 @@
 ---
 title: "Next.js PWA を @serwist/turbopack に移行してビルドを高速化する"
-description: "@serwist/nextからserwist/turbopackへの移行手順を解説。precacheマニフェスト自動注入とTurbopackビルドの統合で、構成をシンプルにしつつビルド時間を短縮します。"
+description: "壊れていた3段階ビルドを @serwist/turbopack の Route Handler ベース設計に置き換え、プリキャッシュを修復しつつ Turbopack を有効化した過程と、そこから得た知見。"
 date: 2026-02-28
 published: true
 featured: true
@@ -13,21 +13,23 @@ tags:
   - turbopack
 ---
 
-## はじめに
+## 課題
 
-このブログは Next.js + [Serwist](https://serwist.pages.dev/) で PWA 対応しています。以前は `@serwist/next`（webpack プラグイン）と esbuild スクリプトを組み合わせて Service Worker をビルドしていましたが、いくつかの課題がありました。
+Next.js に PWA 対応を後付けしたことがある人なら分かると思うが、Service Worker のツーリングはフレームワークと噛み合わないことが多い。このブログも例に漏れず、`@serwist/next`（webpack プラグイン）とカスタム esbuild スクリプトを組み合わせて SW をビルドしていたが、正直なところ壊れたまま放置していた部分があった。
 
-- esbuild で SW をバンドルする `scripts/build-sw.mjs` が precache manifest を注入しないため、プリキャッシュが機能しない
-- ビルドパイプラインが `velite build → esbuild → next build` と3段階で複雑
-- Turbopack をデフォルトビルドにできない（`@serwist/next` は webpack 前提）
+具体的には以下の3つの問題を抱えていた。
 
-今回 `@serwist/turbopack` に移行することで、これらを一挙に解決しました。
+- esbuild スクリプト（`scripts/build-sw.mjs`）が precache manifest を注入しないため、プリキャッシュが実質的に機能していない
+- ビルドパイプラインが `velite build → esbuild → next build` の3段階で複雑
+- `@serwist/next` が webpack 前提のため Turbopack に切り替えられない
 
-## @serwist/turbopack とは
+`@serwist/turbopack` が webpack プラグインではなく **Next.js Route Handler** というまったく異なるアプローチを採用していると知り、興味が湧いて移行を試みた。
 
-`@serwist/turbopack` は Serwist の Turbopack 対応パッケージです。webpack プラグインの代わりに **Next.js Route Handler** を使って SW をビルド時にコンパイルし、precache manifest を自動注入します。
+## Route Handler アプローチが面白い理由
 
-主な違いをまとめると：
+`@serwist/turbopack` で一番驚いたのは、バンドラーにまったくフックしない設計だったことだ。通常の Next.js Route Handler として実装され、ビルド時に esbuild で SW をコンパイルし、SSG で静的ファイルとして出力する。precache manifest の注入もこのプロセスの中で行われる。
+
+SW を「ただのルート」として扱うことで、webpack か Turbopack かという問題自体を回避している。さらに Next.js のスタティック生成に乗るため、ソースマップや適切なキャッシュヘッダーも自然に手に入る。この設計はかなりエレガントだと感じた。
 
 | 観点              | @serwist/next (webpack)      | @serwist/turbopack                         |
 | ----------------- | ---------------------------- | ------------------------------------------ |
@@ -39,43 +41,34 @@ tags:
 
 ## 移行手順
 
-### 1. 依存関係の更新
+### 依存関係と設定
+
+まずパッケージを入れ替え、`next.config.ts` を `withSerwist` でラップする。旧パッケージの `withSerwistInit` と違い、このラッパーは `serverExternalPackages` に `esbuild` を追加するだけで、SW 関連のオプションは一切受け取らない。潔い設計だ。
 
 ```bash
 npm uninstall @serwist/next
 npm install -D @serwist/turbopack esbuild
 ```
 
-`@serwist/turbopack` は内部で esbuild を使って SW をバンドルするため、peer dependency として `esbuild` が必要です。
-
-### 2. next.config.ts に withSerwist を追加
-
-```typescript
-import type { NextConfig } from "next";
+```typescript title="next.config.ts"
 import { withSerwist } from "@serwist/turbopack";
 
-const nextConfig: NextConfig = {
+export default withSerwist({
   // ...既存の設定
-};
-
-export default withSerwist(nextConfig);
+});
 ```
 
-`withSerwist` は `serverExternalPackages` に `esbuild` を追加するだけのシンプルなラッパーです。`@serwist/next` の `withSerwistInit` とは異なり、SW 関連のオプションは受け取りません。
+### Route Handler の作成（移行の核心）
 
-### 3. Route Handler の作成
+webpack プラグインとカスタム esbuild スクリプトの両方を、この1つの Route Handler が置き換える。
 
-SW のビルドと配信を担う Route Handler を作成します。
-
-```typescript
-// src/app/serwist/[path]/route.ts
+```typescript title="src/app/serwist/[path]/route.ts"
 import { spawnSync } from "node:child_process";
 import { createSerwistRoute } from "@serwist/turbopack";
 
 const revision =
-  spawnSync("git", ["rev-parse", "HEAD"], {
-    encoding: "utf-8",
-  }).stdout.trim() || crypto.randomUUID();
+  spawnSync("git", ["rev-parse", "HEAD"], { encoding: "utf-8" })
+    .stdout.trim() || crypto.randomUUID();
 
 export const { dynamic, dynamicParams, revalidate, generateStaticParams, GET } =
   createSerwistRoute({
@@ -88,83 +81,22 @@ export const { dynamic, dynamicParams, revalidate, generateStaticParams, GET } =
   });
 ```
 
-ポイント：
+`createSerwistRoute` が `generateStaticParams` や `GET` など Next.js Route Handler の標準エクスポートを返すのが良い。`next build` 時に通常の静的ルートとして SW がビルドされる。`revision` に git commit hash を使うことで、デプロイごとにプリキャッシュが自動的に更新される。CI 側で特別な処理は不要だ。
 
-- `swSrc` で SW のソースファイルを指定
-- `additionalPrecacheEntries` でオフラインページを明示的にプリキャッシュ
-- `revision` に git commit hash を使い、デプロイごとにキャッシュを更新
-- ビルド時に SSG で `/serwist/sw.js` と `/serwist/sw.js.map` が生成される
+### SerwistProvider による SW 登録
 
-### 4. sw.ts の import 元を変更
+新しいアプローチのトレードオフとして、SW の登録が自動ではなくなった。`SerwistProvider` コンポーネントを明示的に使う必要がある。クライアントコンポーネントなので、Server Component のレイアウトから直接インポートできず、`"use client"` 付きの re-export ファイルを挟む。
 
-```typescript
-// 変更前
-import { defaultCache } from "@serwist/next/worker";
-
-// 変更後
-import { defaultCache } from "@serwist/turbopack/worker";
-```
-
-`defaultCache` は Next.js アプリ向けの推奨キャッシュ戦略リストで、API は同一です。
-
-### 5. SerwistProvider で SW を登録
-
-`@serwist/turbopack` では SW 登録を `SerwistProvider` コンポーネントで行います。
-
-```tsx
-// src/components/pwa/serwist-provider.tsx
+```tsx title="src/components/pwa/serwist-provider.tsx"
 "use client";
 export { SerwistProvider } from "@serwist/turbopack/react";
 ```
 
-```tsx
-// src/app/[locale]/layout.tsx
-import { SerwistProvider } from "@/components/pwa/serwist-provider";
+あとはレイアウトでラップし、`swUrl` に Route Handler のパス（`/serwist/sw.js`）を指定するだけだ。
 
-export default async function LocaleLayout({ children, params }) {
-  return (
-    <html lang={locale}>
-      <body>
-        <SerwistProvider swUrl="/serwist/sw.js">
-          <ThemeProvider>{children}</ThemeProvider>
-        </SerwistProvider>
-      </body>
-    </html>
-  );
-}
-```
+### 残りの変更
 
-`SerwistProvider` はクライアントコンポーネントなので、Server Component のレイアウトから直接 `@serwist/turbopack/react` をインポートできません。中間ファイルで `"use client"` 付きの re-export を作る必要があります。
-
-### 6. ミドルウェアの更新
-
-SW の URL が `/sw.js` から `/serwist/sw.js` に変わるため、ミドルウェアのスキップ設定を更新します。
-
-```typescript
-// 変更前
-const SKIP_PREFIXES = [..., "/sw.js", ...];
-
-// 変更後
-const SKIP_PREFIXES = [..., "/serwist/", ...];
-```
-
-### 7. クリーンアップ
-
-- `scripts/build-sw.mjs` を削除（esbuild 直接ビルドは不要に）
-- `public/sw.js` を削除（Route Handler 経由で生成されるため）
-- `.gitignore` から `public/sw*` を削除
-
-### 8. ビルドスクリプトの更新
-
-```json
-{
-  "scripts": {
-    "build": "velite build && next build --turbopack"
-  }
-}
-```
-
-esbuild スクリプトの呼び出しが不要になり、`velite build → next build` の2ステップに簡素化されました。
+`sw.ts` の import 元を `@serwist/next/worker` から `@serwist/turbopack/worker` に変更し、ミドルウェアのスキップ設定を `/sw.js` から `/serwist/` に更新する。旧 `scripts/build-sw.mjs` と `public/sw.js` を削除すれば、ビルドスクリプトは `velite build && next build --turbopack` の2ステップに簡素化される。
 
 ## 結果
 
@@ -179,10 +111,10 @@ esbuild スクリプトの呼び出しが不要になり、`velite build → nex
   └ /serwist/sw.js
 ```
 
-- **precache manifest が自動注入される**ようになり、47エントリ（約1.2MB）がプリキャッシュ対象に
-- ビルドパイプラインが `velite → esbuild → next` の3段階から `velite → next` の2段階に簡素化
-- Turbopack がデフォルトビルドになり、webpack 比で約40%のビルド時間短縮が期待できる
+47エントリが自動検出・注入された。移行前はゼロだった。これだけで移行した価値がある。
 
 ## まとめ
 
-`@serwist/turbopack` への移行は、コード変更としては小規模ながら、ビルド構成の簡素化と PWA のプリキャッシュ機能の修復という2つの改善を同時に達成できました。Serwist を使っている Next.js プロジェクトで Turbopack に移行したい場合は、参考にしてみてください。
+- **フレームワークと戦わない設計を選ぶ。** Route Handler アプローチが機能するのは、ビルドシステムを迂回せず Next.js 自身のプリミティブを使っているからだ。ツール選定では、フレームワークの *外* ではなく *中* で動く設計を優先したい。
+- **壊れた機能は静かに潜む。** プリキャッシュが数週間にわたって無機能だったことに気づかなかった。「動いているはず」のものは実際のビルド出力で検証しないと、たいてい動いていない。
+- **明示的は暗黙的に勝る。** `SerwistProvider` を手動で追加するのは最初ダウングレードに感じたが、SW がどこでどう登録されるかが一目瞭然になり、デバッグが楽になった。

@@ -1,8 +1,9 @@
 ---
 title: "Velite × Next.js でトップページに注目記事セクションを追加する"
-description: "MDXフロントマターに featured フィールドを追加し、トップページに注目記事をグリッド表示する実装手順を解説します。Veliteスキーマの拡張からコンポーネント設計、タグオーバーフロー対応まで。"
+description: "再利用できる3つのパターン：Velite の default(false) による安全なスキーマ拡張、MAX_TAGS によるタグ溢れ対策、空のとき自動的に消えるセクションの条件付きレンダリング。"
 date: 2026-03-07
 published: true
+featured: false
 categories:
   - programming
 tags:
@@ -14,88 +15,42 @@ tags:
 
 ## はじめに
 
-ブログのトップページに「注目記事」セクションを追加しました。記事のフロントマターに `featured: true` を書くだけで、選んだ記事をトップページのグリッドにピン留めできます。
+トップページに選んだ記事をピン留めできるセクションがほしかった。「最新記事」フィードではなく、どの記事をハイライトするかを自分でコントロールできるキュレーションセクションだ。記事のフロントマターに `featured: true` を書くだけで動くのが理想。
 
-実装の流れは次の通りです。
+実装自体はシンプルだが、この機能を超えて使える3つのパターンが浮かび上がった。
 
-1. Velite の posts スキーマに `featured` フィールドを追加
-2. `getFeaturedPosts()` ヘルパー関数を追加
-3. `FeaturedPostCard` コンポーネントを作成
-4. タグが多い場合のオーバーフロー対応
-5. トップページへの組み込み
+## パターン 1: default(false) による安全なスキーマ進化
 
-## Veliteスキーマへのフィールド追加
+Velite の posts スキーマに `featured` フィールドを追加する：
 
-[Velite](https://velite.js.org/) はMDXファイルのフロントマターをスキーマで定義します。`velite.config.ts` の posts スキーマに `featured` を追加します。
-
-```typescript
-// velite.config.ts
+```typescript title="velite.config.ts"
 const posts = defineCollection({
   schema: s.object({
     // ...既存フィールド
-    published: s.boolean().default(true),
     featured: s.boolean().default(false), // 追加
-    // ...
   }),
 });
 ```
 
-`default(false)` を指定することで、既存の記事ファイルは一切変更不要です。`featured: true` を書いた記事だけが対象になります。
+ポイントは `default(false)` だ。**既存ファイルの変更がゼロ**で済む。すべての既存記事は暗黙的に `featured: false` として扱われ、`featured: true` を明示的に書いた記事だけが対象になる。
 
-## getFeaturedPosts() の実装
+コンテンツスキーマを拡張するときに覚えておくべきパターンだ。現在の挙動を保つデフォルト値を設定すれば、新しいフィールドは純粋に追加的になる。マイグレーションスクリプトも、ファイルの一括編集も、既存コンテンツが壊れるリスクもない。
 
-`src/lib/posts.ts` に既存の `getPublishedPosts()` を利用したフィルタ関数を追加します。
+クエリ関数は既存の `getPublishedPosts()` の上に1行足すだけ：
 
-```typescript
+```typescript title="src/lib/posts.ts"
 export function getFeaturedPosts(locale?: Locale) {
   return getPublishedPosts(locale).filter((post) => post.featured);
 }
 ```
 
-`getPublishedPosts()` の内部で `published: true` のフィルタと日付降順ソートが済んでいるため、`featured` のフィルタを追加するだけです。未公開の記事（`published: false`）がたまたま `featured: true` になっていても除外されます。
+`getPublishedPosts()` が非公開記事のフィルタと日付降順ソートを済ませているため、両方の挙動を無料で継承する。`published: false` かつ `featured: true` の記事は正しく除外される。
 
-## FeaturedPostCard コンポーネントの作成
+## パターン 2: MAX_TAGS によるタグ溢れ対策
 
-注目記事は通常の記事リストとは視覚的に区別したいため、専用の `FeaturedPostCard` コンポーネントを用意します。既存の `PostCard`（縦リスト用）とは別に、カード形式のデザインにしました。
+タグが多い記事はカードレイアウトを壊す。対策：最大 N 件を表示し、超過分は `+N` で示す。
 
-```tsx
-// src/components/blog/featured-post-card.tsx
-const MAX_TAGS = 3;
-
-export function FeaturedPostCard({ title, description, date, permalink, categories, tags, locale }) {
-  return (
-    <article className="group rounded-lg border border-border bg-muted/30 p-4 hover:bg-muted/50 transition-colors">
-      <Link href={permalink} className="block">
-        <h3 className="font-semibold tracking-tight group-hover:underline">
-          {title}
-        </h3>
-        {description && (
-          <p className="mt-1 text-sm text-muted-foreground line-clamp-2">
-            {description}
-          </p>
-        )}
-      </Link>
-      <div className="mt-2 flex flex-wrap items-center gap-2">
-        <time dateTime={date} className="text-xs text-muted-foreground">
-          {formatDate(date, locale)}
-        </time>
-        {/* カテゴリ・タグバッジ */}
-      </div>
-    </article>
-  );
-}
-```
-
-`PostCard` と別コンポーネントにした理由は2つです。
-
-- **視覚的区別**：`rounded-lg border bg-muted/30` でカード感を出す
-- **独立した上限値**：後述のタグ表示上限をコンポーネントごとに管理する
-
-## タグオーバーフロー対応
-
-タグが多い記事でカードレイアウトが崩れないよう、表示数を最大3件に制限し、超過分は `+N` で示します。
-
-```tsx
+```tsx title="src/components/blog/featured-post-card.tsx"
 const MAX_TAGS = 3;
 
 {tags.slice(0, MAX_TAGS).map((tag) => (
@@ -106,15 +61,13 @@ const MAX_TAGS = 3;
 )}
 ```
 
-上限値を `MAX_TAGS` 定数にまとめることで、変更が1箇所で済みます。同様の対応を通常の `PostCard` にも適用し、両方で上限3件に統一しました。
+上限値を定数にまとめることで、変更が1箇所で済む。同じパターンを通常の `PostCard` にも適用し、挙動を統一した。
 
-## トップページへの組み込み
+## パターン 3: 自己非表示セクション
 
-`src/app/[locale]/page.tsx` で注目記事を取得し、件数が1件以上の場合だけセクションを表示します。
+トップページの注目記事セクションは、1件以上の注目記事があるときだけレンダリングされる：
 
-```tsx
-const featuredPosts = getFeaturedPosts(locale);
-
+```tsx title="src/app/[locale]/page.tsx"
 {featuredPosts.length > 0 && (
   <section className="mt-8 md:mt-12">
     <h2 className="text-xl font-semibold mb-4">{t.home.featuredPosts}</h2>
@@ -127,39 +80,10 @@ const featuredPosts = getFeaturedPosts(locale);
 )}
 ```
 
-`sm:grid-cols-2` でスモール以上は2カラムになります。注目記事がゼロの場合はセクション自体が非表示になるため、記事を減らしても UI が壊れません。
-
-UI文字列は `src/lib/i18n.ts` に追加します。
-
-```typescript
-home: {
-  featuredPosts: "注目記事", // ja
-  // ...
-}
-// en
-home: {
-  featuredPosts: "Featured",
-  // ...
-}
-```
-
-## 使い方
-
-注目させたい記事のフロントマターに1行追加するだけです。
-
-```yaml
----
-title: "記事タイトル"
-date: 2026-03-07
-published: true
-featured: true   # この行を追加
-categories:
-  - programming
----
-```
-
-`featured: true` を書かない記事はデフォルト `false` として扱われるため、既存の記事に影響はありません。
+つまり、すべての `featured: true` マーカーを外せばセクションは自動的に消える — コード変更不要、UI が壊れることもない。機能は純粋に追加的だ：コンテンツがあれば存在し、なければ消える。
 
 ## まとめ
 
-Velite のスキーマ拡張はフィールドを1行追加するだけで既存コンテンツへの影響がゼロという点が気に入っています。コンポーネントを分けたことでタグ上限やカードスタイルをそれぞれ独立して調整できるため、今後の変更もしやすい構造になりました。
+- **`default(false)` でスキーマ変更を安全に** — 既存コンテンツに影響なし、新フィールドは純粋に追加的。Velite（や他のコンテンツスキーマ）をオプショナルフィールドで拡張するときのパターンとして覚えておく。
+- **MAX_TAGS でレイアウト崩れを防止** — 定数ベースの slice と `+N` 表示で、タグ数に関係なくカードレイアウトが安定する。
+- **条件付きレンダリングで自己管理型セクションを作る** — `{items.length > 0 && <Section />}` で、機能が自身の表示・非表示を管理する。フィーチャーフラグも個別の設定も不要。

@@ -1,0 +1,96 @@
+---
+title: "Adding a TIL Section to a Velite & Next.js Blog"
+description: "How I added a lightweight TIL (Today I Learned) content type by defining a new Velite collection, reusing existing components with minimal adaptation, and integrating into search — all without a single new dependency."
+date: 2026-03-07
+published: true
+featured: false
+categories:
+  - programming
+tags:
+  - nextjs
+  - velite
+  - mdx
+  - typescript
+---
+
+## Overview
+
+Not every learning deserves a full blog post. Sometimes you discover a useful CSS trick, a CLI flag, or a library quirk that's worth recording but doesn't warrant 1,000 words of context. I'd been letting these small learnings slip away, so I added a TIL (Today I Learned) section — a place for short, low-friction entries.
+
+The implementation tested how well the blog's architecture handles a new content type. The answer: surprisingly well. The existing component library and data patterns composed cleanly with minimal adaptation.
+
+## Defining the Velite Collection
+
+The `tils` collection in `velite.config.ts` reuses the same MDX pipeline as posts but with a simpler schema — no categories, `featured`, `cover`, or `updated` fields. TIL entries are intentionally lightweight:
+
+```typescript title="velite.config.ts"
+const tils = defineCollection({
+  name: "TIL",
+  pattern: "tils/**/*.mdx",
+  schema: s.object({
+    title: s.string().max(200),
+    description: s.string().max(500).optional(),
+    date: s.isodate(),
+    published: s.boolean().default(true),
+    tags: s.array(s.string()).default([]),
+    // ...filePath, metadata, content, body
+  }).transform((data) => {
+    // Extract locale from path, compute year/month/day/slug, build permalink
+    // → /{locale}/til/{year}/{month}/{day}/{slug}
+  }),
+});
+```
+
+Adding a collection to Velite is just a schema definition plus one entry in `defineConfig({ collections: { posts, tils } })`. Content goes in `content/tils/{en,ja}/*.mdx`. The transform extracts the locale from the directory path, matching the pattern used by posts.
+
+## Reusing Existing Components
+
+The most satisfying part was how much I could reuse without modification:
+
+- **List page**: `PostList` and `Pagination` work as-is. TIL entries are mapped to the same shape, with `categories: []` since TILs don't have categories.
+- **Detail page**: `MdxContent`, `SocialShare`, and `ProfileCard` are reused directly. I deliberately excluded `TableOfContents` and `RelatedPosts` — TIL entries are too short for either to be useful.
+- **Navigation**: a link in `header.tsx` and `mobile-nav.tsx`, with UI strings in `src/lib/i18n.ts`.
+
+The `categories: []` adapter is worth highlighting. The `PostCard` component expects `categories: string[]`, but TIL entries don't have categories. Rather than making the prop optional across multiple components, passing an empty array is the simplest bridge.
+
+## Search Integration
+
+The search page (`/[locale]/search`) merges blog posts and TIL entries into a single searchable list:
+
+```typescript title="src/app/[locale]/search/page.tsx"
+const searchablePosts: SearchablePost[] = [
+  ...allPosts.map((post) => ({ ...post })),
+  ...allTils.map((til) => ({
+    title: til.title, description: til.description,
+    date: til.date, permalink: til.permalink,
+    categories: [] as string[], tags: til.tags,
+  })),
+].sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+```
+
+The `SearchablePost` type requires `categories: string[]`, so TILs pass an empty array. The search logic itself — AND matching across title, description, categories, and tags — needed no changes. TIL entries just work.
+
+## Writing a TIL Entry
+
+Create a file in `content/tils/en/` or `content/tils/ja/`:
+
+```markdown title="content/tils/en/something-i-learned.mdx"
+---
+title: "Something I Learned"
+date: 2026-03-07
+published: true
+tags:
+  - tag-name
+---
+
+Short content here.
+```
+
+Content-only changes can be committed directly to `main`.
+
+## Summary
+
+- **Velite collections are cheap to add** — a schema definition and one `collections` entry. The transform pattern (extracting locale from path, computing permalink) is the same across content types.
+- **Component reuse validates your abstractions** — `PostList`, `PostCard`, `Pagination`, `MdxContent`, `SocialShare`, and `ProfileCard` all worked without modification. The `categories: []` adapter was the only concession.
+- **New content types should be intentionally simpler** — TIL entries skip categories, featured flags, TOC, and related posts. Knowing what to *leave out* is as important as knowing what to include.
+- **Search integration is trivial when you have a shared type** — mapping TILs to `SearchablePost` was a few lines. The existing search logic handled the rest.

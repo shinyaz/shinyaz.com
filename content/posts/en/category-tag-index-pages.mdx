@@ -1,8 +1,9 @@
 ---
 title: "Adding Category and Tag Index Pages to a Next.js Blog"
-description: "Individual category and tag pages exist, but there's no way to browse them all. Learn how to build statically generated category index and tag cloud pages in Next.js App Router by reusing existing helper functions with minimal code changes."
+description: "Individual category and tag pages existed, but there was no way to browse them all. The interesting part: zero new data-layer code was needed — existing helper functions composed directly into new pages."
 date: 2026-03-01
 published: true
+featured: false
 categories:
   - programming
 tags:
@@ -14,306 +15,57 @@ tags:
 
 ## The Problem
 
-This blog already had individual category pages (`/en/category/programming`) and tag pages (`/en/tag/nextjs`). However, there was **no index page to browse all categories or tags** at a glance. Users could navigate to specific categories or tags via badges on individual posts, but there was no way to explore the blog's overall content structure.
+This blog had individual category pages (`/en/category/programming`) and tag pages (`/en/tag/nextjs`), but no way to discover what categories and tags exist. You could reach them via badges on posts, but there was no overview — no "what does this blog cover?" page.
 
-This update adds four new pages:
+I wanted to add category and tag index pages for both locales.
 
-- `/en/category` — English category index
-- `/ja/category` — Japanese category index
-- `/en/tag` — English tag index
-- `/ja/tag` — Japanese tag index
+## Zero New Data-Layer Code
 
-## Design Approach
+What made this implementation satisfying was that every function needed already existed in `src/lib/posts.ts`:
 
-This blog uses Velite to statically generate data from MDX files at build time, with helper functions in `src/lib/posts.ts` to query the data. All the functions needed for index pages already existed:
+- `getAllCategories()` — returns all category objects
+- `getCategoryName()` / `getCategoryDescription()` — bilingual name and description
+- `getPostsByCategory()` — posts by category (for counts)
+- `getAllTags(locale)` — all tags for a locale
+- `getPostsByTag()` — posts by tag (for counts)
 
-- `getAllCategories()` — fetch all categories
-- `getCategoryName()` / `getCategoryDescription()` — bilingual category name and description
-- `getPostsByCategory()` — fetch posts by category (used for post counts)
-- `getAllTags(locale)` — fetch all tags by locale
-- `getPostsByTag()` — fetch posts by tag (used for post counts)
+No new utilities, no new components, no new data fetching patterns. Just composing existing functions into new pages. This is the payoff of building a well-factored data layer upfront.
 
-No new components or utilities were needed — just composing existing functions into new pages.
+## Card Grid vs. Tag Cloud: Why Different Layouts
 
-## Extending the i18n Dictionary
+The two index pages use different layouts, and the reason comes down to the shape of the data.
 
-First, add UI strings to `src/lib/i18n.ts`.
+**Categories** use a card grid (`grid gap-4 sm:grid-cols-2`). Each category has a name, description, and post count — structured data that fits naturally into a card. There are few categories (currently just one), so each deserves visual weight:
 
-```typescript title="src/lib/i18n.ts"
-const dictionaries = {
-  en: {
-    blog: {
-      // ...existing keys
-      browseCategories: "Categories",
-      browseTags: "Tags",
-    },
-    category: {
-      title: "Categories",
-      description: "Browse all categories",
-      postCount: "{count} post(s)",
-    },
-    tag: {
-      // ...existing keys
-      indexTitle: "Tags",
-      indexDescription: "Browse all tags",
-    },
-  },
-  ja: {
-    blog: {
-      browseCategories: "カテゴリ一覧",
-      browseTags: "タグ一覧",
-    },
-    category: {
-      title: "カテゴリ",
-      description: "すべてのカテゴリ一覧",
-      postCount: "{count}件の記事",
-    },
-    tag: {
-      indexTitle: "タグ",
-      indexDescription: "すべてのタグ一覧",
-    },
-  },
-} as const;
+```tsx
+<Link className="rounded-lg border border-border p-4 transition-colors hover:bg-accent">
+  <h2 className="font-semibold">{name}</h2>
+  <p className="mt-1 text-sm text-muted-foreground">{description}</p>
+  <p className="mt-2 text-xs text-muted-foreground">{postCount} posts</p>
+</Link>
 ```
 
-The `tag` section already had `title` / `description` for individual tag pages (e.g., "Tag: #nextjs"), so `indexTitle` / `indexDescription` were added as separate keys for the index page. The `category` section is entirely new.
+**Tags** use a flex-wrap tag cloud. Tags are flat strings with no description — just a name and count. There are many of them, so a dense layout makes more sense:
 
-## Category Index Page
-
-The category index displays a **card-based grid layout**. Each card shows the category name, description, and post count, and links to the individual category page.
-
-```tsx title="src/app/[locale]/category/page.tsx"
-import Link from "next/link";
-import { getAllCategories, getPostsByCategory, getCategoryName, getCategoryDescription } from "@/lib/posts";
-import { locales, isValidLocale, getDictionary } from "@/lib/i18n";
-
-export async function generateStaticParams() {
-  return locales.map((locale) => ({ locale }));
-}
-
-export default async function CategoryIndexPage({ params }: CategoryIndexPageProps) {
-  const { locale } = await params;
-  if (!isValidLocale(locale)) notFound();
-  const t = getDictionary(locale);
-  const categories = getAllCategories();
-
-  return (
-    <div className="mx-auto max-w-3xl px-4 py-6 md:py-12">
-      <header className="mb-8">
-        <h1 className="text-2xl font-bold tracking-tight md:text-3xl">
-          {t.category.title}
-        </h1>
-        <p className="mt-2 text-muted-foreground">{t.category.description}</p>
-      </header>
-      <div className="grid gap-4 sm:grid-cols-2">
-        {categories.map((category) => {
-          const name = getCategoryName(category, locale);
-          const description = getCategoryDescription(category, locale);
-          const postCount = getPostsByCategory(category.slug, locale).length;
-          return (
-            <Link
-              key={category.slug}
-              href={`/${locale}/category/${category.slug}`}
-              className="rounded-lg border border-border p-4 transition-colors hover:bg-accent"
-            >
-              <h2 className="font-semibold">{name}</h2>
-              {description && (
-                <p className="mt-1 text-sm text-muted-foreground">{description}</p>
-              )}
-              <p className="mt-2 text-xs text-muted-foreground">
-                {t.category.postCount.replace("{count}", String(postCount))}
-              </p>
-            </Link>
-          );
-        })}
-      </div>
-    </div>
-  );
-}
+```tsx
+<Link className="inline-flex items-center gap-1.5 rounded-full border border-border px-3 py-1.5 text-sm">
+  #{tag} <span className="text-xs">({postCount})</span>
+</Link>
 ```
 
-Key points:
+The tag cloud badges are deliberately larger than the existing `TagBadge` component (`px-3 py-1.5 text-sm` vs `px-2.5 py-0.5 text-xs`) for better readability and tap targets on the index page.
 
-- Implemented as a **server component** — no `"use client"` needed since there's no interactivity
-- `generateStaticParams` generates pages for each locale at build time
-- `sm:grid-cols-2` creates a responsive grid: single column on mobile, two columns on `sm` and above
-- `getCategoryName()` / `getCategoryDescription()` automatically switch between languages
+## The Locale Asymmetry
 
-## Tag Index Page
+One subtle design difference: `getAllTags(locale)` takes a locale argument, but `getAllCategories()` doesn't. This reflects how the two are defined:
 
-The tag index uses a **tag cloud style flex layout**. Each tag displays its name with a post count in parentheses.
+- **Categories** are static YAML files — the same categories exist regardless of locale, with bilingual `name` / `nameJa` and `description` / `descriptionJa` fields
+- **Tags** are free-form strings in post frontmatter — Japanese and English posts may have completely different tag sets
 
-```tsx title="src/app/[locale]/tag/page.tsx"
-export default async function TagIndexPage({ params }: TagIndexPageProps) {
-  const { locale } = await params;
-  if (!isValidLocale(locale)) notFound();
-  const t = getDictionary(locale);
-  const tags = getAllTags(locale);
-
-  return (
-    <div className="mx-auto max-w-3xl px-4 py-6 md:py-12">
-      <header className="mb-8">
-        <h1 className="text-2xl font-bold tracking-tight md:text-3xl">
-          {t.tag.indexTitle}
-        </h1>
-        <p className="mt-2 text-muted-foreground">{t.tag.indexDescription}</p>
-      </header>
-      <div className="flex flex-wrap gap-3">
-        {tags.map((tag) => {
-          const postCount = getPostsByTag(tag, locale).length;
-          return (
-            <Link
-              key={tag}
-              href={`/${locale}/tag/${tag}`}
-              className="inline-flex items-center gap-1.5 rounded-full border border-border px-3 py-1.5 text-sm text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
-            >
-              #{tag}
-              <span className="text-xs">({postCount})</span>
-            </Link>
-          );
-        })}
-      </div>
-    </div>
-  );
-}
-```
-
-The styling is slightly larger than the existing `TagBadge` component (`px-2.5 py-0.5 text-xs`) — using `px-3 py-1.5 text-sm` for better readability and tap targets on the index page.
-
-A key design difference from the category index: `getAllTags(locale)` takes a locale argument. Tags are dynamically collected from post frontmatter, so Japanese and English posts may have different tag sets. Categories, on the other hand, are defined in static YAML files and don't vary by locale.
-
-## Navigation from the Blog Page
-
-Links to the new pages were added to the blog listing page header.
-
-```tsx title="src/app/[locale]/blog/page.tsx"
-<header className="mb-8">
-  <h1 className="text-2xl font-bold tracking-tight md:text-3xl">
-    {t.blog.title}
-  </h1>
-  <p className="mt-2 text-muted-foreground">{t.blog.description}</p>
-  <div className="mt-4 flex gap-3">
-    <Link
-      href={`/${locale}/category`}
-      className="inline-block rounded-full border border-border px-3 py-1 text-sm text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
-    >
-      {t.blog.browseCategories}
-    </Link>
-    <Link
-      href={`/${locale}/tag`}
-      className="inline-block rounded-full border border-border px-3 py-1 text-sm text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
-    >
-      {t.blog.browseTags}
-    </Link>
-  </div>
-</header>
-```
-
-The styling matches the existing `CategoryBadge` / `TagBadge` components — rounded pill-shaped links that feel consistent with the blog's design language.
-
-## SEO
-
-Both pages follow the established patterns for SEO:
-
-- `generateMetadata` sets `title`, `description`, `openGraph`, and `alternates`
-- `buildAlternateLanguages` generates `hreflang` alternate language links
-- Explicit `canonical` URLs
-
-```typescript
-export async function generateMetadata({ params }: CategoryIndexPageProps): Promise<Metadata> {
-  const { locale } = await params;
-  if (!isValidLocale(locale)) return {};
-  const t = getDictionary(locale);
-  return {
-    title: t.category.title,
-    description: t.category.description,
-    openGraph: {
-      title: t.category.title,
-      description: t.category.description,
-      url: `${SITE_URL}/${locale}/category`,
-      type: "website",
-    },
-    alternates: {
-      canonical: `${SITE_URL}/${locale}/category`,
-      languages: buildAlternateLanguages((l) => `/${l}/category`),
-    },
-  };
-}
-```
-
-## Testing
-
-### Unit Tests
-
-Tests verify that the new i18n dictionary keys exist and have the expected values.
-
-```typescript title="__tests__/lib/i18n.test.ts"
-it("has category section with required keys", () => {
-  const ja = getDictionary("ja");
-  const en = getDictionary("en");
-  expect(ja.category.title).toBe("カテゴリ");
-  expect(ja.category.postCount).toContain("{count}");
-  expect(en.category.title).toBe("Categories");
-  expect(en.category.postCount).toContain("{count}");
-});
-
-it("has tag index keys", () => {
-  const ja = getDictionary("ja");
-  const en = getDictionary("en");
-  expect(ja.tag.indexTitle).toBe("タグ");
-  expect(en.tag.indexTitle).toBe("Tags");
-});
-```
-
-### E2E Tests
-
-Playwright tests verify page rendering, navigation, and post counts for both locales.
-
-```typescript title="e2e/category-index.spec.ts"
-test.describe("Category Index Page", () => {
-  test("English category index page loads with categories", async ({ page }) => {
-    await page.goto("/en/category");
-    await expect(page.locator("h1")).toContainText("Categories");
-    await expect(page.locator("a[href*='/en/category/']").first()).toBeVisible();
-  });
-
-  test("each category card shows post count", async ({ page }) => {
-    await page.goto("/en/category");
-    const firstCard = page.locator("a[href*='/en/category/']").first();
-    await expect(firstCard).toContainText(/\d+ post/);
-  });
-
-  test("clicking a category navigates to category detail page", async ({ page }) => {
-    await page.goto("/en/category");
-    await page.locator("a[href*='/en/category/']").first().click();
-    await expect(page).toHaveURL(/\/en\/category\/.+/);
-  });
-});
-```
-
-The tag index page has a similar test structure. Both test suites also verify that the blog listing page links correctly to the index pages.
-
-## Files Changed
-
-| Type | File | Description |
-| --- | --- | --- |
-| Modified | `src/lib/i18n.ts` | New `category` section, new keys in `tag` and `blog` |
-| New | `src/app/[locale]/category/page.tsx` | Category index page |
-| New | `src/app/[locale]/tag/page.tsx` | Tag index page |
-| Modified | `src/app/[locale]/blog/page.tsx` | Navigation links added |
-| New | `e2e/category-index.spec.ts` | Category index E2E tests |
-| New | `e2e/tag-index.spec.ts` | Tag index E2E tests |
-| Modified | `__tests__/lib/i18n.test.ts` | i18n key unit tests |
-
-Zero new dependencies added.
+This means the tag index can show different content per locale, while the category index shows the same categories with translated names. It's a subtle but important distinction when building bilingual content systems.
 
 ## Summary
 
-By reusing existing helper functions and the data pipeline, category and tag index pages were added with minimal code changes:
-
-- **Category index**: Card-based grid layout with name, description, and post count
-- **Tag index**: Tag cloud style flex layout with tag name and post count
-- **Blog page**: Header links to category and tag indexes
-- **Bilingual support**: i18n dictionary extension for both Japanese and English
-
-Both pages are pure server components, so no additional client JavaScript is shipped. They use Velite's statically generated data directly, with no runtime data fetching.
+- **Existing functions compose well** — the fact that zero new data-layer code was needed validates the helper function design in `posts.ts`. When your abstractions are right, new features are just composition.
+- **Let data shape drive layout** — categories (structured, few) → card grid; tags (flat, many) → tag cloud. Don't force the same layout on fundamentally different data.
+- **Static vs. dynamic metadata has design implications** — YAML-defined categories are locale-independent; frontmatter tags are locale-dependent. This asymmetry matters for bilingual index pages.

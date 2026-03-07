@@ -1,0 +1,96 @@
+---
+title: "Velite × Next.js でブログに TIL セクションを追加する"
+description: "Velite に新しいコレクションを定義し、既存コンポーネントを最小限の適応で再利用して TIL セクションを実装。検索統合まで含めて、新しい依存関係はゼロだった。"
+date: 2026-03-07
+published: true
+featured: false
+categories:
+  - programming
+tags:
+  - nextjs
+  - velite
+  - mdx
+  - typescript
+---
+
+## はじめに
+
+すべての学びがブログ記事に値するわけではない。便利な CSS トリック、CLI のフラグ、ライブラリの挙動の癖 — 記録しておきたいが 1,000 文字の文脈は不要な発見がある。こういった小さな学びを逃し続けていたので、TIL（Today I Learned）セクションを追加した。短くて、書くハードルが低いエントリのための場所だ。
+
+この実装は、ブログのアーキテクチャが新しいコンテンツタイプをどれだけうまく扱えるかのテストになった。結果は思った以上に良好で、既存のコンポーネントとデータパターンが最小限の適応できれいに組み合わさった。
+
+## Velite コレクションの定義
+
+`velite.config.ts` の `tils` コレクションは、ブログ記事と同じ MDX パイプラインを使いつつ、スキーマはシンプルにした。カテゴリ・`featured`・`cover`・`updated` は不要で、TIL エントリは意図的に軽量だ：
+
+```typescript title="velite.config.ts"
+const tils = defineCollection({
+  name: "TIL",
+  pattern: "tils/**/*.mdx",
+  schema: s.object({
+    title: s.string().max(200),
+    description: s.string().max(500).optional(),
+    date: s.isodate(),
+    published: s.boolean().default(true),
+    tags: s.array(s.string()).default([]),
+    // ...filePath, metadata, content, body
+  }).transform((data) => {
+    // パスからロケールを抽出、year/month/day/slug を計算、permalink を生成
+    // → /{locale}/til/{year}/{month}/{day}/{slug}
+  }),
+});
+```
+
+Velite にコレクションを追加するのは、スキーマ定義と `defineConfig({ collections: { posts, tils } })` への1エントリだけ。コンテンツは `content/tils/{en,ja}/*.mdx` に配置する。transform はディレクトリパスからロケールを抽出する、ブログ記事と同じパターンだ。
+
+## 既存コンポーネントの再利用
+
+最も満足だったのは、変更なしで再利用できたものの多さだ：
+
+- **一覧ページ**: `PostList` と `Pagination` がそのまま動く。TIL エントリは同じ形にマッピングし、カテゴリがないので `categories: []` を渡す。
+- **詳細ページ**: `MdxContent`、`SocialShare`、`ProfileCard` をそのまま再利用。`TableOfContents` と `RelatedPosts` は意図的に除外した — TIL エントリは短すぎてどちらも不要だ。
+- **ナビゲーション**: `header.tsx` と `mobile-nav.tsx` にリンクを追加し、UI 文字列を `src/lib/i18n.ts` に追加。
+
+`categories: []` アダプターは注目に値する。`PostCard` は `categories: string[]` を期待するが、TIL にはカテゴリがない。複数コンポーネントで prop をオプショナルにするより、空配列を渡す方がシンプルなブリッジになる。
+
+## 検索機能への統合
+
+検索ページ（`/[locale]/search`）でブログ記事と TIL を統合し、1つの検索可能なリストにマージする：
+
+```typescript title="src/app/[locale]/search/page.tsx"
+const searchablePosts: SearchablePost[] = [
+  ...allPosts.map((post) => ({ ...post })),
+  ...allTils.map((til) => ({
+    title: til.title, description: til.description,
+    date: til.date, permalink: til.permalink,
+    categories: [] as string[], tags: til.tags,
+  })),
+].sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+```
+
+`SearchablePost` 型に `categories: string[]` が必要なので、TIL は空配列を渡す。検索ロジック自体 — タイトル・説明・カテゴリ・タグの AND マッチング — は変更不要。TIL エントリがそのまま動く。
+
+## TIL の書き方
+
+`content/tils/ja/` または `content/tils/en/` にファイルを作成する：
+
+```markdown title="content/tils/ja/something-i-learned.mdx"
+---
+title: "今日学んだこと"
+date: 2026-03-07
+published: true
+tags:
+  - タグ名
+---
+
+短い本文をここに書く。
+```
+
+コンテンツファイルの変更は `main` ブランチに直接コミットできる。
+
+## まとめ
+
+- **Velite のコレクション追加は低コスト** — スキーマ定義と `collections` への1エントリ。transform パターン（パスからロケール抽出、パーマリンク計算）はコンテンツタイプ間で共通。
+- **コンポーネント再利用が抽象化の正しさを検証する** — `PostList`、`PostCard`、`Pagination`、`MdxContent`、`SocialShare`、`ProfileCard` がすべて変更なしで動いた。`categories: []` アダプターが唯一の妥協点。
+- **新しいコンテンツタイプは意図的にシンプルに** — TIL はカテゴリ、featured フラグ、目次、関連記事をスキップしている。何を*含めないか*を知ることは、何を含めるかと同じくらい重要だ。
+- **共有型があれば検索統合は簡単** — TIL を `SearchablePost` にマッピングするのは数行で、既存の検索ロジックが残りを処理した。

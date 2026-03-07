@@ -1,6 +1,6 @@
 ---
 title: "Migrating Next.js PWA to @serwist/turbopack for Faster Builds"
-description: "A step-by-step guide to migrating from @serwist/next to @serwist/turbopack. Simplify your build pipeline with automatic precache manifest injection and Turbopack integration."
+description: "How I replaced a broken 3-stage build pipeline with @serwist/turbopack's Route Handler approach — finally making precaching work and unlocking Turbopack as the default bundler."
 date: 2026-02-28
 published: true
 featured: true
@@ -13,21 +13,19 @@ tags:
   - turbopack
 ---
 
-## Background
+## The Problem
 
-This blog uses Next.js + [Serwist](https://serwist.pages.dev/) for PWA support. Previously, the Service Worker was built using a combination of `@serwist/next` (a webpack plugin) and a custom esbuild script. This setup had several issues:
+If you've ever bolted PWA support onto a Next.js site, you know the pain: the Service Worker tooling always feels like it's fighting the framework. My setup was a perfect example. I had `@serwist/next` (a webpack plugin) combined with a custom esbuild script to bundle the SW, and it was broken in ways I'd been ignoring for too long.
 
-- The esbuild script (`scripts/build-sw.mjs`) didn't inject a precache manifest, so precaching wasn't functional
-- The build pipeline was a 3-stage process: `velite build → esbuild → next build`
-- Turbopack couldn't be used as the default bundler since `@serwist/next` depends on webpack
+The esbuild script never injected a precache manifest, which meant precaching — arguably the whole point of a PWA — wasn't actually working. The build pipeline had ballooned to three stages (`velite build → esbuild → next build`), and worst of all, I couldn't switch to Turbopack because `@serwist/next` was hardwired to webpack.
 
-Migrating to `@serwist/turbopack` solved all of these at once.
+When I saw that `@serwist/turbopack` took a fundamentally different approach — using a Next.js Route Handler instead of a bundler plugin — I was curious enough to try it.
 
-## What is @serwist/turbopack?
+## Why the Route Handler Approach is Clever
 
-`@serwist/turbopack` is Serwist's Turbopack-compatible package. Instead of a webpack plugin, it uses a **Next.js Route Handler** to compile the SW at build time and automatically inject the precache manifest.
+Here's what surprised me most about `@serwist/turbopack`: it doesn't hook into the bundler at all. Instead, it compiles the Service Worker through a regular Next.js Route Handler that runs esbuild at build time and outputs static files via SSG. The precache manifest gets injected as part of that process.
 
-Here's how the two approaches compare:
+By treating the SW as "just another route," it sidesteps the entire webpack-vs-Turbopack question. It also means the SW build participates in Next.js's own static generation, so you get source maps, proper caching headers, and all the other niceties for free. This is an elegant design choice.
 
 | Aspect | @serwist/next (webpack) | @serwist/turbopack |
 |---|---|---|
@@ -37,38 +35,30 @@ Here's how the two approaches compare:
 | SW registration | Automatic via `register` option | Explicit via `SerwistProvider` component |
 | Turbopack support | No | Native |
 
-## Migration Steps
+## Migration
 
-### 1. Update Dependencies
+### Dependencies and Config
+
+First, swap the packages and wrap your Next.js config with `withSerwist`. Unlike `withSerwistInit` from the old package, this wrapper is dead simple — all it does is add `esbuild` to `serverExternalPackages`. No SW options, no magic.
 
 ```bash
 npm uninstall @serwist/next
 npm install -D @serwist/turbopack esbuild
 ```
 
-`@serwist/turbopack` uses esbuild internally to bundle the SW, so `esbuild` is required as a peer dependency.
-
-### 2. Add withSerwist to next.config.ts
-
-```typescript
-import type { NextConfig } from "next";
+```typescript title="next.config.ts"
 import { withSerwist } from "@serwist/turbopack";
 
-const nextConfig: NextConfig = {
+export default withSerwist({
   // ...existing config
-};
-
-export default withSerwist(nextConfig);
+});
 ```
 
-`withSerwist` is a simple wrapper that adds `esbuild` to `serverExternalPackages`. Unlike `withSerwistInit` from `@serwist/next`, it takes no SW-related options.
+### The Route Handler (The Interesting Part)
 
-### 3. Create the Route Handler
+This is the core of the new approach. A single Route Handler replaces both the webpack plugin and my custom esbuild script:
 
-Create a Route Handler that builds and serves the SW.
-
-```typescript
-// src/app/serwist/[path]/route.ts
+```typescript title="src/app/serwist/[path]/route.ts"
 import { spawnSync } from "node:child_process";
 import { createSerwistRoute } from "@serwist/turbopack";
 
@@ -87,89 +77,26 @@ export const { dynamic, dynamicParams, revalidate, generateStaticParams, GET } =
   });
 ```
 
-Key points:
+I like that `createSerwistRoute` returns all the standard Next.js Route Handler exports — `generateStaticParams`, `GET`, etc. — so the SW gets built at `next build` time as a regular static route. Using the git commit hash as `revision` means the precache busts automatically on every deploy without any extra CI logic.
 
-- `swSrc` specifies the SW source file
-- `additionalPrecacheEntries` explicitly precaches offline fallback pages
-- `revision` uses the git commit hash to bust the cache on each deploy
-- At build time, `/serwist/sw.js` and `/serwist/sw.js.map` are statically generated via SSG
+### SerwistProvider for Registration
 
-### 4. Update sw.ts Imports
+One trade-off of the new approach: SW registration is no longer automatic. You need a `SerwistProvider` component. Since it's a client component, you can't import it directly in a Server Component layout — a small `"use client"` re-export file bridges the gap:
 
-```typescript
-// Before
-import { defaultCache } from "@serwist/next/worker";
-
-// After
-import { defaultCache } from "@serwist/turbopack/worker";
-```
-
-`defaultCache` provides the same recommended caching strategies for Next.js apps — the API is identical.
-
-### 5. Register SW with SerwistProvider
-
-`@serwist/turbopack` uses a `SerwistProvider` component for SW registration.
-
-```tsx
-// src/components/pwa/serwist-provider.tsx
+```tsx title="src/components/pwa/serwist-provider.tsx"
 "use client";
 export { SerwistProvider } from "@serwist/turbopack/react";
 ```
 
-```tsx
-// src/app/[locale]/layout.tsx
-import { SerwistProvider } from "@/components/pwa/serwist-provider";
+Then wrap your layout with it, pointing `swUrl` to the Route Handler path (`/serwist/sw.js`).
 
-export default async function LocaleLayout({ children, params }) {
-  return (
-    <html lang={locale}>
-      <body>
-        <SerwistProvider swUrl="/serwist/sw.js">
-          <ThemeProvider>
-            {children}
-          </ThemeProvider>
-        </SerwistProvider>
-      </body>
-    </html>
-  );
-}
-```
+### Cleanup
 
-Since `SerwistProvider` is a client component, it can't be imported directly from `@serwist/turbopack/react` in a Server Component layout. A `"use client"` re-export file is needed as an intermediary.
-
-### 6. Update Middleware
-
-Since the SW URL changes from `/sw.js` to `/serwist/sw.js`, update the middleware skip configuration.
-
-```typescript
-// Before
-const SKIP_PREFIXES = [..., "/sw.js", ...];
-
-// After
-const SKIP_PREFIXES = [..., "/serwist/", ...];
-```
-
-### 7. Cleanup
-
-- Delete `scripts/build-sw.mjs` (no longer needed)
-- Delete `public/sw.js` (now generated via Route Handler)
-- Remove `public/sw*` from `.gitignore`
-
-### 8. Update Build Script
-
-```json
-{
-  "scripts": {
-    "build": "velite build && next build --turbopack"
-  }
-}
-```
-
-With the esbuild script removed, the pipeline simplifies to just two steps: `velite build → next build`.
+The remaining changes are straightforward: update the import in `sw.ts` from `@serwist/next/worker` to `@serwist/turbopack/worker`, update middleware to skip `/serwist/` instead of `/sw.js`, and delete the old `scripts/build-sw.mjs` and `public/sw.js`. With the esbuild script gone, the build simplifies to `velite build && next build --turbopack`.
 
 ## Results
 
-Post-migration build output:
+The build output after migration:
 
 ```
 ○ (serwist) Using esbuild to bundle the service worker.
@@ -180,10 +107,10 @@ Post-migration build output:
   └ /serwist/sw.js
 ```
 
-- **Precache manifest is now automatically injected** — 47 entries (~1.2 MB) are precached
-- Build pipeline simplified from 3 stages (`velite → esbuild → next`) to 2 (`velite → next`)
-- Turbopack is now the default bundler, with an expected ~40% build time reduction compared to webpack
+47 precache entries, automatically discovered and injected. Previously this number was zero. That alone made the migration worth it.
 
-## Conclusion
+## Takeaways
 
-Migrating to `@serwist/turbopack` was a relatively small code change that delivered two significant improvements: a simpler build pipeline and a fully functional precache. If you're running a Next.js project with Serwist and want to switch to Turbopack, this guide should help you get started.
+- **Fight the framework less.** The Route Handler approach works because it uses Next.js's own primitives instead of fighting the build system. When evaluating tools, look for designs that work *with* the framework rather than around it.
+- **Broken features hide in plain sight.** Precaching had been silently non-functional for weeks. If something is supposed to work but you've never verified it, it probably doesn't. Check the actual build output.
+- **Explicit beats automatic.** Having to add `SerwistProvider` manually felt like a downgrade at first, but it's actually clearer — I can see exactly where and how the SW gets registered, which makes debugging easier.

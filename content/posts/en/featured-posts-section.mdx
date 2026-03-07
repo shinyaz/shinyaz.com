@@ -1,8 +1,9 @@
 ---
 title: "Adding a Featured Posts Section to the Home Page with Velite & Next.js"
-description: "How to add a featured field to your Velite MDX schema and display selected posts in a grid on the home page. Covers schema extension, component design, and tag overflow handling."
+description: "Three patterns worth reusing: Velite's default(false) for safe schema evolution, a MAX_TAGS overflow indicator, and conditionally rendering sections that hide themselves when empty."
 date: 2026-03-07
 published: true
+featured: false
 categories:
   - programming
 tags:
@@ -14,85 +15,42 @@ tags:
 
 ## Overview
 
-I added a "Featured" section to the home page that lets me pin selected posts in a grid. Adding `featured: true` to a post's frontmatter is all it takes to include it.
+I wanted a way to pin selected posts to the home page. Not a "latest posts" feed — a curated section where I control which articles get highlighted. Adding `featured: true` to a post's frontmatter should be all it takes.
 
-Here's the full implementation broken down into steps:
+The implementation itself is simple, but it surfaced three patterns that I've found useful beyond this specific feature.
 
-1. Extend the Velite posts schema with a `featured` field
-2. Add a `getFeaturedPosts()` helper
-3. Build a `FeaturedPostCard` component
-4. Handle tag overflow
-5. Wire everything up on the home page
+## Pattern 1: Safe Schema Evolution with default(false)
 
-## Extending the Velite Schema
+Adding a `featured` field to the Velite posts schema:
 
-[Velite](https://velite.js.org/) defines frontmatter shape via schemas. Adding a field to `velite.config.ts` is straightforward:
-
-```typescript
-// velite.config.ts
+```typescript title="velite.config.ts"
 const posts = defineCollection({
   schema: s.object({
     // ...existing fields
-    published: s.boolean().default(true),
     featured: s.boolean().default(false), // new
-    // ...
   }),
 });
 ```
 
-Using `default(false)` means existing posts need no changes — only posts that explicitly set `featured: true` are affected.
+The key insight: `default(false)` means **zero migration effort**. Every existing post implicitly gets `featured: false` without touching a single file. Only posts that explicitly set `featured: true` are affected.
 
-## Adding getFeaturedPosts()
+This is a pattern worth remembering whenever you extend a content schema. Use `default()` values that preserve the current behavior, and new fields become purely additive. No migration scripts, no bulk file edits, no risk of breaking existing content.
 
-In `src/lib/posts.ts`, a one-liner on top of the existing `getPublishedPosts()` does the job:
+The query function is a one-liner on top of the existing `getPublishedPosts()`:
 
-```typescript
+```typescript title="src/lib/posts.ts"
 export function getFeaturedPosts(locale?: Locale) {
   return getPublishedPosts(locale).filter((post) => post.featured);
 }
 ```
 
-Because `getPublishedPosts()` already filters out unpublished posts and sorts by date descending, this function inherits both behaviors for free. A post with `published: false` and `featured: true` will correctly be excluded.
+Since `getPublishedPosts()` already filters unpublished posts and sorts by date, this inherits both behaviors for free. A post with `published: false` and `featured: true` is correctly excluded.
 
-## Building FeaturedPostCard
+## Pattern 2: Tag Overflow with MAX_TAGS
 
-Featured posts needed a visually distinct card — rounded border, subtle background — rather than the plain border-bottom style used in the regular post list. A dedicated component keeps the two concerns independent:
+Posts with many tags can break card layouts. The fix: show at most N tags and display a `+N` indicator for the rest.
 
-```tsx
-// src/components/blog/featured-post-card.tsx
-const MAX_TAGS = 3;
-
-export function FeaturedPostCard({ title, description, date, permalink, categories, tags, locale }) {
-  return (
-    <article className="group rounded-lg border border-border bg-muted/30 p-4 hover:bg-muted/50 transition-colors">
-      <Link href={permalink} className="block">
-        <h3 className="font-semibold tracking-tight group-hover:underline">
-          {title}
-        </h3>
-        {description && (
-          <p className="mt-1 text-sm text-muted-foreground line-clamp-2">
-            {description}
-          </p>
-        )}
-      </Link>
-      <div className="mt-2 flex flex-wrap items-center gap-2">
-        <time dateTime={date} className="text-xs text-muted-foreground">
-          {formatDate(date, locale)}
-        </time>
-        {/* category and tag badges */}
-      </div>
-    </article>
-  );
-}
-```
-
-Keeping this separate from `PostCard` also makes it easy to tune the tag display limit independently for each layout.
-
-## Handling Tag Overflow
-
-Posts with many tags would overflow the card layout. The fix: show at most `MAX_TAGS` tags and display a `+N` indicator for the rest.
-
-```tsx
+```tsx title="src/components/blog/featured-post-card.tsx"
 const MAX_TAGS = 3;
 
 {tags.slice(0, MAX_TAGS).map((tag) => (
@@ -103,15 +61,13 @@ const MAX_TAGS = 3;
 )}
 ```
 
-Extracting the limit into a `MAX_TAGS` constant means a single edit updates both the slice and the overflow count. The same pattern was applied to the existing `PostCard` to keep behavior consistent across both components.
+Extracting the limit into a constant means a single edit updates both the slice and the overflow count. I applied the same pattern to the regular `PostCard` component to keep behavior consistent.
 
-## Wiring Up the Home Page
+## Pattern 3: Self-Hiding Sections
 
-In `src/app/[locale]/page.tsx`, the section only renders when there's at least one featured post:
+The featured section on the home page only renders when there's at least one featured post:
 
-```tsx
-const featuredPosts = getFeaturedPosts(locale);
-
+```tsx title="src/app/[locale]/page.tsx"
 {featuredPosts.length > 0 && (
   <section className="mt-8 md:mt-12">
     <h2 className="text-xl font-semibold mb-4">{t.home.featuredPosts}</h2>
@@ -124,35 +80,10 @@ const featuredPosts = getFeaturedPosts(locale);
 )}
 ```
 
-`sm:grid-cols-2` switches to a two-column layout on small screens and above. The conditional render means removing all `featured: true` markers simply hides the section — no UI breakage.
+This means removing all `featured: true` markers simply hides the section — no code changes needed, no UI breakage. The feature is purely additive: it exists when there's content for it and disappears when there isn't.
 
-UI strings live in `src/lib/i18n.ts`:
+## Summary
 
-```typescript
-// ja
-home: { featuredPosts: "注目記事" }
-
-// en
-home: { featuredPosts: "Featured" }
-```
-
-## Usage
-
-Mark any post as featured by adding one line to its frontmatter:
-
-```yaml
----
-title: "Post Title"
-date: 2026-03-07
-published: true
-featured: true   # add this
-categories:
-  - programming
----
-```
-
-Posts without `featured` default to `false`, so nothing breaks for existing content.
-
-## Conclusion
-
-The Velite schema extension was the cleanest part — `default(false)` made the migration zero-impact on existing posts. Separating `FeaturedPostCard` from `PostCard` gave each component its own `MAX_TAGS` constant and styling, making future tweaks straightforward. The home page section is purely additive and self-hiding when empty, so it fits naturally into the existing layout.
+- **`default(false)` makes schema changes safe** — existing content is unaffected, new fields are purely additive. Use this pattern whenever extending Velite (or any content schema) with new optional fields.
+- **MAX_TAGS prevents layout breakage** — a simple constant-based slice with a `+N` overflow indicator keeps card layouts stable regardless of how many tags a post has.
+- **Conditional rendering creates self-managing sections** — `{items.length > 0 && <Section />}` means the feature manages its own visibility. No feature flags, no separate configuration.

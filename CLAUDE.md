@@ -126,6 +126,155 @@ playwright.config.ts           # Playwright config (Chromium, webServer)
 - Prioritize meaningful tests over coverage numbers
 - Always cover error cases
 
+## Blog Post Style Guide
+
+All blog posts in `content/posts/{en,ja}/` must follow this style. The goal is to write posts that are **concrete, scannable, and genuinely useful** — a reader should understand what they'll gain from the title and first paragraph alone. Write like a developer sharing with peers, not like documentation or a changelog.
+
+### Frontmatter
+
+```yaml
+---
+title: "..."          # See title format below
+description: "..."    # 120–200 chars; the unique insight or outcome, not a generic summary
+date: YYYY-MM-DD
+published: true
+featured: false       # true only for pinned posts
+categories:
+  - programming       # only category in use
+tags:                 # lowercase, hyphenated; technology names or well-known terms
+  - nextjs
+  - velite
+---
+```
+
+**description** should convey the unique value of the post — what makes it worth reading. Avoid generic templates like "Learn how to...", "A step-by-step guide to...", or "〜の方法を解説".
+
+- Good: `"Next.js の opengraph-image.tsx を使い、ビルド時に記事ごとの OG 画像を自動生成する。Satori のレイアウト制約とフォント埋め込みの実践知見。"`
+- Avoid: `"Next.js で OG 画像を動的に生成する方法を学びましょう。"`
+
+### Title Format
+
+Titles must be **specific and outcome-oriented**. The reader should know what they'll learn or gain before clicking.
+
+**Principles:**
+- Name the technology or domain — don't be vague
+- Lead with the result, not the process
+- Avoid filler: "How to", "Introduction to", "A Guide to", "〜について", "〜の紹介"
+
+**Japanese:** 読者が得る知見と技術名が一目でわかる形。体言止め or `〜する` 形が自然。
+- Good: `Next.js の OG 画像を動的に自動生成する`
+- Good: `Serwist × Turbopack 移行でビルドを高速化`
+- Avoid: `OG 画像について` / `PWA の紹介`
+
+**English:** Lead with the action, outcome, or insight. Name the technology.
+- Good: `Auto-Generating Dynamic OG Images for a Next.js Blog`
+- Good: `Why We Migrated from Webpack to Turbopack for PWA Builds`
+- Avoid: `How to Use OG Images` / `Introduction to PWA`
+
+### Article Types
+
+Not every post is a step-by-step tutorial. Choose the structure that best fits the content:
+
+| Type | When to use | Example title |
+|------|-------------|---------------|
+| **Build log** | You built something and want to share the process | `Adding a TIL Section to a Velite & Next.js Blog` |
+| **Problem → Solution** | You solved a specific issue worth documenting | `Fixing Hydration Mismatches in next-themes with App Router` |
+| **Deep dive** | Exploring how something works under the hood | `How Next.js Static Generation Works with Dynamic Routes` |
+| **Comparison / Decision** | Evaluating options and explaining your choice | `Choosing a Content Layer: Velite vs. Contentlayer vs. MDX Bundler` |
+| **Migration / Upgrade** | Moving between versions, tools, or architectures | `Migrating Next.js PWA to @serwist/turbopack for Faster Builds` |
+| **Lessons learned** | Reflecting on what worked, what didn't, and why | `What I Learned Building a Bilingual Blog with Next.js` |
+
+### Article Structure
+
+Every post should follow this general flow. Adapt the section names to fit the content naturally — these are guidelines, not rigid templates.
+
+**Opening (1–2 paragraphs):**
+
+Hook the reader immediately. Start with a relatable problem, a surprising discovery, or the concrete outcome — not with "This blog uses X." The reader should understand **why they should keep reading** within the first few sentences.
+
+- Use `## Overview` / `## はじめに` for general introductions
+- Use `## The Problem` / `## 課題` when there's a clear problem statement
+- If the post covers multiple steps, provide a brief numbered overview after the hook
+
+Good opening pattern:
+> When sharing blog posts on social media, every article showed the same generic image. I wanted each post to have a unique OG image — generated automatically at build time with zero runtime cost.
+
+Avoid:
+> This blog was using a single default OG image. This update adds dynamic OG images.
+
+**Body (the core of the post):**
+
+Organize into logical sections with descriptive headings. Each section should be self-contained enough to skim.
+
+- For build logs / tutorials: walk through steps in order, showing key decisions
+- For deep dives: build understanding progressively from concepts to details
+- For comparisons: use tables and criteria-based analysis, then state your choice and reasoning
+- For problem → solution: describe symptoms, investigation process, root cause, and fix
+
+**Highlight the interesting parts, skip the obvious ones.** The most valuable content is: gotchas you hit, decisions you made and why, things that surprised you, and mental models that clicked. Standard boilerplate code (imports, basic CRUD, straightforward wiring) can be summarized in a sentence rather than shown in full.
+
+**Closing:**
+
+End with **transferable insights** — things the reader can apply to their own projects, not just a recap of what was done. If appropriate, mention open questions, future improvements, or alternative approaches you considered.
+
+```
+## まとめ / Summary
+- **[Insight]** — What the reader should take away.
+- **[Insight]** — What the reader should take away.
+```
+
+### Voice and Tone
+
+- **Write in first person** — "I discovered", "I chose", "I ran into". This is a personal blog, not a reference manual.
+- **Share opinions and reactions** — "This surprised me", "In hindsight, I'd do X differently", "The docs don't mention this, but...". Opinions are what distinguish blog posts from documentation.
+- **Be honest about rough edges** — If the solution is imperfect or there's something you'd improve, say so. Readers trust authors who acknowledge limitations.
+- **Keep a conversational but precise tone** — Friendly enough to be engaging, technical enough to be useful. Avoid both dry academic prose and overly casual language.
+
+### What to Include vs. Skip
+
+**Include (high value for readers):**
+- Gotchas, surprises, and non-obvious behaviors — these save readers hours of debugging
+- Design decisions with reasoning — "I chose X over Y because..."
+- Before/after comparisons — make improvements tangible
+- Relevant error messages or symptoms — helps readers who are searching for the same problem
+- Diagrams or architecture overviews for complex topics
+
+**Skip or minimize (low value, adds bulk):**
+- **Exhaustive code listings** — Show the interesting 20%, summarize the rest. Don't paste entire files.
+- **Testing sections with full test code** — Mention what's tested and any interesting testing strategies. Don't list every `describe`/`it` block unless the testing approach itself is the topic.
+- **"Files Changed" tables** — These belong in PRs, not blog posts. Readers don't need a file manifest.
+- **"Zero new dependencies added"** — Only mention dependencies when the decision is noteworthy (e.g., choosing to avoid a popular library and why).
+- **Boilerplate setup steps** — Link to docs for standard installation/configuration. Focus on what's unique to your situation.
+
+### Writing Principles
+
+- **Lead with "why", then show "how"** — Motivation before implementation. A reader who understands the problem will appreciate the solution more.
+- **Show your thinking, not just the result** — The most valuable content is what you tried, what failed, and why you chose the approach you did. Don't just present the final code.
+- **Make trade-offs explicit** — Every technical decision has downsides. Acknowledge them — it builds trust and helps the reader evaluate whether your approach fits their context.
+- **Use tables for structured comparisons** — When comparing options, features, or before/after states, a table is easier to scan than prose.
+- **Keep code examples focused** — Show only the relevant parts. Use `// ...existing code` to indicate omitted context. Surround code with enough explanation that the reader knows what to look for.
+- **Write for scanners first, readers second** — Use descriptive headings, bold key terms, and short paragraphs. Most readers will skim before deciding to read in depth.
+- **Avoid restating documentation** — Don't repeat what's already in official docs. Link to them and focus on what's unique to your experience: gotchas, real-world context, and opinions.
+- **One post, one core insight** — Every post should have a single main takeaway that the reader remembers. If you find yourself covering too many unrelated topics, split into multiple posts.
+
+### Code Blocks
+
+Include the `title=` attribute pointing to the actual file path when the block represents file content:
+
+````
+```typescript title="src/lib/example.ts"
+````
+
+Code blocks that don't represent a specific file (shell commands, build output, conceptual examples) may omit `title=`.
+
+Aim for **3–5 code blocks per post** as a rough guideline. If you have more than 7, consider whether some can be replaced with prose descriptions or collapsed into a single annotated block.
+
+### Tags
+
+Use lowercase, hyphenated names. Prefer well-known technology names (`nextjs`, `velite`, `typescript`, `tailwindcss`) but established abbreviations and domain terms are also acceptable (`seo`, `pwa`, `a11y`, `i18n`). Avoid overly generic words like "frontend" or "tutorial".
+
+---
+
 ## Development Guidelines
 
 ### Core Principles
