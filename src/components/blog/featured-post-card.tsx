@@ -4,7 +4,7 @@ import { CategoryBadge } from "./category-badge";
 import { TagBadge } from "./tag-badge";
 import type { Locale } from "@/lib/i18n";
 
-interface PostCardProps {
+interface FeaturedPostCardProps {
   title: string;
   description?: string;
   date: string;
@@ -16,20 +16,28 @@ interface PostCardProps {
 
 const MAX_TAGS = 3;
 
-export function PostCard({ title, description, date, permalink, categories, tags, locale }: PostCardProps) {
+export function FeaturedPostCard({
+  title,
+  description,
+  date,
+  permalink,
+  categories,
+  tags,
+  locale,
+}: FeaturedPostCardProps) {
   return (
-    <article className="group border-b border-border py-6 first:pt-0 last:border-b-0">
+    <article className="group rounded-lg border border-border bg-muted/30 p-4 hover:bg-muted/50 transition-colors">
       <Link href={permalink} className="block">
-        <h2 className="text-lg font-semibold tracking-tight group-hover:underline">
+        <h3 className="font-semibold tracking-tight group-hover:underline">
           {title}
-        </h2>
+        </h3>
         {description && (
           <p className="mt-1 text-sm text-muted-foreground line-clamp-2">
             {description}
           </p>
         )}
       </Link>
-      <div className="mt-2 flex flex-wrap items-center gap-2 md:gap-3">
+      <div className="mt-2 flex flex-wrap items-center gap-2">
         <time dateTime={date} className="text-xs text-muted-foreground">
           {formatDate(date, locale)}
         </time>
@@ -46,7 +54,9 @@ export function PostCard({ title, description, date, permalink, categories, tags
               <TagBadge key={tag} slug={tag} locale={locale} />
             ))}
             {tags.length > MAX_TAGS && (
-              <span className="text-xs text-muted-foreground">+{tags.length - MAX_TAGS}</span>
+              <span className="text-xs text-muted-foreground">
+                +{tags.length - MAX_TAGS}
+              </span>
             )}
           </div>
         )}

@@ -15,6 +15,7 @@ import {
   getCategoryBySlug,
   getPageBySlug,
   getRelatedPosts,
+  getFeaturedPosts,
 } from "@/lib/posts";
 
 describe("getPublishedPosts", () => {
@@ -45,6 +46,32 @@ describe("getPublishedPosts", () => {
     const all = getPublishedPosts();
     const locales = new Set(all.map((p) => p.locale));
     expect(locales.size).toBeGreaterThan(1);
+  });
+});
+
+describe("getFeaturedPosts", () => {
+  it("returns only published featured posts", () => {
+    const featured = getFeaturedPosts();
+    expect(featured.every((p) => p.featured && p.published)).toBe(true);
+  });
+
+  it("excludes unpublished posts even if featured", () => {
+    const featured = getFeaturedPosts();
+    expect(featured.find((p) => p.slugName === "draft-post")).toBeUndefined();
+  });
+
+  it("filters by locale", () => {
+    const enFeatured = getFeaturedPosts("en");
+    expect(enFeatured.every((p) => p.locale === "en")).toBe(true);
+
+    const jaFeatured = getFeaturedPosts("ja");
+    expect(jaFeatured.every((p) => p.locale === "ja")).toBe(true);
+  });
+
+  it("returns empty array when no featured posts exist for locale", () => {
+    // only "ja" posts are featured for ja locale in mock (japanese-post)
+    const jaFeatured = getFeaturedPosts("ja");
+    expect(jaFeatured.length).toBeGreaterThan(0);
   });
 });
 

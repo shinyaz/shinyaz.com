@@ -132,6 +132,7 @@ title: "Post Title"
 description: "A short description."
 date: 2026-01-01
 published: true
+featured: true               # optional: show in "Featured" section on home page
 updated: 2026-01-15          # optional: last updated date
 cover: "/images/cover.png"   # optional: cover image
 categories:
