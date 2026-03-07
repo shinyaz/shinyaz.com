@@ -1,6 +1,6 @@
 ---
 title: "Next.js 'use cache' directive enables component-level caching"
-description: "The new 'use cache' directive in Next.js lets you cache the output of any async function or component, replacing the old fetch-level cache options."
+description: "The 'use cache' directive lets you cache the output of any async function — not just fetch — replacing the old fetch-level cache options with a more flexible approach."
 date: 2026-03-07
 published: true
 tags:
@@ -8,7 +8,7 @@ tags:
   - caching
 ---
 
-In Next.js 15+, you can add `"use cache"` at the top of any async function or Server Component to cache its output:
+I was looking into caching strategies for Server Component data fetching in Next.js when I found the [`"use cache"` directive](https://nextjs.org/docs/app/api-reference/directives/use-cache) alongside the familiar `fetch(..., { next: { revalidate: 60 } })` pattern. The surprise: it works on **any async function or Server Component**, not just `fetch` calls:
 
 ```tsx
 async function getData() {
@@ -18,7 +18,7 @@ async function getData() {
 }
 ```
 
-This replaces the old `fetch(..., { next: { revalidate: 60 } })` pattern and works for any async logic — not just `fetch`. You can also control the cache lifetime with `cacheLife`:
+With the old pattern, you had to set cache options on each `fetch` call individually. `"use cache"` works at the function level — so database queries, external API wrappers, or any async logic can be cached the same way. Cache duration is controlled with `cacheLife`:
 
 ```tsx
 import { cacheLife } from "next/cache";
@@ -30,4 +30,4 @@ async function getData() {
 }
 ```
 
-Predefined profiles: `"seconds"`, `"minutes"`, `"hours"`, `"days"`, `"weeks"`, `"max"`.
+Predefined profiles: `"seconds"`, `"minutes"`, `"hours"`, `"days"`, `"weeks"`, `"max"`. You can also define [custom profiles](https://nextjs.org/docs/app/api-reference/next-config-js/cacheLife) in `next.config.ts`.

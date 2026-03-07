@@ -1,6 +1,6 @@
 ---
 title: "Next.js の 'use cache' ディレクティブでコンポーネントレベルのキャッシュが可能"
-description: "'use cache' ディレクティブを使うと、任意の非同期関数やコンポーネントの出力をキャッシュできます。fetch レベルのキャッシュオプションに代わる新しい仕組みです。"
+description: "'use cache' ディレクティブを使うと、fetch に限らず任意の非同期関数の出力をキャッシュできる。従来の fetch レベルのキャッシュオプションに代わる新しい仕組み。"
 date: 2026-03-07
 published: true
 tags:
@@ -8,7 +8,7 @@ tags:
   - caching
 ---
 
-Next.js 15 以降では、任意の非同期関数や Server Component の先頭に `"use cache"` を追加することで、その出力をキャッシュできます:
+Server Component のデータ取得にキャッシュを効かせたくて Next.js のドキュメントを読んでいたら、従来の `fetch(..., { next: { revalidate: 60 } })` とは別に [`"use cache"` ディレクティブ](https://nextjs.org/docs/app/api-reference/directives/use-cache)が追加されていた。驚いたのは、`fetch` に限らず**任意の非同期関数や Server Component にそのまま使える**こと：
 
 ```tsx
 async function getData() {
@@ -18,7 +18,7 @@ async function getData() {
 }
 ```
 
-これは従来の `fetch(..., { next: { revalidate: 60 } })` パターンを置き換えるもので、`fetch` に限らずあらゆる非同期ロジックに使えます。`cacheLife` でキャッシュ期間を制御することも可能です:
+従来のパターンだと `fetch` の呼び出しごとにキャッシュ設定を書く必要があったが、`"use cache"` なら関数単位でキャッシュが効く。データベースクエリや外部 API のラッパー関数にもそのまま使えるのが嬉しい。キャッシュ期間は `cacheLife` で制御する：
 
 ```tsx
 import { cacheLife } from "next/cache";
@@ -30,4 +30,4 @@ async function getData() {
 }
 ```
 
-定義済みプロファイル: `"seconds"`, `"minutes"`, `"hours"`, `"days"`, `"weeks"`, `"max"`。
+定義済みプロファイル: `"seconds"`, `"minutes"`, `"hours"`, `"days"`, `"weeks"`, `"max"`。`next.config.ts` の [`cacheLife`](https://nextjs.org/docs/app/api-reference/next-config-js/cacheLife) でカスタムプロファイルも定義できる。

@@ -273,6 +273,113 @@ Aim for **3–5 code blocks per post** as a rough guideline. If you have more th
 
 Use lowercase, hyphenated names. Prefer well-known technology names (`nextjs`, `velite`, `typescript`, `tailwindcss`) but established abbreviations and domain terms are also acceptable (`seo`, `pwa`, `a11y`, `i18n`). Avoid overly generic words like "frontend" or "tutorial".
 
+## TIL (Today I Learned) Style Guide
+
+TIL entries live in `content/tils/{en,ja}/`. TILs capture the **"oh, I didn't know that!" moment** — a single discovery, gotcha, or technique found during development, shared in a quick and accessible format. The ideal TIL makes a reader think "I want to know that" from the title and "got it" after 30 seconds of reading.
+
+### Low Barrier to Write, High Value to Read
+
+The biggest enemy of TILs is perfectionism that prevents publishing. Unlike blog posts, TILs don't need careful outlining or thorough analysis. **The freshness of the discovery is the greatest value** — write it up quickly and publish it.
+
+- **Short is fine** — A single code block plus a few lines of explanation can be a complete TIL.
+- **Rough is fine** — No need for the full context, alternative analysis, or trade-off discussion that blog posts require.
+- **Volume matters** — Ten small discoveries add more value to the site than one elaborate post.
+
+**Boundary with blog posts:** If you need multiple section headings (`##`) or the entry is growing past 500 words, it should be a blog post. TILs stay focused on a single discovery.
+
+### Frontmatter
+
+```yaml
+---
+title: "..."          # State the discovery directly (see below)
+description: "..."    # 80–150 chars; what the reader will learn in one sentence
+date: YYYY-MM-DD
+published: true
+tags:                 # lowercase, hyphenated; same conventions as blog posts
+  - css
+  - mdx
+---
+```
+
+TIL frontmatter has **no `categories` or `featured` fields** — keep it minimal.
+
+**description** appears in search results and list views, so it must be self-contained and convey the core discovery in a single sentence.
+
+- Good: `"The 'use cache' directive lets you cache the output of any async function, not just fetch — replacing the old fetch-level cache options."`
+- Good: `"MDX ブログで日本語2文字の列が縦に折り返される問題。Markdown のセパレーター幅では解決できず、CSS で white-space: nowrap を適用して解決した。"`
+- Avoid: `"What I learned about caching in Next.js."` / `"Next.js のキャッシュについて学んだこと。"`
+
+### Title Format
+
+The title itself should be a summary of the discovery. Readers decide whether to read based on the title alone.
+
+**Pattern:** `[Technology/Context] + [what you learned or what works]`
+
+**Japanese:** State the discovery directly. Natural patterns: `〜できる`, `〜で解決する`, `〜は〜だった`.
+- Good: `Next.js の 'use cache' ディレクティブでコンポーネントレベルのキャッシュが可能`
+- Good: `Markdown テーブルの列幅制御は CSS の white-space: nowrap で解決する`
+- Avoid: `Next.js のキャッシュについて` / `テーブルの問題`
+
+**English:** State the fact or technique. The title should be informative on its own.
+- Good: `Next.js 'use cache' directive enables component-level caching`
+- Good: `Fix Markdown table column wrapping with CSS white-space: nowrap`
+- Avoid: `Caching in Next.js` / `Table column issue`
+
+### Structure
+
+No rigid template required. Just follow this natural flow:
+
+1. **Context (1–2 sentences)** — What were you doing when you hit this? Set the scene briefly so the reader thinks "ah, I do that too."
+2. **The discovery (the core)** — What you learned. A code example adds credibility. This is the body of the TIL.
+3. **Brief takeaway (optional)** — Why this matters, or what it replaces. Omit if the entry already stands on its own.
+
+Section headings (`##`) are unnecessary in most TILs. Use them only when the entry has two clearly distinct parts (e.g., "what I tried first" vs. "what actually worked").
+
+Don't end with "In summary..." or "まとめ" — TILs are short enough that the reader already has the full picture. End with the last useful piece of information.
+
+### Voice and Tone — Enjoy Sharing Discoveries
+
+TILs are neither documentation nor textbooks. They are **a developer sharing "did you know this?" with fellow developers**.
+
+- **Convey the surprise** — "This works for any async function, not just fetch?" or "Markdown-side fixes had zero effect." When the reader re-experiences that same "huh, neat" moment, the entry becomes memorable.
+- **Briefly mention what didn't work** — If the obvious first approach failed, say so in a sentence or two. This saves readers from the same dead end (the `prose-table-nowrap` entry is a good example of this pattern).
+- **Let the code speak** — A short code example often communicates more than a paragraph of explanation. Don't over-explain what the code already shows.
+- **Link to sources** — If the discovery came from official docs, an RFC, a GitHub issue, or a blog post, link to it. This gives readers a path to dig deeper.
+
+### Write TILs That Are Searchable
+
+TILs serve as a reference for your future self and for developers who hit the same problem. **Write with searchability in mind:**
+
+- Include error messages verbatim when relevant — this is often exactly what someone will paste into a search engine.
+- Use precise technical terms: function names, directive names, CSS property names, CLI flags.
+- Describe symptoms concretely (e.g., "two-character Japanese columns wrapping vertically" rather than "table layout issue").
+
+### Good TIL Topics
+
+- Non-obvious API behaviors or parameters
+- Useful configuration options buried in documentation
+- Error messages: what they actually mean and how to fix them
+- CSS rendering workarounds for specific issues
+- A simpler way to do something you've been doing the long way
+- Behavior changes across library or framework versions
+
+**Not a good fit for TIL** — write a blog post instead:
+- Step-by-step tutorials
+- Comparisons or evaluations of multiple options
+- Multiple unrelated discoveries (split into separate TILs)
+- Things that are already prominently documented (just link to the docs)
+
+### Code Blocks
+
+- **1–2 blocks** is the sweet spot. If you need 3 or more, consider whether this should be a blog post.
+- Use `title=` for file-specific code, same conventions as blog posts.
+- Show only the minimum code needed to make the point.
+- A "what didn't work → what worked" two-block pattern is natural and effective.
+
+### Tags
+
+Same conventions as blog posts: lowercase, hyphenated, well-known technology names. TILs typically have 1–3 tags.
+
 ---
 
 ## Development Guidelines
