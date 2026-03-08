@@ -120,7 +120,10 @@ skill-name/
 
 - [ ] `name` matches directory name
 - [ ] `name` is lowercase, alphanumeric + hyphens, no leading/trailing/consecutive hyphens
-- [ ] `description` includes what + when + keywords
+- [ ] `description` includes what + when + keywords for agent auto-selection
+- [ ] SKILL.md focused — detailed docs in `references/`, scripts in `scripts/`
 - [ ] SKILL.md under 500 lines
+- [ ] Deterministic tasks (validation, file generation) use `scripts/` not inline instructions
+- [ ] Scope is correct — global (`~/.kiro/skills/`) for personal, workspace for team
 - [ ] Exists in both `.claude/skills/` and `.kiro/skills/` (if shared)
 - [ ] CLAUDE.md skills list updated

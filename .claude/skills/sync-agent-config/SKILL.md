@@ -16,7 +16,6 @@ Synchronize agent configuration between Claude Code and Kiro IDE.
 
 - `.claude/skills/analyze-claude-md/` — Claude Code specific
 - `.claude/skills/optimize-claude-md/` — Claude Code specific
-- `.claude/skills/create-skill/` — Claude Code specific
 
 ## Sync Workflow
 
@@ -37,11 +36,15 @@ Synchronize agent configuration between Claude Code and Kiro IDE.
 3. **Compare skills**
    ```bash
    # List skills in each directory (excluding Claude Code specific ones)
-   diff <(ls .claude/skills/ | grep -v -E '^(analyze-claude-md|optimize-claude-md|create-skill|README.md)$' | sort) <(ls .kiro/skills/ | sort)
+   diff <(ls .claude/skills/ | grep -v -E '^(analyze-claude-md|optimize-claude-md|README.md)$' | sort) <(ls .kiro/skills/ | sort)
    ```
    - For each shared skill, compare SKILL.md content:
    ```bash
    diff .claude/skills/{skill-name}/SKILL.md .kiro/skills/{skill-name}/SKILL.md
+   ```
+   - Also compare `references/`, `scripts/`, `assets/` directories if they exist:
+   ```bash
+   diff -r .claude/skills/{skill-name}/references/ .kiro/skills/{skill-name}/references/
    ```
 
 4. **Generate sync report**
