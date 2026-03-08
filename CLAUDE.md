@@ -7,7 +7,6 @@
 ```bash
 npm run dev          # Dev server (http://localhost:3000)
 npm run build        # Production build (next build --turbopack)
-npm start            # Start production server
 npm run lint         # ESLint + Prettier check
 npm test             # Unit/component tests (Vitest)
 npm run test:e2e     # E2E tests (Playwright, requires build)
@@ -15,7 +14,6 @@ npm run test:e2e     # E2E tests (Playwright, requires build)
 
 ## Skills
 
-Use `/skill-name` for common tasks:
 - `/new-post` — Create blog post
 - `/fix-lint` — Fix linting errors
 - `/sync-i18n` — Check bilingual content
@@ -33,9 +31,9 @@ src/app/[locale]/                   → Pages (all under locale prefix)
 .velite/                            → Generated (do not edit)
 ```
 
-**Path aliases:**
-- `@/*` → `./src/*`
-- `#site/content` → `./.velite`
+**Path aliases:** `@/*` → `./src/*`, `#site/content` → `./.velite`
+
+**Project-specific:** No external i18n lib (custom TS dictionaries). Tailwind v4 theme tokens: `rgb(var(--foreground))`
 
 ## Critical Rules
 
@@ -52,10 +50,3 @@ src/app/[locale]/                   → Pages (all under locale prefix)
 - Feature branches for code: `feat/`, `fix/`
 - Direct to main for `content/` only
 - Commit prefixes: `feat:`, `fix:`, `docs:`, `test:`, `refactor:`, `chore:`
-
-## Project-Specific
-
-- **No external i18n lib** — Custom TypeScript dictionaries
-- **Velite over CMS** — Version-controlled content
-- **Tailwind v4** — Use theme tokens: `rgb(var(--foreground))`
-- **Google Fonts errors** — `rm -rf .next` and retry (max 3x)
