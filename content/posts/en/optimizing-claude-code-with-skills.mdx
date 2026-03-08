@@ -1,6 +1,6 @@
 ---
 title: "How I Reduced My CLAUDE.md by 83% Using Claude Code's Skills System"
-description: "A practical guide to optimizing Claude Code's context efficiency by reducing CLAUDE.md from 355 to 59 lines and implementing reusable skills"
+description: "I cut a 355-line CLAUDE.md down to 59 lines by extracting detailed procedures into Claude Code's skills system. The key insight: separate always-loaded rules from on-demand procedures to dramatically improve response accuracy."
 date: "2026-03-08"
 published: true
 featured: false
@@ -8,9 +8,9 @@ categories: [ai-tools]
 tags: ["claude-code", "ai-tools", "productivity", "automation", "best-practices"]
 ---
 
-After months of using Claude Code, my CLAUDE.md file had ballooned to 355 lines. Detailed project descriptions, content guidelines, testing procedures—I had crammed everything in there. The result? Claude started missing important instructions, buried under all that noise.
+## Challenge
 
-Following Claude Code's official best practices, I achieved an **83% reduction** in my CLAUDE.md file size and implemented a **skills system** that dramatically improved both context efficiency and workflow productivity.
+After months of using Claude Code, my CLAUDE.md file had ballooned to 355 lines. Detailed project descriptions, content guidelines, testing procedures — I had crammed everything in there. The result? Claude started missing important instructions, buried under all that noise.
 
 [My previous post](/en/blog/2026/03/07/claude-md-ai-coding-assistant-guide) covered *how to write* a CLAUDE.md, but this one tackles the opposite problem — *how to shrink it*. It might seem contradictory, but a carefully written CLAUDE.md that grows too large actually undermines its own purpose of improving AI accuracy. Here's the problem and its concrete solution.
 
@@ -255,16 +255,12 @@ Here are common issues you might encounter when adopting the skills system, all 
 ### Q: CLAUDE.md still feels long
 **A:** Ask "Would Claude work correctly without this?" for each line. Aim for under 50 lines.
 
-## Key Takeaways
+## Summary
 
-Claude Code's performance depends on context window management. By keeping CLAUDE.md minimal and separating detailed procedures into skills:
-
-- **Context is used efficiently**
-- **Workflows become reusable**
-- **Teams can standardize practices**
-- **Claude's response accuracy improves**
-
-If your CLAUDE.md exceeds 100 lines, consider migrating to the skills system immediately. The impact is dramatic.
+- **Separate always-loaded rules from on-demand procedures** — CLAUDE.md holds constraints; skills hold step-by-step workflows. This single distinction drives the biggest accuracy gains.
+- **Use `disable-model-invocation: true` to control side effects** — Any skill that creates files, runs builds, or modifies state should require explicit invocation.
+- **"Repeated 3+ times or 5+ steps" is the skill threshold** — Below that, inline instructions are fine. Above it, extract into a skill.
+- **Aim for under 50 lines in CLAUDE.md** — If you can't remove a line without Claude making mistakes, keep it. Everything else belongs in a skill.
 
 ## Next Steps
 

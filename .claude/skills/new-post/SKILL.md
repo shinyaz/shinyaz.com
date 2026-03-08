@@ -21,7 +21,7 @@ Create a new blog post: $ARGUMENTS
    ```yaml
    ---
    title: "Specific, outcome-oriented title"
-   description: "80-200 chars conveying unique value"
+   description: "120-200 chars: what it does + unique insight"
    date: "YYYY-MM-DD"
    published: true
    featured: false # Reserve for major milestones only
@@ -30,57 +30,114 @@ Create a new blog post: $ARGUMENTS
    ---
    ```
 
-4. **Structure the post**
-   - **Hook** (1-2 paragraphs): Start with problem or outcome
-   - **Body**: Logical sections with descriptive headings
-   - **Closing**: 3-4 bullets with transferable insights
+4. **Write the title (Principle 1)**
+   - Include the technology name
+   - Lead with the outcome, not the topic
+   - Remove filler words ("〜について", "How to", "Introduction to")
+   - Bad: "OG 画像について" / Good: "Next.js ブログに動的 OG 画像を自動生成する"
 
-5. **Target length**
-   - Japanese: 800-1500 words
-   - English: 600-1200 words
+5. **Write the description (Principle 2)**
+   - Two required elements: **what it does** + **unique insight**
+   - The unique insight is what differentiates this post from docs
+   - Bad: "Next.js で OG 画像を動的に生成する方法を学びましょう。"
+   - Good: "opengraph-image.tsx と Satori でビルド時に記事ごとの OG 画像を静的生成する。最大の落とし穴は Satori のインラインスタイル制約。"
 
-6. **Verify tag consistency**
-   - Check existing tags: `grep -h "^tags:" content/posts/**/*.mdx | sort -u`
-   - Use precise technology names (nextjs, typescript, tailwindcss)
-   - Avoid generic terms
+6. **Write the opening (Principle 3)**
+   - State why the reader should care within 3 sentences
+   - Choose one opening pattern:
+     - **`## 課題`** — When there's a clear problem to solve (most common)
+     - **`## はじめに`** — When motivation comes before a problem
 
-7. **Validate build**
+7. **Identify the anchor insight (Principle 7)**
+   - Every post needs ONE core insight the reader will remember
+   - Multiple topics are fine, but they must connect to this anchor
+   - If there's no common thread, split into separate posts
 
-   ```bash
-   npm run build
-   ```
+8. **Structure the body (Principle 4)**
+   - Choose structure based on article type (see Article Types below)
+   - Use descriptive `##` headings that enable skim-reading
 
-   - Ensure no errors
-   - Address any warnings
+9. **Curate content: show the interesting parts (Principle 5)**
 
-8. **Commit**
-   ```bash
-   git add content/posts/
-   git commit -m "docs: Add blog post about [topic]"
-   ```
+   **Include:**
+   - Gotchas and surprising behaviors — saves reader's debugging time
+   - "I chose X over Y because..." — design decision context
+   - Before/after comparisons
+   - Error messages and symptoms — for searchability
+
+   **Omit:**
+   - Full file dumps — show the interesting 20%, summarize the rest
+   - Complete test code — describe what was tested unless testing is the topic
+   - File change lists — belongs in a PR
+   - Boilerplate setup — link to official docs
+
+   **Code blocks:** Target 3-5. If over 7, consolidate or replace some with prose.
+
+10. **Write the closing (Principle 6)**
+    - NOT a summary of what you did — extract **transferable insights**
+    - Format: bold lead phrase + dash + explanation
+    - 3-4 items. If 5+, the post scope may be too broad.
+
+    ```markdown
+    ## まとめ
+
+    - **Bold insight** — Why it matters and how to apply it.
+    - **Bold insight** — Why it matters and how to apply it.
+    ```
+
+    - Bad: "X を追加した" (action listing)
+    - Good: "`default(false)` でスキーマ変更を安全に" (transferable principle)
+
+11. **Target length**
+    - Japanese: 800-1500 words
+    - English: 600-1200 words
+
+12. **Verify tag consistency**
+    - Check existing tags: `grep -h "^  - " content/posts/**/*.mdx | sort -u`
+    - Use precise technology names (nextjs, typescript, tailwindcss)
+    - Avoid generic terms
+
+13. **Validate build**
+
+    ```bash
+    npm run build
+    ```
+
+14. **Commit directly to main** (content-only change)
+    ```bash
+    git add content/posts/
+    git commit -m "docs: Add blog post about [topic]"
+    ```
 
 ## Article Types
 
+Choose structure based on type — most posts mix types, but pick a primary:
+
 - **Build log**: Document the process of building something
-- **Problem→Solution**: Solve a specific technical challenge
-- **Deep dive**: Detailed exploration of a technology or concept
-- **Comparison**: Compare technologies or approaches
-- **Migration**: Move from one system to another
+- **Problem→Solution**: Problem investigation through to resolution
+- **Deep dive**: Gradually deepen understanding of a mechanism
+- **Comparison**: Evaluate options and explain the decision
+- **Migration**: Motivation, steps, results
 - **Lessons learned**: Reflections and insights from a project
 
 ## Voice & Tone
 
 - Use first person ("I discovered")
-- Share opinions
-- Acknowledge limitations
-- Ensure reader understands value from title and first paragraph
+- Share opinions and acknowledge limitations
+- Conversational but precise — not academic, not sloppy
 
 ### Japanese Writing Style
 
 - **だ/である体を使用**（「〜だ」「〜した」「〜である」）
 - ですます体（「〜です」「〜ます」「〜しました」）は使わない
 - シリーズ記事では全記事で文体を統一する
-- 例: ✅「〜を実現した」 ❌「〜を実現しました」
+
+### Bilingual Principle (Principle 8)
+
+- Two versions are **parallel but not literal translations**
+- Technical content, code examples, and structure must match
+- Prose expressions adapt to what reads naturally in each language
+- Goal: same information found when switching languages, not word-for-word match
 
 ### Series Articles
 

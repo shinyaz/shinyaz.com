@@ -15,6 +15,7 @@ npm run test:e2e     # E2E tests (Playwright, requires build)
 ## Skills
 
 - `/new-post` — Create blog post
+- `/new-til` — Create TIL entry
 - `/fix-lint` — Fix linting errors
 - `/sync-i18n` — Check bilingual content
 - `/debug-build` — Troubleshoot builds

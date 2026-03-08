@@ -1,6 +1,6 @@
 ---
 title: "Maximizing AI Coding Assistants with CLAUDE.md"
-description: "How to design and implement a CLAUDE.md file that provides project-specific context to Claude Code (claude.ai/code). A practical guide to more efficient AI collaboration."
+description: "Give Claude Code project context through CLAUDE.md to generate convention-compliant code. Covers the five-section design philosophy and the surprising discovery that a detailed 355-line version backfired."
 date: "2026-03-07"
 published: true
 featured: false
@@ -151,10 +151,10 @@ There's also **variance in AI model comprehension**. Guidelines optimized for Cl
 
 ## Summary
 
-- **CLAUDE.md is an interface for optimizing AI collaboration** — Unlike README, it's a dedicated file providing technical details and coding conventions that AI needs.
-- **Structured in five sections** — Organized into Quick Reference, Architecture, Testing, Content Writing, and Development Guidelines for quick AI access to needed information.
-- **Concrete examples and visual representations are effective** — AI better understands concrete code examples, commands, tables, and flow diagrams than abstract descriptions.
-- **Maintenance is required but highly effective** — Despite the update overhead, AI collaboration efficiency improves dramatically, enabling convention-compliant code generation.
+- **Design an AI-specific interface, not another README** — A README targets human readers. CLAUDE.md targets AI, providing the technical details and coding conventions that enable convention-compliant code generation.
+- **Concrete examples beat abstract descriptions** — Specific paths, exact commands, and real code snippets give AI far more actionable guidance than vague prose like "follow project conventions."
+- **A bloated CLAUDE.md backfires** — Because the file is loaded into the context window every session, cramming in too much detail causes the AI to miss the instructions that actually matter.
+- **State the "why" behind each rule** — When AI understands the reasoning, it can generalize to novel situations rather than blindly pattern-matching against examples.
 
 If you're using AI coding assistants, definitely consider implementing CLAUDE.md. Start simple with a command list and architecture description, then gradually expand it. Your AI collaboration will surely become more comfortable.
 

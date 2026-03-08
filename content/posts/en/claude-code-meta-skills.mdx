@@ -8,11 +8,11 @@ categories: [ai-tools]
 tags: ["claude-code", "ai-tools", "automation", "meta-programming", "devops"]
 ---
 
+## Challenge
+
 In my previous post, I shared how I [reduced my CLAUDE.md from 355 to 59 lines](/en/blog/2026/03/08/optimizing-claude-code-with-skills). But one challenge remained: How do we make this optimization process **reproducible** and **continuously improving**?
 
-The answer was "**meta-skills**"—skills that manage other skills, enabling Claude Code to self-improve.
-
-In the previous post, I solved the "CLAUDE.md bloat" problem manually, but as the project grows, the same problem will recur. Reviewing CLAUDE.md and manually extracting skills every time a new feature is added — that's not sustainable. So I decided to automate the optimization process itself.
+In the previous post, I solved the "CLAUDE.md bloat" problem manually, but as the project grows, the same problem will recur. Reviewing CLAUDE.md and manually extracting skills every time a new feature is added — that's not sustainable. So I decided to automate the optimization process itself. The answer was "**meta-skills**" — skills that manage other skills, enabling Claude Code to self-improve.
 
 ## What Are Meta-Skills?
 
@@ -265,17 +265,11 @@ git commit -m "feat: Add meta-skills for Claude Code management"
 mkdir .claude/skills/my-optimizer.local/
 ```
 
-## Conclusion: The Importance of Meta-Level Thinking
+## Summary
 
-The core insight of this post isn't about "solving a problem" — it's about "automating the process of solving problems." Manually fixing CLAUDE.md bloat is a one-time improvement, but automating the process with meta-skills makes the improvement sustainable.
-
-Meta-skills implementation brings Claude Code management to a new level:
-
-- **Manual optimization** → **Automated processes**
-- **Individual knowledge** → **Shareable skills**
-- **One-time improvements** → **Continuous improvement cycles**
-
-Just as programmers write code that writes code, giving Claude Code skills to manage skills creates a true self-improving system.
+- **Automate the problem-solving process, not just the problem** — Manually fixing CLAUDE.md bloat is a one-time improvement, but automating the process with meta-skills makes the improvement sustainable as the project grows.
+- **Separate analysis from execution and control side effects** — `/analyze-claude-md` is read-only and safe to auto-run, while `/optimize-claude-md` uses `disable-model-invocation: true` to require human confirmation before execution. This separation is the key to safety.
+- **Defining skill types keeps scope well-defined** — The four-type classification (Workflow / Diagnostic / Knowledge / Validation) clarifies what each skill should do, maintaining single responsibility and preventing bloat.
 
 Next, I plan to write about leveraging these meta-skills team-wide to achieve organization-level productivity gains.
 
