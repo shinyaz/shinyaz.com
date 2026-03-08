@@ -18,7 +18,7 @@ In the previous post, I solved the "CLAUDE.md bloat" problem manually, but as th
 
 Meta-skills are skills designed to manage and optimize other skills and CLAUDE.md itself. Like metaprogramming in software development, they **operate at a higher level of abstraction**.
 
-While regular skills (`/new-post`, `/fix-lint`, etc.) "execute specific tasks," meta-skills "create and optimize skills themselves." If metaprogramming is code that writes code, then meta-skills are skills that manage skills.
+While regular skills (`/post-guide`, `/fix-lint`, etc.) "execute specific tasks," meta-skills "create and optimize skills themselves." If metaprogramming is code that writes code, then meta-skills are skills that manage skills.
 
 ```mermaid
 graph TD
@@ -79,7 +79,7 @@ Execution produces a report like:
    - Reason: Detailed multi-step procedure
 
 2. **Content Creation** (52 lines)
-   - Suggested skill: `/new-post`
+   - Suggested skill: `/post-guide`
    - Reason: Repeatable workflow
 ```
 
@@ -125,7 +125,7 @@ disable-model-invocation: true
 
 ### 1. Workflow Skill (step-by-step procedures)
 
-Examples: /new-post, /fix-lint, /deploy
+Examples: /post-guide, /fix-lint, /deploy
 
 ### 2. Diagnostic Skill (troubleshooting)
 

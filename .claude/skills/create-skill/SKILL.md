@@ -8,7 +8,7 @@ Create a new skill: $ARGUMENTS
 ## Skill Creation Workflow
 
 1. **Determine skill details**
-   - Name: kebab-case (e.g., `fix-lint`, `new-post`)
+   - Name: kebab-case (e.g., `fix-lint`, `post-guide`)
    - Purpose: Clear, single responsibility
    - Side effects: Does it modify files or run commands?
 
@@ -93,7 +93,7 @@ Create a new skill: $ARGUMENTS
 
 ### 1. **Workflow Skill** (step-by-step procedures)
 
-Examples: `/new-post`, `/fix-lint`, `/deploy`
+Examples: `/post-guide`, `/fix-lint`, `/deploy`
 
 - Clear numbered steps
 - Command examples

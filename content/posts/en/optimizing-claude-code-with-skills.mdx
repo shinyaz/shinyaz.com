@@ -61,7 +61,7 @@ Skills are Markdown files placed in the `.claude/skills/` directory that can be 
 
 ```
 .claude/skills/
-├── new-post/         # Standardized blog post workflow
+├── post-guide/       # Blog post writing guide & creation
 ├── fix-lint/         # Auto-fix linting errors
 ├── sync-i18n/        # Check bilingual content sync
 ├── debug-build/      # Troubleshoot build errors
@@ -70,36 +70,42 @@ Skills are Markdown files placed in the `.claude/skills/` directory that can be 
 └── README.md         # Skills documentation
 ```
 
-Each skill lives in its own directory with a `SKILL.md` file containing the procedure. The directory name becomes the command name — so a `new-post/` directory is invoked with `/new-post`.
+Each skill lives in its own directory with a `SKILL.md` file containing the procedure. The directory name becomes the command name — so a `post-guide/` directory is invoked with `/post-guide`.
 
-### Example Skill: `/new-post`
+### Example Skill: `/post-guide`
 
 ```markdown
 ---
-name: new-post
-description: Create a new blog post with standardized workflow
-disable-model-invocation: true
+name: post-guide
+description: Blog post writing guidelines and creation workflow. Loaded when creating, editing, or reviewing blog posts in content/posts/.
 ---
 
-Create a new blog post: $ARGUMENTS
+## Writing Principles
 
-## Workflow
+These principles apply to both new and existing blog posts.
+
+### Title (Principle 1)
+- Include the technology name
+- Lead with the outcome, not the topic
+[Writing principles continue...]
+
+## New Post Creation Workflow
+
+When explicitly invoked with `/post-guide`, follow these steps to create a new post: $ARGUMENTS
 
 1. **Determine post basics**
    - Date format: YYYY-MM-DD
    - Slug: kebab-case (lowercase with hyphens)
-   - Language: ja/en or both
-
-2. **Create MDX file(s)**
-   - Path: `content/posts/{locale}/{slug}.mdx`
-   - Create in both directories for bilingual posts
-
-[Detailed steps continue...]
+[Creation steps continue...]
 ```
 
-The `disable-model-invocation: true` setting prevents workflows with side effects from running automatically. Without this flag, Claude might decide from context that "this skill should be executed" and create files on its own. Always set this for skills that include hard-to-reverse operations like file changes or build execution.
+This example does not set `disable-model-invocation`. When Claude Code judges the task to be related to blog post editing, the Writing Principles section is automatically loaded as guidance. When explicitly invoked with `/post-guide nextjs-performance-tips`, the full file including the New Post Creation Workflow is executed.
 
-`$ARGUMENTS` is a placeholder that expands to whatever text the user types after the command. When you enter `/new-post nextjs-performance-tips`, `$ARGUMENTS` becomes `nextjs-performance-tips`, and Claude executes the procedure based on that input.
+The key structural choice is **placing the guidance section at the top of the file**. When the SKILL.md body loads at Stage 2 of progressive disclosure, the writing principles come first. The creation workflow sits at the bottom, so during auto-loading the skill functions as "knowledge," while during explicit invocation it functions as "procedure."
+
+For skills like `/fix-lint` that only contain side effects such as file changes or build execution, set `disable-model-invocation: true` so they only run when explicitly invoked.
+
+`$ARGUMENTS` is a placeholder that expands to whatever text the user types after the command. When you enter `/post-guide nextjs-performance-tips`, `$ARGUMENTS` becomes `nextjs-performance-tips`, and Claude executes the procedure based on that input.
 
 ## Result: 59-Line CLAUDE.md
 
@@ -119,7 +125,7 @@ npm test         # Unit tests
 
 ## Skills
 Use `/skill-name` for common tasks:
-- `/new-post` — Create blog post
+- `/post-guide` — Blog post writing guide
 - `/fix-lint` — Fix linting errors
 - `/sync-i18n` — Check bilingual content
 [...]
@@ -142,7 +148,7 @@ This optimization delivered the following improvements. Most importantly, it was
 - Longer sessions now possible
 
 ### 2. **Standardized Workflows**
-- `/new-post` creates blog posts instantly
+- `/post-guide` creates blog posts instantly
 - `/fix-lint` auto-fixes all linting issues
 - Team shares identical workflows
 
@@ -169,18 +175,18 @@ Theory alone makes it hard to decide, so here are concrete examples of what I mo
 | Before (in CLAUDE.md) | After (in skills) |
 |----------------------|-------------------|
 | Detailed test procedures (50 lines) | `/run-tests` skill |
-| Content creation guide (80 lines) | `/new-post` skill |
+| Content creation guide (80 lines) | `/post-guide` skill |
 | Debug procedures (40 lines) | `/debug-build` skill |
 | MDX component guide (30 lines) | `/add-mdx-component` skill |
 
 ## Real-World Usage
 
-Invoking skills is straightforward. Simply type `/skill-name` during a Claude Code conversation, and the corresponding SKILL.md is loaded, with Claude following its procedures. You can also pass arguments — `/new-post nextjs-performance-tips` tells Claude exactly what to create.
+Invoking skills is straightforward. Simply type `/skill-name` during a Claude Code conversation, and the corresponding SKILL.md is loaded, with Claude following its procedures. You can also pass arguments — `/post-guide nextjs-performance-tips` tells Claude exactly what to create.
 
 ### Running Skills
 ```bash
 # Create new blog post
-/new-post nextjs-performance-tips
+/post-guide nextjs-performance-tips
 
 # Auto-fix linting errors
 /fix-lint
@@ -255,11 +261,90 @@ Here are common issues you might encounter when adopting the skills system, all 
 ### Q: CLAUDE.md still feels long
 **A:** Ask "Would Claude work correctly without this?" for each line. Aim for under 50 lines.
 
+## Addendum: Skills vs. Slash Commands
+
+This article uses the term "skills" for everything placed in `.claude/skills/`, but Claude Code actually has two distinct mechanisms: **slash commands** (`.claude/commands/`) and **skills** (`.claude/skills/`), with different design philosophies. *[Practical Claude Code](https://gihyo.jp/book/2026/978-4-297-14698-8)* (Gijutsu-Hyoron) clarifies the distinction as follows:
+
+| Property | Slash Commands | Skills |
+|----------|---------------|--------|
+| Location | `.claude/commands/*.md` | `.claude/skills/*/SKILL.md` |
+| Invocation | User explicitly runs `/command` | Claude Code **auto-loads** based on relevance |
+| Scope | Active only during command execution | Active throughout the session |
+| Purpose | **Define workflows** (what, in what order) | **Teach tool usage and reasoning** |
+| File structure | Single `.md` file | Directory structure (with supporting files) |
+
+Skills like `/fix-lint` that set `disable-model-invocation: true` and require explicit invocation are closer to "slash commands" in the book's classification. On the other hand, `/post-guide` does not set `disable-model-invocation`, so its writing principles auto-load when editing posts — this is the native skill pattern. The mechanism that powers this auto-loading is **progressive disclosure**.
+
+### How Progressive Disclosure Works
+
+CLAUDE.md is loaded in full into the context window every session. Even at 59 lines that's a few hundred tokens; at the pre-optimization 355 lines it was several thousand. Skills, on the other hand, load **only what's needed** in three stages.
+
+**Stage 1: Metadata only (~100 tokens per skill)**
+
+At session start, Claude Code reads only the `name` and `description` of every skill. It uses this information to judge which skills are relevant to the current task.
+
+```markdown
+# Only this part is read initially
+---
+name: typescript-conventions
+description: TypeScript coding conventions. Defines type definitions, naming rules, and error handling patterns
+---
+```
+
+This means the quality of your `description` determines whether the skill gets loaded. For a task like "writing TypeScript code," the description above clearly signals relevance. A vague description like "coding conventions" might not trigger loading when it should.
+
+**Stage 2: SKILL.md body loaded (under 5,000 tokens)**
+
+Only skills judged relevant have their `SKILL.md` body loaded. If you have 10 skills but are doing TypeScript work, only 1-2 TypeScript-related skills get fully loaded. The remaining 8 consume only their Stage 1 metadata (~800 tokens total).
+
+**Stage 3: Supporting files loaded (only when needed)**
+
+Skills can have a directory structure, so `SKILL.md` can reference supporting files — templates, code examples, detailed guides. These load only when `SKILL.md` instructions call for them.
+
+```
+.claude/skills/typescript-conventions/
+├── SKILL.md              # Loaded at Stage 2
+├── guides/
+│   ├── naming.md         # Naming convention details (on demand)
+│   └── error-handling.md # Error pattern catalog (on demand)
+└── examples/
+    └── patterns.ts       # Code examples (on demand)
+```
+
+### Context Consumption: CLAUDE.md vs. Skills
+
+Here's why progressive disclosure matters, illustrated with concrete token numbers.
+
+Suppose you have four rule sets: TypeScript conventions (500 tokens), React conventions (400 tokens), testing conventions (600 tokens), and security conventions (300 tokens).
+
+**All in CLAUDE.md:** 1,800 tokens consumed every session. Even when you're only writing TypeScript, the React, testing, and security rules occupy context the entire time.
+
+**Separated into skills:** Metadata alone costs 400 tokens (100 × 4). When writing TypeScript, only 500 additional tokens load. Total: 900 tokens — a **50% context savings**. As your task changes, the loaded skills automatically switch too.
+
+### Designing Guidance-Type Skills
+
+To take advantage of progressive disclosure, guidance-type skills need intentional design.
+
+**Write specific descriptions:** The `description` is Claude Code's only signal for relevance at Stage 1. Instead of a vague "coding conventions," write "TypeScript coding conventions. Defines type definitions, naming rules, and error handling patterns" — making it clear which tasks should trigger loading.
+
+**Keep SKILL.md under 5,000 tokens:** If the Stage 2 body is too large, progressive disclosure loses its advantage. Put details in supporting files and keep `SKILL.md` as a summary with references.
+
+**Narrow the scope:** Packing multiple concerns into one skill means it loads for unrelated tasks too. Separate "TypeScript conventions" and "React conventions" into distinct skills so only the relevant one loads.
+
+### Workflow vs. Guidance Types
+
+This project places everything under `.claude/skills/`, but being intentional about the usage pattern makes the design clearer:
+
+- **Workflow type** (`/fix-lint`, `/debug-build`, etc.): Set `disable-model-invocation: true` and invoke explicitly. Functions like a slash command.
+- **Guidance type** (coding conventions, architecture rules, etc.): Don't set `disable-model-invocation`, letting Claude Code auto-load based on task context. This is the native skill pattern.
+
+Whether `disable-model-invocation: true` is set effectively becomes the dividing line between these two roles.
+
 ## Summary
 
 - **Separate always-loaded rules from on-demand procedures** — CLAUDE.md holds constraints; skills hold step-by-step workflows. This single distinction drives the biggest accuracy gains.
 - **Use `disable-model-invocation: true` to control side effects** — Any skill that creates files, runs builds, or modifies state should require explicit invocation.
-- **"Repeated 3+ times or 5+ steps" is the skill threshold** — Below that, inline instructions are fine. Above it, extract into a skill.
+- **Design with workflow vs. guidance types in mind** — Explicitly invoked procedure manuals and auto-loaded knowledge bases require different design approaches. The `disable-model-invocation` flag is the dividing line.
 - **Aim for under 50 lines in CLAUDE.md** — If you can't remove a line without Claude making mistakes, keep it. Everything else belongs in a skill.
 
 ## Next Steps

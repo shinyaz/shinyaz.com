@@ -97,7 +97,7 @@ Optimize CLAUDE.md following Claude Code best practices.
 
 1. **Testing procedures** → `/run-tests`
 2. **Build troubleshooting** → `/debug-build`
-3. **Content guidelines** → `/new-post`, `/new-til`
+3. **Content guidelines** → `/post-guide`, `/til-guide`
 4. **Code style guides** → `/code-style`
 5. **Deployment steps** → `/deploy`
 6. **Git workflows** → `/git-workflow`

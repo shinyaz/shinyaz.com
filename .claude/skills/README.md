@@ -29,18 +29,17 @@ Analyzes current CLAUDE.md and suggests optimizations.
 
 ### Content Management
 
-#### `/new-post` - Create a new blog post
-Creates a new blog post with proper frontmatter, structure, and validation.
-- Sets up bilingual content (ja/en)
-- Validates tags and categories
-- Ensures proper build
+#### `/post-guide` - Blog post writing guide & creation
+Writing guidelines auto-loaded when editing posts, and creation workflow when explicitly invoked.
+- Writing principles (title, description, structure, voice)
+- Bilingual conventions (ja/en)
+- Validates tags, categories, and build
 
-#### `/new-til` - Create a new TIL entry
-Creates a TIL (Today I Learned) entry following the style guide conventions.
+#### `/til-guide` - TIL writing guide & creation
+Writing guidelines auto-loaded when editing TILs, and creation workflow when explicitly invoked.
 - 100-300 words, no `##` headings, 1-2 code blocks
 - Title conveys the discovery, not just the topic
 - Casual tone, search-optimized content
-- Bilingual support (ja/en)
 
 #### `/sync-i18n` - Synchronize bilingual content
 Checks and reports on translation status between Japanese and English content.
