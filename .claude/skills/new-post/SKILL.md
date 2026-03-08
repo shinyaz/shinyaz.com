@@ -25,7 +25,7 @@ Create a new blog post: $ARGUMENTS
    date: "YYYY-MM-DD"
    published: true
    featured: false  # Reserve for major milestones only
-   categories: [programming]  # Currently in use: programming
+   categories: [ai-tools]  # Available: ai-tools, programming, writing
    tags: ["nextjs", "typescript", "tailwindcss"]  # lowercase, hyphenated
    ---
    ```
@@ -72,3 +72,16 @@ Create a new blog post: $ARGUMENTS
 - Share opinions
 - Acknowledge limitations
 - Ensure reader understands value from title and first paragraph
+
+### Japanese Writing Style
+
+- **ですます体を使用**（「〜です」「〜ます」「〜しました」）
+- だ/である体（「〜だ」「〜した」「〜である」）は使わない
+- シリーズ記事では全記事で文体を統一する
+- 例: ✅「〜を実現しました」 ❌「〜を実現した」
+
+### Series Articles
+
+- シリーズの場合、末尾に全記事へのリンク一覧を追加する
+- 現在の記事には「（本記事）」/ `(this article)` を付記
+- 前後の記事への導入リンクを本文冒頭に含める

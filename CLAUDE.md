@@ -44,6 +44,7 @@ src/app/[locale]/                   → Pages (all under locale prefix)
 - **Tailwind only** — No custom CSS
 - **Build must pass** — No warnings allowed
 - **Bilingual parity** — ja/en features work equally
+- **Japanese style** — ですます体 for all blog posts (not だ/である体)
 - **Tags** — lowercase, hyphenated (`nextjs` not `Next.js`)
 
 ## Git Workflow
