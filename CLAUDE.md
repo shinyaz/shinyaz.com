@@ -22,6 +22,7 @@ npm run test:e2e     # E2E tests (Playwright, requires build)
 - `/run-tests` — Run appropriate tests
 - `/add-mdx-component` — Add MDX component
 - `/page-guide` — Static page writing guide & creation
+- `/deploy-checklist` — Pre-deployment full validation pass
 - `/sync-agent-config` — Sync config between Claude Code & Kiro
 
 ## Architecture
