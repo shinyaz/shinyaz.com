@@ -199,7 +199,7 @@ disable-model-invocation: true
 
 | メトリクス           | 現状     | 目標     | 期待改善率  | 確度 |
 | -------------------- | -------- | -------- | ----------- | ---- |
-| CLAUDE.md平均行数    | 250行    | 45行     | **82%削減** | 実証済み |
+| CLAUDE.md平均行数    | 250行    | 45行     | **82%削減** | 手法は実証済み |
 | 新機能開発速度       | 5日/機能 | 3日/機能 | **40%向上** | 仮説 |
 | コードレビュー時間   | 2時間/PR | 48分/PR  | **60%削減** | 仮説 |
 | バグ発生率           | 12件/週  | 5件/週   | **58%削減** | 仮説 |
@@ -227,27 +227,27 @@ pie title "期待される効果の分布"
 
 ### 背景
 
-今後予定しているReact 17から18への大規模アップグレード（200+コンポーネント）にメタスキルを活用する計画である。従来、このような作業では開発者ごとにアプローチが異なり、品質にばらつきが出ることが課題だった。
+今後予定しているNext.js 15から16への大規模アップグレード（200+コンポーネント）にメタスキルを活用する計画である。従来、このような作業では開発者ごとにアプローチが異なり、品質にばらつきが出ることが課題だった。
 
 ### アプローチ
 
-マイグレーション用のスキルを作成し、全開発者が同じ手順で作業する。各ステップが明文化されているため、Reactの内部変更に詳しくない開発者でも安全に移行作業を進められる：
+マイグレーション用のスキルを作成し、全開発者が同じ手順で作業する。各ステップが明文化されているため、フレームワークの内部変更に詳しくない開発者でも安全に移行作業を進められる：
 
 ```markdown
-# .claude/skills/react18-migration/SKILL.md
+# .claude/skills/nextjs16-migration/SKILL.md
 
 ---
 
-name: react18-migration
-description: Migrate components from React 17 to 18
+name: nextjs16-migration
+description: Migrate pages and components from Next.js 15 to 16
 disable-model-invocation: true
 
 ---
 
-1. Analyze component for React 18 compatibility
-2. Update Suspense boundaries
-3. Migrate to new APIs (startTransition, etc.)
-4. Update tests for concurrent features
+1. Analyze page/component for Next.js 16 compatibility
+2. Update async request APIs (cookies, headers, params)
+3. Migrate to new App Router conventions
+4. Update tests for changed behaviors
 5. Performance profiling
 6. Document breaking changes
 ```
@@ -272,7 +272,7 @@ disable-model-invocation: true
 gantt
     title スキル導入ロードマップ
     section Phase 1
-    Core Skills     :a1, 2026-01-01, 2w
+    Core Skills     :a1, 2026-04-01, 2w
     section Phase 2
     Team Skills     :a2, after a1, 3w
     section Phase 3

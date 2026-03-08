@@ -10,9 +10,13 @@ tags: ["claude-code", "team-productivity", "devops", "ai-tools", "organization"]
 
 ## Challenge
 
+Based on the individual-level improvements covered in [optimizing CLAUDE.md](/en/blog/2026/03/08/optimizing-claude-code-with-skills) and [implementing meta-skills](/en/blog/2026/03/09/claude-code-meta-skills), we're planning a rollout to a 20-person engineering team. But scaling individual improvements to an entire team introduces fundamentally different problems. We need a system where 20 people can all work at the same quality level.
+
+## Why Team Deployment Matters
+
 Optimizing Claude Code for an individual and optimizing it for an entire team are fundamentally different challenges. Individual optimization is as simple as "clean up your own CLAUDE.md." Team deployment requires building a system where 20 people can all work at the same quality level.
 
-Based on the individual-level improvements covered in [optimizing CLAUDE.md](/en/blog/2026/03/08/optimizing-claude-code-with-skills) and [implementing meta-skills](/en/blog/2026/03/09/claude-code-meta-skills), we're planning a rollout to a 20-person engineering team. In the previous post, I drew parallels between meta-skills and DevOps' Infrastructure as Code. At the team level, this philosophy becomes even more critical. Instead of each person manually managing their own CLAUDE.md, managing and sharing skills as code elevates the entire team's baseline productivity.
+In the [previous post](/en/blog/2026/03/09/claude-code-meta-skills), I drew parallels between meta-skills and DevOps' Infrastructure as Code. At the team level, this philosophy becomes even more critical. Instead of each person manually managing their own CLAUDE.md, managing and sharing skills as code elevates the entire team's baseline productivity.
 
 ## Challenges in Team Development
 
@@ -195,7 +199,7 @@ The figures below are **hypothetical targets based on individual experience, not
 
 | Metric                        | Current        | Target         | Expected Improvement | Confidence |
 | ----------------------------- | -------------- | -------------- | -------------------- | ---------- |
-| Average CLAUDE.md line count  | 250 lines      | 45 lines       | **82% reduction**    | Proven     |
+| Average CLAUDE.md line count  | 250 lines      | 45 lines       | **82% reduction**    | Approach proven |
 | New feature development speed | 5 days/feature | 3 days/feature | **40% faster**       | Hypothesis |
 | Code review time              | 2 hours/PR     | 48 min/PR      | **60% reduction**    | Hypothesis |
 | Bug rate                      | 12/week        | 5/week         | **58% reduction**    | Hypothesis |
@@ -223,27 +227,27 @@ Meta-skills truly shine in scenarios that involve "repeating the same task at sc
 
 ### Background
 
-We have an upcoming major upgrade from React 17 to 18 (200+ components) where we plan to leverage meta-skills. Historically, migrations like this suffered from inconsistent approaches across developers, leading to uneven quality.
+We have an upcoming major upgrade from Next.js 15 to 16 (200+ components) where we plan to leverage meta-skills. Historically, migrations like this suffered from inconsistent approaches across developers, leading to uneven quality.
 
 ### Approach
 
-We'll create a migration-specific skill so all developers follow the same procedure. Because each step is explicitly documented, even developers who aren't deeply familiar with React's internal changes can safely execute the migration:
+We'll create a migration-specific skill so all developers follow the same procedure. Because each step is explicitly documented, even developers who aren't deeply familiar with the framework's internal changes can safely execute the migration:
 
 ```markdown
-# .claude/skills/react18-migration/SKILL.md
+# .claude/skills/nextjs16-migration/SKILL.md
 
 ---
 
-name: react18-migration
-description: Migrate components from React 17 to 18
+name: nextjs16-migration
+description: Migrate pages and components from Next.js 15 to 16
 disable-model-invocation: true
 
 ---
 
-1. Analyze component for React 18 compatibility
-2. Update Suspense boundaries
-3. Migrate to new APIs (startTransition, etc.)
-4. Update tests for concurrent features
+1. Analyze page/component for Next.js 16 compatibility
+2. Update async request APIs (cookies, headers, params)
+3. Migrate to new App Router conventions
+4. Update tests for changed behaviors
 5. Performance profiling
 6. Document breaking changes
 ```
@@ -254,7 +258,7 @@ disable-model-invocation: true
 - **Quality**: Expecting significant bug reduction through skill standardization
 - **Efficiency**: 20 developers working in parallel, unified approach through skills
 
-In traditional migrations, each developer reads the documentation, interprets it their own way, and works accordingly. Skills reduce the "room for interpretation," ensuring consistent quality. This is particularly effective when team members have varying levels of experience.
+In traditional migrations, each developer reads the documentation, interprets it their own way, and works accordingly. Skills reduce the "room for interpretation," ensuring consistent quality. This is particularly effective when team members have varying levels of experience with the framework.
 
 ## Best Practices for Team Adoption
 
@@ -268,7 +272,7 @@ Introducing all skills at once creates confusion. The plan is to start with core
 gantt
     title Skill Adoption Roadmap
     section Phase 1
-    Core Skills     :a1, 2026-01-01, 2w
+    Core Skills     :a1, 2026-04-01, 2w
     section Phase 2
     Team Skills     :a2, after a1, 3w
     section Phase 3
