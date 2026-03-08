@@ -18,6 +18,8 @@ The root issue is that **AI lacks project-specific context**. README files are w
 
 ## CLAUDE.md Structure and Design Philosophy
 
+> **Note:** This post presents the detailed CLAUDE.md (355 lines) I initially created, but this level of detail later proved counterproductive. Because CLAUDE.md is loaded into the context window at the start of every session, a bloated file causes Claude to miss important instructions. [Part 2](/en/blog/2026/03/08/optimizing-claude-code-with-skills) covers how I solved this with a skills system, reducing it to just 59 lines. Keeping CLAUDE.md "short and limited to what's truly necessary" is a principle recommended by the [official best practices](https://code.claude.com/docs/best-practices).
+
 CLAUDE.md isn't just documentation — it's **an interface designed to optimize collaboration with AI**. I structured it into five sections, ensuring AI can quickly access the information it needs.
 
 ### 1. Quick Reference — Immediately Needed Information
