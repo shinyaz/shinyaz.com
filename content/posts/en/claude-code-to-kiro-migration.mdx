@@ -1,0 +1,172 @@
+---
+title: "Migrating Claude Code's CLAUDE.md and Skills to Kiro IDE"
+description: "Converted CLAUDE.md to Kiro steering and skills to Agent Skills. The key discovery: Kiro's skills follow the agentskills.io standard, so Claude Code skills can be copied directly with zero format changes."
+date: "2026-03-11"
+published: true
+featured: false
+categories: [ai-tools]
+tags: ["kiro", "claude-code", "ai-tools", "migration", "agent-skills"]
+---
+
+## The Problem
+
+My Claude Code setup with CLAUDE.md and a skill system was working well. I wanted the same workflow knowledge available in Kiro IDE, but Kiro has its own configuration system. A simple copy wouldn't work.
+
+I mapped out the correspondence between the two tools and found a way to share the same knowledge with minimal conversion.
+
+## CLAUDE.md → Steering Files
+
+Kiro's equivalent of CLAUDE.md is `.kiro/steering/*.md`. Steering files have three loading modes:
+
+- `inclusion: always` — Loaded automatically every time (same as CLAUDE.md)
+- `inclusion: fileMatch` — Loaded only when specific file patterns match
+- `inclusion: manual` — Referenced manually via `#` in chat
+
+Since CLAUDE.md contains project rules that should always be loaded, I placed it in `.kiro/steering/project.md` with `inclusion: always`.
+
+```yaml
+---
+inclusion: always
+---
+
+# Project Steering
+
+**Language rule:** Think in English internally. Always respond to the user in Japanese.
+
+## Commands
+...
+```
+
+The `## Skills` section in CLAUDE.md is Claude Code specific — Kiro auto-discovers skills from the directory, so it's excluded from steering.
+
+## Skills → Agent Skills
+
+I initially tried recreating skills as `inclusion: manual` steering files, but Kiro has a proper Agent Skills feature based on the [agentskills.io](https://agentskills.io) standard.
+
+Place files at `.kiro/skills/{skill-name}/SKILL.md` and Kiro loads only metadata (name and description) at startup, expanding the full content into context when a relevant task comes up. The same progressive disclosure mechanism as Claude Code skills.
+
+Since agentskills.io is a cross-tool standard, SKILL.md files from `.claude/skills/` can be copied directly to `.kiro/skills/` with no changes.
+
+```bash
+cp -r .claude/skills/post-guide .kiro/skills/
+cp -r .claude/skills/fix-lint .kiro/skills/
+# ... same for other skills
+```
+
+## Improving Descriptions
+
+The agentskills.io spec recommends that descriptions include not just what the skill does, but when to use it and relevant keywords.
+
+```yaml
+# Before
+description: Fix linting and formatting errors automatically
+
+# After
+description: >-
+  Fix ESLint and Prettier linting and formatting errors.
+  Use when lint checks fail, before committing code,
+  or when the user mentions lint errors, formatting issues,
+  or code style problems.
+```
+
+This helps agents auto-select the right skill for a given task. I applied the same improvement to the Claude Code side as well.
+
+## Creating a Sync Skill
+
+Managing config in both tools creates a risk of updating one side and forgetting the other. I created a `sync-agent-config` skill to detect:
+
+- Content drift between `CLAUDE.md` and `.kiro/steering/project.md`
+- Differences in skill files between `.claude/skills/` and `.kiro/skills/`
+- Skills that exist on only one side
+
+Claude Code specific skills (`analyze-claude-md`, `optimize-claude-md`) are excluded from sync.
+
+## Sorting Out Claude Code Specific Skills
+
+I revisited the three skills originally excluded as Claude Code specific.
+
+| Skill | Decision | Reason |
+|---|---|---|
+| `analyze-claude-md` | Absorbed | Drift detection in `sync-agent-config` covers this role |
+| `optimize-claude-md` | Not needed | A one-time task during initial migration |
+| `create-skill` | Generalized | Can be made tool-agnostic based on the agentskills.io standard |
+
+`create-skill` originally referenced `.claude/skills/` paths and Claude Code's `disable-model-invocation` field. I rewrote it to use agentskills.io's official fields (`license`, `compatibility`, `metadata`) and include instructions for placing skills in both agent directories.
+
+## Applying Best Practices
+
+Kiro's official documentation lists four best practices for skills. I checked the migrated skills against each one.
+
+1. **Write precise descriptions** — Already addressed with the description improvements above
+2. **Keep SKILL.md focused** — Move detailed documentation to `references/` files
+3. **Use scripts for deterministic tasks** — Validation and file generation work better as scripts
+4. **Choose the right scope** — Global for personal workflows, workspace for team procedures
+
+The second point had the biggest impact. `run-tests` (181 lines), `add-mdx-component` (157 lines), and `post-guide` (155 lines) mixed core workflow steps with template collections. After extracting templates and patterns into `references/`, they shrank to 55, 37, and 39 lines respectively.
+
+```code
+run-tests/
+├── SKILL.md              # Core workflow (55 lines)
+└── references/
+    └── TEMPLATES.md      # Test templates and best practices
+
+add-mdx-component/
+├── SKILL.md              # Core workflow (37 lines)
+└── references/
+    └── PATTERNS.md       # Component patterns and templates
+
+post-guide/
+├── SKILL.md              # Core principles (39 lines)
+└── references/
+    └── EXAMPLES.md       # Good/bad examples and frontmatter template
+```
+
+Files in `references/` are loaded by the agent only when needed, keeping the context window lean. I also incorporated these best practices into the `create-skill` validation checklist.
+
+## Final File Structure
+
+```code
+.claude/
+  skills/
+    post-guide/
+      SKILL.md                  # Shared between Claude Code + Kiro
+      references/EXAMPLES.md
+    run-tests/
+      SKILL.md
+      references/TEMPLATES.md
+    add-mdx-component/
+      SKILL.md
+      references/PATTERNS.md
+    fix-lint/SKILL.md
+    create-skill/SKILL.md
+    sync-agent-config/SKILL.md
+    analyze-claude-md/SKILL.md  # Claude Code only
+    optimize-claude-md/SKILL.md # Claude Code only
+    ...
+  CLAUDE.md
+
+.kiro/
+  steering/
+    project.md                  # inclusion: always
+  skills/
+    post-guide/
+      SKILL.md                   # Identical to .claude/skills/
+      references/EXAMPLES.md
+    run-tests/
+      SKILL.md
+      references/TEMPLATES.md
+    add-mdx-component/
+      SKILL.md
+      references/PATTERNS.md
+    fix-lint/SKILL.md
+    create-skill/SKILL.md
+    sync-agent-config/SKILL.md
+    ...
+```
+
+## Takeaways
+
+- **Steering and skills serve different roles** — Always-on rules go in steering, on-demand workflow knowledge goes in skills. Putting everything from CLAUDE.md into skills would be a mistake.
+- **The agentskills.io standard eliminates tool barriers** — The shared SKILL.md format means migration is just a copy. Almost no tool-specific conversion needed.
+- **Descriptions should say "when to use it"** — This directly affects how well agents auto-select skills. A description that's technically valid but too short is practically insufficient.
+- **Keep SKILL.md focused** — Extract templates and pattern collections into `references/`. The agent loads them only when needed, saving context window space.

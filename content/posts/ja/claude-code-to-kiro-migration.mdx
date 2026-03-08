@@ -1,0 +1,174 @@
+---
+title: "Claude CodeのCLAUDE.mdとスキルをKiro IDEに移行する"
+description: "CLAUDE.mdをKiroのステアリングに、スキルをAgent Skillsに変換した。最大の発見はKiroのスキルがagentskills.io標準に準拠しており、Claude Codeのスキルをそのままコピーできること。"
+date: "2026-03-11"
+published: true
+featured: false
+categories: [ai-tools]
+tags: ["kiro", "claude-code", "ai-tools", "migration", "agent-skills"]
+---
+
+## 課題
+
+Claude Code で構築した CLAUDE.md とスキルシステムがうまく機能している。同じナレッジを Kiro IDE でも活用したいが、Kiro には独自の設定体系がある。単純なコピーでは動かない。
+
+対応関係を整理し、最小限の変換で両方のツールから同じワークフロー知識を使えるようにした。
+
+## CLAUDE.md → ステアリングファイル
+
+Kiro で CLAUDE.md に相当するのは `.kiro/steering/*.md` だ。ステアリングファイルには3つの読み込みモードがある。
+
+- `inclusion: always` — 毎回自動で読み込まれる（CLAUDE.md と同じ）
+- `inclusion: fileMatch` — 特定のファイルパターンにマッチしたときだけ読み込まれる
+- `inclusion: manual` — チャットで `#` を使って手動参照
+
+CLAUDE.md の内容は毎回読み込まれるべきプロジェクトルールなので、`inclusion: always` で `.kiro/steering/project.md` に配置した。
+
+```yaml
+---
+inclusion: always
+---
+
+# Project Steering
+
+**Language rule:** Think in English internally. Always respond to the user in Japanese.
+
+## Commands
+...
+```
+
+ただし CLAUDE.md にある `## Skills` セクションは Claude Code 固有のもので、Kiro はスキルをディレクトリから自動検出するため、ステアリングには含めない。
+
+## スキル → Agent Skills
+
+最初はステアリングの `inclusion: manual` でスキルを再現しようとしたが、Kiro には [agentskills.io](https://agentskills.io) 標準に基づいた Agent Skills 機能がある。
+
+`.kiro/skills/{skill-name}/SKILL.md` に配置すると、起動時にはメタデータ（name と description）だけが読み込まれ、関連するタスクが来たときに全文がコンテキストに展開される。Claude Code のスキルと同じプログレッシブ・ディスクロージャーの仕組みだ。
+
+しかも agentskills.io はツール横断の標準なので、Claude Code の `.claude/skills/` にある SKILL.md をそのまま `.kiro/skills/` にコピーするだけで動く。
+
+```bash
+cp -r .claude/skills/post-guide .kiro/skills/
+cp -r .claude/skills/fix-lint .kiro/skills/
+# ... 他のスキルも同様
+```
+
+## description の改善
+
+agentskills.io の仕様では、description に「何をするか」だけでなく「いつ使うべきか」と「関連キーワード」を含めることが推奨されている。
+
+```yaml
+# Before
+description: Fix linting and formatting errors automatically
+
+# After
+description: >-
+  Fix ESLint and Prettier linting and formatting errors.
+  Use when lint checks fail, before committing code,
+  or when the user mentions lint errors, formatting issues,
+  or code style problems.
+```
+
+この改善により、エージェントがタスクに応じて適切なスキルを自動選択しやすくなる。Claude Code 側にも同じ改善を反映した。
+
+## 同期スキルの作成
+
+両方のツールで設定を管理すると、片方を更新してもう片方を忘れるリスクがある。そこで `sync-agent-config` スキルを作成した。
+
+このスキルは以下を検出する。
+
+- `CLAUDE.md` と `.kiro/steering/project.md` の内容のドリフト
+- `.claude/skills/` と `.kiro/skills/` のスキルファイルの差分
+- 片方にしか存在しないスキル
+
+Claude Code 固有のスキル（`analyze-claude-md`、`optimize-claude-md`）は同期対象外として扱う。
+
+## Claude Code 固有スキルの整理
+
+元々 Claude Code 固有として除外していた3つのスキルを見直した。
+
+| スキル | 判断 | 理由 |
+|---|---|---|
+| `analyze-claude-md` | 統合済み | `sync-agent-config` のドリフト検出がこの役割を果たす |
+| `optimize-claude-md` | 不要 | 初期移行時に一度やれば済む作業 |
+| `create-skill` | 汎用化 | agentskills.io 標準に基づけばツール共通にできる |
+
+`create-skill` は元々 `.claude/skills/` 固有のパスや Claude Code の `disable-model-invocation` フィールドを参照していた。agentskills.io の正式フィールド（`license`、`compatibility`、`metadata`）に置き換え、両方のディレクトリへの配置手順を含めた汎用版に書き直した。
+
+## ベストプラクティスの適用
+
+Kiro の公式ドキュメントにはスキルのベストプラクティスが4つ挙げられている。移行後のスキルをこれに照合した。
+
+1. **Write precise descriptions** — 前述の description 改善で対応済み
+2. **Keep SKILL.md focused** — 詳細なドキュメントは `references/` に分離すべき
+3. **Use scripts for deterministic tasks** — バリデーションやファイル生成はスクリプト化が望ましい
+4. **Choose the right scope** — グローバル（個人用）かワークスペース（チーム用）かを選ぶ
+
+特に2番目が効いた。`run-tests`（181行）、`add-mdx-component`（157行）、`post-guide`（155行）はワークフロー手順とテンプレート集が混在していた。テンプレートやパターン集を `references/` に分離した結果、それぞれ55行、37行、39行まで削減できた。
+
+```code
+run-tests/
+├── SKILL.md              # コアのワークフロー (55行)
+└── references/
+    └── TEMPLATES.md      # テストテンプレートとベストプラクティス
+
+add-mdx-component/
+├── SKILL.md              # コアのワークフロー (37行)
+└── references/
+    └── PATTERNS.md       # コンポーネントパターンとテンプレート
+
+post-guide/
+├── SKILL.md              # コアの原則 (39行)
+└── references/
+    └── EXAMPLES.md       # Good/Bad 例とフロントマターテンプレート
+```
+
+`references/` のファイルはエージェントが必要なときだけ読み込むので、コンテキストウィンドウを無駄に消費しない。`create-skill` のチェックリストにもこれらのベストプラクティスを組み込んだ。
+
+## 最終的なファイル構成
+
+```code
+.claude/
+  skills/
+    post-guide/
+      SKILL.md                  # Claude Code + Kiro 共通
+      references/EXAMPLES.md
+    run-tests/
+      SKILL.md
+      references/TEMPLATES.md
+    add-mdx-component/
+      SKILL.md
+      references/PATTERNS.md
+    fix-lint/SKILL.md
+    create-skill/SKILL.md
+    sync-agent-config/SKILL.md
+    analyze-claude-md/SKILL.md  # Claude Code 固有
+    optimize-claude-md/SKILL.md # Claude Code 固有
+    ...
+  CLAUDE.md
+
+.kiro/
+  steering/
+    project.md                # inclusion: always
+  skills/
+    post-guide/
+      SKILL.md                  # .claude/skills/ と同一
+      references/EXAMPLES.md
+    run-tests/
+      SKILL.md
+      references/TEMPLATES.md
+    add-mdx-component/
+      SKILL.md
+      references/PATTERNS.md
+    fix-lint/SKILL.md
+    create-skill/SKILL.md
+    sync-agent-config/SKILL.md
+    ...
+```
+
+## まとめ
+
+- **ステアリングとスキルは役割が違う** — 常時適用のルールはステアリング、オンデマンドのワークフロー知識はスキル。CLAUDE.md の内容を全部スキルにするのは間違い。
+- **agentskills.io 標準がツール間の壁を消す** — SKILL.md のフォーマットが共通なので、コピーするだけで移行できる。ツール固有の変換作業はほぼ不要。
+- **description は「いつ使うか」まで書く** — エージェントの自動選択精度に直結する。短すぎる description は仕様上は有効でも実用上は不十分。
+- **SKILL.md は focused に保つ** — テンプレートやパターン集は `references/` に分離する。エージェントが必要なときだけ読み込むので、コンテキストを節約できる。
