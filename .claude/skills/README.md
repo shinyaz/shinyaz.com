@@ -4,6 +4,29 @@ This directory contains reusable skills for Claude Code to help with common deve
 
 ## Available Skills
 
+### Claude Code Management
+
+#### `/optimize-claude-md` - Optimize CLAUDE.md file
+Reduces CLAUDE.md size by extracting procedures to skills.
+- Analyzes current content
+- Identifies extractable procedures
+- Creates appropriate skills
+- Updates CLAUDE.md to reference skills
+
+#### `/create-skill` - Create new skills
+Standardized workflow for creating new Claude Code skills.
+- Proper frontmatter setup
+- Template selection
+- disable-model-invocation guidance
+- Documentation updates
+
+#### `/analyze-claude-md` - Analyze CLAUDE.md
+Analyzes current CLAUDE.md and suggests optimizations.
+- Line count metrics
+- Identifies redundancies
+- Suggests skill extractions
+- Provides optimization report
+
 ### Content Management
 
 #### `/new-post` - Create a new blog post
