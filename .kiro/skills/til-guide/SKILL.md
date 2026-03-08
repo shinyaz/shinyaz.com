@@ -27,6 +27,7 @@ These guidelines apply to both new and existing TIL entries.
 ### Length & Scope Constraints
 - **Length:** 100-300 words ideal. If over 500, convert to a blog post (`/post-guide`)
 - **Code blocks:** 1-2 ideal, max 3. 4+ = blog post territory
+- **Code block language:** Always specify a language (e.g. `tsx`, `css`, `bash`, `text`). Bare ` ``` ` breaks `rehype-pretty-code` rendering
 - **Let code speak:** Don't repeat in prose what the code already shows
 
 ### Tone

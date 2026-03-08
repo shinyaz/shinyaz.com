@@ -1,0 +1,23 @@
+---
+title: "rehype-pretty-code breaks on code blocks without a language identifier"
+description: "Omitting the language on fenced code blocks in MDX causes rehype-pretty-code to produce broken HTML. Always specify a language like text for non-code content."
+date: 2026-03-08
+published: true
+tags:
+  - nextjs
+  - mdx
+---
+
+A TIL entry's code block wasn't rendering correctly on the page. The fenced block started with bare ` ``` ` and had no language identifier.
+
+This blog uses `rehype-pretty-code` for syntax highlighting. Without a language, the parser fails to tokenize the content properly and the resulting HTML structure breaks.
+
+```diff
+- ```
++ ```text
+  # Content creation ({type}-guide)
+  post-guide
+  til-guide
+```
+
+For plain text, directory trees, or pseudo-code, `text` works as a safe default. This isn't specific to `rehype-pretty-code` — shiki-based highlighters generally expect a language identifier, so always specifying one in MDX is a good habit.

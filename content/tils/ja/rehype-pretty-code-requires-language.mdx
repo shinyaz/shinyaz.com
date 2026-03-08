@@ -1,0 +1,23 @@
+---
+title: "rehype-pretty-code は言語指定なしのコードブロックを正しく変換できない"
+description: "MDX のコードブロックで言語を省略すると rehype-pretty-code のレンダリングが崩れる。```text のように必ず言語を指定する必要がある。"
+date: 2026-03-08
+published: true
+tags:
+  - nextjs
+  - mdx
+---
+
+TIL のコードブロックがページ上でうまく表示されていなかった。該当箇所を確認すると、言語指定なしの ` ``` ` で開始されていた。
+
+このブログでは `rehype-pretty-code` でシンタックスハイライトを処理している。言語指定がないとパーサーがトークナイズに失敗し、HTML 構造が壊れてしまう。
+
+```diff
+- ```
++ ```text
+  # Content creation ({type}-guide)
+  post-guide
+  til-guide
+```
+
+コード以外のプレーンテキストやディレクトリ構造を載せる場合は `text` を指定すればよい。`rehype-pretty-code` に限らず、`shiki` ベースのハイライターは一般的に言語指定を前提としているので、MDX では常に言語を明示する癖をつけておくと安全だ。

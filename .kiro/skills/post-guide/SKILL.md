@@ -13,7 +13,7 @@ Blog post writing guide: $ARGUMENTS
 - **Anchor Insight** — ONE core insight per post. No common thread → split posts
 - **Body** — Descriptive `##` headings, choose structure by article type
 - **Content** — Include gotchas, design decisions, before/after. Omit file dumps, boilerplate
-- **Code blocks** — Target 3-5. Over 7 → consolidate
+- **Code blocks** — Target 3-5. Over 7 → consolidate. Always specify a language (e.g. `tsx`, `bash`, `text`); bare ` ``` ` breaks `rehype-pretty-code`
 - **Closing** — Transferable insights (not action listing). Bold phrase + dash + explanation, 3-4 items
 - **Length** — Japanese: 800-1500 words, English: 600-1200 words
 
