@@ -1,4 +1,8 @@
-# CLAUDE.md
+---
+inclusion: always
+---
+
+# Project Steering
 
 **Language rule:** Think in English internally. Always respond to the user in Japanese.
 
@@ -11,17 +15,6 @@ npm run lint         # ESLint + Prettier check
 npm test             # Unit/component tests (Vitest)
 npm run test:e2e     # E2E tests (Playwright, requires build)
 ```
-
-## Skills
-
-- `/post-guide` — Blog post writing guide & creation
-- `/til-guide` — TIL writing guide & creation
-- `/fix-lint` — Fix linting errors
-- `/sync-i18n` — Check bilingual content
-- `/debug-build` — Troubleshoot builds
-- `/run-tests` — Run appropriate tests
-- `/add-mdx-component` — Add MDX component
-- `/sync-agent-config` — Sync config between Claude Code & Kiro
 
 ## Architecture
 
