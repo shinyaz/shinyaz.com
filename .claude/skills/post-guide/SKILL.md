@@ -3,6 +3,8 @@ name: post-guide
 description: Blog post writing guidelines and creation workflow. Loaded when creating, editing, or reviewing blog posts in content/posts/. Covers title, description, structure, voice, and bilingual conventions.
 ---
 
+Blog post writing guide: $ARGUMENTS
+
 ## Writing Principles
 
 These principles apply to both new and existing blog posts.
@@ -108,7 +110,7 @@ Choose structure based on type — most posts mix types, but pick a primary:
 
 ## New Post Creation Workflow
 
-When explicitly invoked with `/post-guide`, follow these steps to create a new post: $ARGUMENTS
+When explicitly invoked with `/post-guide`, follow these steps to create a new post.
 
 1. **Determine post basics**
    - Date format: YYYY-MM-DD

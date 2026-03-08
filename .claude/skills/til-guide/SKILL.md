@@ -3,6 +3,8 @@ name: til-guide
 description: TIL (Today I Learned) writing guidelines and creation workflow. Loaded when creating, editing, or reviewing TIL entries in content/tils/. Covers format, tone, length constraints, and search optimization.
 ---
 
+TIL writing guide: $ARGUMENTS
+
 ## Writing Guidelines
 
 These guidelines apply to both new and existing TIL entries.
@@ -59,7 +61,7 @@ These guidelines apply to both new and existing TIL entries.
 
 ## New TIL Creation Workflow
 
-When explicitly invoked with `/til-guide`, follow these steps to create a new entry: $ARGUMENTS
+When explicitly invoked with `/til-guide`, follow these steps to create a new entry.
 
 1. **Determine TIL basics**
    - Date: YYYY-MM-DD (today)
