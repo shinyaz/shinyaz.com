@@ -1,0 +1,281 @@
+---
+title: "How I Reduced My CLAUDE.md by 83% Using Claude Code's Skills System"
+description: "A practical guide to optimizing Claude Code's context efficiency by reducing CLAUDE.md from 355 to 59 lines and implementing reusable skills"
+date: "2026-03-08"
+published: true
+featured: false
+categories: [ai-tools]
+tags: ["claude-code", "ai-tools", "productivity", "automation", "best-practices"]
+---
+
+After months of using Claude Code, my CLAUDE.md file had ballooned to 355 lines. Detailed project descriptions, content guidelines, testing procedures—I had crammed everything in there. The result? Claude started missing important instructions, buried under all that noise.
+
+Following Claude Code's official best practices, I achieved an **83% reduction** in my CLAUDE.md file size and implemented a **skills system** that dramatically improved both context efficiency and workflow productivity.
+
+My previous post covered *how to write* a CLAUDE.md, but this one tackles the opposite problem — *how to shrink it*. It might seem contradictory, but a carefully written CLAUDE.md that grows too large actually undermines its own purpose of improving AI accuracy. Here's the problem and its concrete solution.
+
+## The Problem: Wasting Context Window
+
+Claude Code's biggest constraint is the **context window**. Every conversation, file read, and command output accumulates here. And LLM performance degrades as the context fills up.
+
+Why does this matter? CLAUDE.md is automatically loaded every time Claude Code starts a session. That means a 355-line CLAUDE.md **consumes precious context on every single session start**. The longer the conversation goes, the more this initial cost compounds.
+
+My bloated CLAUDE.md looked like this:
+
+```markdown
+## Content Writing
+
+### Common Conventions
+
+**Frontmatter:**
+- `title` — Specific and outcome-oriented
+- `description` — 80–200 chars, conveys unique value
+- `date` — YYYY-MM-DD format
+- `published` — true/false
+- `tags` — lowercase, hyphenated technology names
+
+### Blog Posts (`content/posts/{en,ja}/`)
+
+**Goal:** Concrete, scannable, genuinely useful posts...
+[200+ more lines...]
+```
+
+While these detailed instructions seemed useful, they actually caused:
+- **355 lines consuming context every session**
+- **Important rules getting lost in noise**
+- **Claude frequently ignoring instructions**
+
+The third issue was the most damaging. When a critical rule like "Use Server Components by default" is buried after 200 lines of content creation guidelines, Claude sometimes misses it entirely. It's the same phenomenon as humans skipping over important notes buried deep in a manual.
+
+## The Solution: Skills System
+
+According to Claude Code's [best practices documentation](https://code.claude.com/docs/best-practices):
+
+> For each line ask: "Would removing this cause Claude to make a mistake?" If not, delete it.
+
+So I moved detailed procedures to **skills** and kept only essential information in CLAUDE.md.
+
+Skills are Markdown files placed in the `.claude/skills/` directory that can be invoked with slash commands like `/skill-name`. While CLAUDE.md is a "configuration file that's always loaded," skills are "procedure manuals invoked only when needed." This distinction is what makes all the difference for context efficiency.
+
+### Implemented Skills Structure
+
+```
+.claude/skills/
+├── new-post/         # Standardized blog post workflow
+├── fix-lint/         # Auto-fix linting errors
+├── sync-i18n/        # Check bilingual content sync
+├── debug-build/      # Troubleshoot build errors
+├── run-tests/        # Run appropriate tests
+├── add-mdx-component/# Add MDX components
+└── README.md         # Skills documentation
+```
+
+Each skill lives in its own directory with a `SKILL.md` file containing the procedure. The directory name becomes the command name — so a `new-post/` directory is invoked with `/new-post`.
+
+### Example Skill: `/new-post`
+
+```markdown
+---
+name: new-post
+description: Create a new blog post with standardized workflow
+disable-model-invocation: true
+---
+
+Create a new blog post: $ARGUMENTS
+
+## Workflow
+
+1. **Determine post basics**
+   - Date format: YYYY-MM-DD
+   - Slug: kebab-case (lowercase with hyphens)
+   - Language: ja/en or both
+
+2. **Create MDX file(s)**
+   - Path: `content/posts/{locale}/{slug}.mdx`
+   - Create in both directories for bilingual posts
+
+[Detailed steps continue...]
+```
+
+The `disable-model-invocation: true` setting prevents workflows with side effects from running automatically. Without this flag, Claude might decide from context that "this skill should be executed" and create files on its own. Always set this for skills that include hard-to-reverse operations like file changes or build execution.
+
+`$ARGUMENTS` is a placeholder that expands to whatever text the user types after the command. When you enter `/new-post nextjs-performance-tips`, `$ARGUMENTS` becomes `nextjs-performance-tips`, and Claude executes the procedure based on that input.
+
+## Result: 59-Line CLAUDE.md
+
+The optimized CLAUDE.md is now just 59 lines. What remains is only "information Claude needs to know every time" — command lists, skill references, and project-specific constraints. All detailed procedures have moved to skills, loaded only when needed:
+
+```markdown
+# CLAUDE.md
+
+**Language rule:** Think in English internally.
+Always respond to the user in Japanese.
+
+## Commands
+npm run dev      # Dev server
+npm run build    # Production build
+npm test         # Unit tests
+[...]
+
+## Skills
+Use `/skill-name` for common tasks:
+- `/new-post` — Create blog post
+- `/fix-lint` — Fix linting errors
+- `/sync-i18n` — Check bilingual content
+[...]
+
+## Critical Rules
+- Server Components by default
+- TypeScript strict mode
+- Tailwind only
+- Build must pass
+[...]
+```
+
+## Impact: Dramatic Improvements
+
+This optimization delivered the following improvements. Most importantly, it wasn't just about reducing line count — Claude's response quality visibly improved.
+
+### 1. **Better Context Efficiency**
+- 355 lines → 59 lines (**83% reduction**)
+- Important instructions no longer buried
+- Longer sessions now possible
+
+### 2. **Standardized Workflows**
+- `/new-post` creates blog posts instantly
+- `/fix-lint` auto-fixes all linting issues
+- Team shares identical workflows
+
+### 3. **Improved Maintainability**
+- Update each skill independently
+- Personal settings via local skills (`.local/`)
+- Version control with Git
+
+## Best Practices Checklist
+
+Deciding what to keep in CLAUDE.md versus what to move to skills can feel tricky at first. The table below shows the criteria I actually used. The underlying principle is simple: "Don't write what Claude can figure out by reading the code":
+
+| ✅ Include | ❌ Exclude |
+|-----------|-----------|
+| Commands Claude can't infer | Things Claude understands from code |
+| Non-default code style rules | Standard language conventions |
+| Project-specific settings | Detailed API documentation |
+| Critical constraints and rules | Generic best practices |
+
+## What I Removed
+
+Theory alone makes it hard to decide, so here are concrete examples of what I moved and why. The common thread is that all of these are "detailed procedures," not "rules." A 50-line test procedure can be replaced with the one-line rule "tests must pass":
+
+| Before (in CLAUDE.md) | After (in skills) |
+|----------------------|-------------------|
+| Detailed test procedures (50 lines) | `/run-tests` skill |
+| Content creation guide (80 lines) | `/new-post` skill |
+| Debug procedures (40 lines) | `/debug-build` skill |
+| MDX component guide (30 lines) | `/add-mdx-component` skill |
+
+## Real-World Usage
+
+Invoking skills is straightforward. Simply type `/skill-name` during a Claude Code conversation, and the corresponding SKILL.md is loaded, with Claude following its procedures. You can also pass arguments — `/new-post nextjs-performance-tips` tells Claude exactly what to create.
+
+### Running Skills
+```bash
+# Create new blog post
+/new-post nextjs-performance-tips
+
+# Auto-fix linting errors
+/fix-lint
+
+# Debug build errors
+/debug-build
+
+# Check bilingual content sync
+/sync-i18n
+```
+
+### When to Create a Skill
+
+Creating too many skills makes management cumbersome. Too few, and your CLAUDE.md bloats again. Here are the criteria I use to decide whether something deserves its own skill:
+
+✅ **Create a skill for:**
+- Tasks repeated 3+ times
+- Procedures with 5+ steps
+- Team-shared workflows
+- Complex, error-prone processes
+
+❌ **Keep in CLAUDE.md:**
+- Project-specific constraints
+- Always-applied rules
+- Basic command lists
+- Settings Claude can't infer
+
+## Implementation Tips
+
+Here's how to introduce the skills system in your own project. The key is to proceed incrementally rather than attempting a massive migration.
+
+### 1. Start by Measuring
+
+Check your current CLAUDE.md line count. Over 100 lines means significant optimization potential. Under 50, and you may be fine for now:
+```bash
+wc -l CLAUDE.md  # Check current line count
+```
+
+### 2. Create Skills
+
+Just create a directory and place a SKILL.md inside — no complex configuration needed:
+```bash
+mkdir -p .claude/skills/your-skill
+cat > .claude/skills/your-skill/SKILL.md << 'EOF'
+---
+name: your-skill
+description: What this skill does
+disable-model-invocation: true  # If has side effects
+---
+Your workflow steps here...
+EOF
+```
+
+### 3. Configure .gitignore
+
+Commit team-shared skills to Git, but manage personal customizations with a `.local/` suffix and add them to .gitignore. This maintains team standards while accommodating individual preferences:
+```bash
+echo ".claude/skills/*.local/" >> .gitignore
+echo "CLAUDE.local.md" >> .gitignore
+```
+
+## Troubleshooting
+
+Here are common issues you might encounter when adopting the skills system, all based on my own experience.
+
+### Q: Skill not recognized
+**A:** Check that skill name matches directory name. Verify the `name:` field is set correctly.
+
+### Q: When to use disable-model-invocation?
+**A:** Set to `true` for side effects like file changes, builds, or test runs. Skip for read-only operations.
+
+### Q: CLAUDE.md still feels long
+**A:** Ask "Would Claude work correctly without this?" for each line. Aim for under 50 lines.
+
+## Key Takeaways
+
+Claude Code's performance depends on context window management. By keeping CLAUDE.md minimal and separating detailed procedures into skills:
+
+- **Context is used efficiently**
+- **Workflows become reusable**
+- **Teams can standardize practices**
+- **Claude's response accuracy improves**
+
+If your CLAUDE.md exceeds 100 lines, consider migrating to the skills system immediately. The impact is dramatic.
+
+## Next Steps
+
+To further automate this optimization process and enable continuous improvement, check out [Building a Self-Improving System with Meta-Skills](/en/blog/2026/03/09/claude-code-meta-skills).
+
+---
+
+*Reference: [Claude Code Best Practices](https://code.claude.com/docs/best-practices)*
+
+*Series articles:*
+1. *[Maximizing AI Coding Assistants with CLAUDE.md](/en/blog/2026/03/07/claude-md-ai-coding-assistant-guide)*
+2. *[How I Reduced My CLAUDE.md by 83% Using Claude Code's Skills System](/en/blog/2026/03/08/optimizing-claude-code-with-skills)* (this article)
+3. *[Claude Code Meta-Skills: Creating a Self-Improving System with Skills that Manage Skills](/en/blog/2026/03/09/claude-code-meta-skills)*
+4. *[Scaling Claude Code Meta-Skills Across Teams: Maximizing AI-Assisted Development Productivity Organization-Wide](/en/blog/2026/03/10/claude-code-team-productivity)*

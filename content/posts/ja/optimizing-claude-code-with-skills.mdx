@@ -1,0 +1,281 @@
+---
+title: "Claude CodeのCLAUDE.mdを83%削減してスキルシステムで効率化した話"
+description: "355行のCLAUDE.mdを59行まで削減し、再利用可能なスキルを実装することで、Claude Codeのコンテキスト効率とワークフローを劇的に改善した実践記録"
+date: "2026-03-08"
+published: true
+featured: false
+categories: [ai-tools]
+tags: ["claude-code", "ai-tools", "productivity", "automation", "best-practices"]
+---
+
+Claude Codeを使い始めて数ヶ月、CLAUDE.mdファイルは気づけば355行にまで膨れ上がっていた。プロジェクトの詳細な説明、コンテンツ作成ガイドライン、テスト手順、すべてを詰め込んだ結果、肝心なときにClaudeが重要な指示を見落とすようになってしまった。
+
+今回、Claude Codeの公式ベストプラクティスに基づいて、CLAUDE.mdを**83%削減**し、代わりに**スキルシステム**を導入することで、劇的な改善を実現した。
+
+前回の記事ではCLAUDE.mdの「書き方」を紹介したが、今回はその逆 — 「いかに減らすか」がテーマだ。一見矛盾するようだが、丁寧に書いたCLAUDE.mdが大きくなりすぎると、本来の目的であるAIの精度向上を妨げてしまう。この問題と、その具体的な解決策を共有する。
+
+## 問題：コンテキストウィンドウの無駄遣い
+
+Claude Codeの最大の制約は**コンテキストウィンドウ**である。すべての会話、読み込んだファイル、コマンド出力がここに蓄積される。そして、LLMのパフォーマンスはコンテキストが満杯になるにつれて低下する。
+
+なぜこれが問題なのか。CLAUDE.mdはClaude Codeが起動するたびに自動的に読み込まれる。つまり、355行のCLAUDE.mdは**毎回のセッション開始時に貴重なコンテキストを消費**している。会話が長くなるほど、この初期コストの影響は大きくなる。
+
+私のCLAUDE.mdは以下のような内容で埋め尽くされていた：
+
+```markdown
+## Content Writing
+
+### Common Conventions
+
+**Frontmatter:**
+- `title` — Specific and outcome-oriented
+- `description` — 80–200 chars, conveys unique value
+- `date` — YYYY-MM-DD format
+- `published` — true/false
+- `tags` — lowercase, hyphenated technology names
+
+### Blog Posts (`content/posts/{en,ja}/`)
+
+**Goal:** Concrete, scannable, genuinely useful posts...
+[さらに200行以上続く...]
+```
+
+このような詳細な指示は一見有用に見えるが、実際には：
+- **毎回のセッションで355行がコンテキストを消費**
+- **重要な指示がノイズに埋もれる**
+- **Claudeが頻繁に指示を無視する**
+
+3つ目が最も深刻だった。「Server Componentsをデフォルトにする」という重要なルールが、コンテンツ作成ガイドラインの200行の後に埋もれていると、Claudeはそのルールを見落とすことがある。人間がマニュアルの重要事項を読み飛ばすのと同じ現象だ。
+
+## 解決策：スキルシステムの導入
+
+Claude Codeの[ベストプラクティスドキュメント](https://code.claude.com/docs/ja/best-practices)によると、効果的なCLAUDE.mdの条件は：
+
+> 各行について「これを削除するとClaudeが間違いを犯しますか？」と尋ねます。そうでない場合は、削除します。
+
+そこで、詳細な手順は**スキル**に移動し、CLAUDE.mdには最小限の情報のみを残すことにした。
+
+スキルとは、Claude Codeの `.claude/skills/` ディレクトリに配置するMarkdownファイルで、`/skill-name` のようにスラッシュコマンドで呼び出せる。CLAUDE.mdが「常に読み込まれる設定ファイル」なのに対し、スキルは「必要なときだけ呼び出される手順書」だ。この違いが、コンテキスト効率に決定的な差を生む。
+
+### 実装したスキル構造
+
+```
+.claude/skills/
+├── new-post/         # ブログ記事作成の標準ワークフロー
+├── fix-lint/         # Lintエラーの自動修正
+├── sync-i18n/        # 多言語コンテンツの同期チェック
+├── debug-build/      # ビルドエラーのトラブルシューティング
+├── run-tests/        # 変更に応じた適切なテスト実行
+├── add-mdx-component/# MDXコンポーネントの追加
+└── README.md         # スキルのドキュメント
+```
+
+各スキルは独立したディレクトリに格納され、`SKILL.md` というファイルに手順を記述する。ディレクトリ名がそのままコマンド名になるため、`new-post/` ディレクトリなら `/new-post` で呼び出せる。
+
+### スキルの例：`/new-post`
+
+```markdown
+---
+name: new-post
+description: Create a new blog post with standardized workflow
+disable-model-invocation: true
+---
+
+Create a new blog post: $ARGUMENTS
+
+## Workflow
+
+1. **Determine post basics**
+   - Date format: YYYY-MM-DD
+   - Slug: kebab-case (lowercase with hyphens)
+   - Language: ja/en or both
+
+2. **Create MDX file(s)**
+   - Path: `content/posts/{locale}/{slug}.mdx`
+   - Create in both directories for bilingual posts
+
+[詳細な手順が続く...]
+```
+
+`disable-model-invocation: true`を設定することで、副作用のあるワークフローが自動的に実行されることを防ぐ。このフラグがないと、Claudeが文脈から「このスキルを実行すべき」と判断して勝手にファイルを作成してしまう可能性がある。ファイル変更やビルド実行など、結果を取り消しにくい操作を含むスキルには必ず設定すべきだ。
+
+`$ARGUMENTS` はユーザーがコマンドの後に入力したテキストがそのまま展開されるプレースホルダーだ。`/new-post nextjs-performance-tips` と入力すると、`$ARGUMENTS` が `nextjs-performance-tips` に置き換わり、Claudeがその内容をもとに手順を実行する。
+
+## 結果：59行の簡潔なCLAUDE.md
+
+最適化後のCLAUDE.mdは、わずか59行になった。残っているのは「Claudeが毎回知っておくべき情報」だけだ。コマンド一覧、スキルへの参照、そしてプロジェクト固有の制約。詳細な手順はすべてスキルに移動し、必要なときだけ読み込まれる：
+
+```markdown
+# CLAUDE.md
+
+**Language rule:** Think in English internally.
+Always respond to the user in Japanese.
+
+## Commands
+npm run dev      # Dev server
+npm run build    # Production build
+npm test         # Unit tests
+[...]
+
+## Skills
+Use `/skill-name` for common tasks:
+- `/new-post` — Create blog post
+- `/fix-lint` — Fix linting errors
+- `/sync-i18n` — Check bilingual content
+[...]
+
+## Critical Rules
+- Server Components by default
+- TypeScript strict mode
+- Tailwind only
+- Build must pass
+[...]
+```
+
+## 効果：劇的な改善
+
+この最適化により、以下の改善を実現した。最も重要なのは、単に行数が減っただけでなく、Claudeの応答品質が目に見えて向上したことだ。
+
+### 1. **コンテキスト効率の向上**
+- 355行 → 59行（**83%削減**）
+- 重要な指示が埋もれない
+- より長いセッションが可能に
+
+### 2. **ワークフローの標準化**
+- `/new-post`でブログ記事作成が一瞬
+- `/fix-lint`でLintエラーを自動修正
+- チーム全体で同じワークフローを共有
+
+### 3. **メンテナンス性の向上**
+- スキルごとに独立して更新可能
+- ローカルスキル（`.local/`）で個人設定も可能
+- Gitでバージョン管理
+
+## ベストプラクティスのチェックリスト
+
+CLAUDE.mdに何を残し、何をスキルに移すかの判断は、最初は難しく感じるかもしれない。以下の表は、私が実際に使った判断基準だ。根底にある原則は「Claudeがコードを読めば分かることは書かない」ということ：
+
+| ✅ 含める | ❌ 除外する |
+|---------|----------|
+| Claudeが推測できないコマンド | Claudeがコードを読んで理解できること |
+| デフォルトと異なるコードスタイル | 標準的な言語規約 |
+| プロジェクト固有の設定 | 詳細なAPIドキュメント |
+| 重要な制約やルール | 一般的なベストプラクティス |
+
+## 具体的な削除例
+
+理論だけでは判断しにくいので、実際に移動した内容とその理由を示す。共通しているのは、いずれも「手順の詳細」であり「ルール」ではないという点だ。テスト手順が50行あっても、「テストを通すこと」というルールは1行で済む：
+
+| Before（CLAUDE.md内） | After（スキルへ） |
+|---------------------|----------------|
+| テスト手順の詳細（50行） | `/run-tests`スキル |
+| コンテンツ作成ガイド（80行） | `/new-post`スキル |
+| デバッグ手順（40行） | `/debug-build`スキル |
+| MDXコンポーネント追加手順（30行） | `/add-mdx-component`スキル |
+
+## 実際の使い方
+
+スキルの呼び出しは非常にシンプルだ。Claude Codeの会話中に `/スキル名` と入力するだけで、該当するSKILL.mdが読み込まれ、Claudeがその手順に従って作業を開始する。引数を渡すことも可能で、`/new-post nextjs-performance-tips` のように具体的な指示を追加できる。
+
+### スキルの実行例
+```bash
+# 新しいブログ記事を作成
+/new-post nextjs-performance-tips
+
+# Lintエラーを自動修正
+/fix-lint
+
+# ビルドエラーをデバッグ
+/debug-build
+
+# 日英コンテンツの同期を確認
+/sync-i18n
+```
+
+### スキルにすべき作業の判断基準
+
+スキルを作りすぎても管理が煩雑になる。逆に少なすぎるとCLAUDE.mdが膨れる。以下の基準で、スキル化すべき作業かどうかを判断している：
+
+✅ **スキルにすべき：**
+- 3回以上繰り返す作業
+- 手順が5ステップ以上ある作業
+- チームで共有したいワークフロー
+- エラーが起きやすい複雑な手順
+
+❌ **CLAUDE.mdに残すべき：**
+- プロジェクト固有の制約
+- 常に適用されるルール
+- 基本的なコマンド一覧
+- Claudeが推測できない設定
+
+## 実装のヒント
+
+自分のプロジェクトでスキルシステムを導入する際の手順を紹介する。大掛かりな移行ではなく、段階的に進めるのがコツだ。
+
+### 1. まずは測定から
+
+現在のCLAUDE.mdの行数を確認する。100行を超えていたら最適化の余地が大きい。50行以下なら、現時点では十分かもしれない：
+```bash
+wc -l CLAUDE.md  # 現在の行数を確認
+```
+
+### 2. スキルの作成
+
+ディレクトリを作り、SKILL.mdを配置するだけで完了する。複雑な設定は不要だ：
+```bash
+mkdir -p .claude/skills/your-skill
+cat > .claude/skills/your-skill/SKILL.md << 'EOF'
+---
+name: your-skill
+description: What this skill does
+disable-model-invocation: true  # 副作用がある場合
+---
+Your workflow steps here...
+EOF
+```
+
+### 3. .gitignoreの設定
+
+チームで共有するスキルはGitにコミットするが、個人用のカスタマイズは`.local/`サフィックスで管理し、.gitignoreに追加する。これにより、チーム標準のスキルを維持しつつ、個人の好みも反映できる：
+```bash
+echo ".claude/skills/*.local/" >> .gitignore
+echo "CLAUDE.local.md" >> .gitignore
+```
+
+## よくある問題と解決策
+
+スキルシステムの導入で遭遇しやすい問題と、その対処法をまとめた。いずれも私が実際に経験したものだ。
+
+### Q: スキルが認識されない
+**A:** スキル名がディレクトリ名と一致しているか確認すること。`name:` フィールドが正しく設定されているか確認すること。
+
+### Q: disable-model-invocationの判断が難しい
+**A:** ファイル変更、ビルド実行、テスト実行など「副作用」がある場合は`true`に設定する。読み取り専用の場合は不要である。
+
+### Q: CLAUDE.mdがまだ長く感じる
+**A:** 「これを削除してもClaudeは正しく動作するか？」を基準に、さらに削減を検討すること。50行以下が理想である。
+
+## まとめ
+
+Claude Codeのパフォーマンスは、コンテキストウィンドウの管理にかかっている。CLAUDE.mdを最小限に保ち、詳細な手順をスキルに分離することで：
+
+- **コンテキストを効率的に使用**できる
+- **ワークフローが再利用可能**になる
+- **チーム全体で標準化**できる
+- **Claudeの応答精度が向上**する
+
+もしあなたのCLAUDE.mdが100行を超えているなら、今すぐスキルシステムへの移行を検討してほしい。その効果は劇的だ。
+
+## 次のステップ
+
+この最適化プロセスをさらに自動化し、継続的に改善したい方は、[メタスキルを使った自己改善サイクルの構築](/ja/blog/2026/03/09/claude-code-meta-skills)も参照してほしい。
+
+---
+
+*参考：[Claude Code Best Practices](https://code.claude.com/docs/ja/best-practices)*
+
+*シリーズ記事：*
+1. *[CLAUDE.md でAIコーディングアシスタントを最大活用する](/ja/blog/2026/03/07/claude-md-ai-coding-assistant-guide)*
+2. *[Claude CodeのCLAUDE.mdを83%削減してスキルシステムで効率化した話](/ja/blog/2026/03/08/optimizing-claude-code-with-skills)*（本記事）
+3. *[Claude Codeのメタスキル：スキルを管理するスキルで実現する自己改善サイクル](/ja/blog/2026/03/09/claude-code-meta-skills)*
+4. *[Claude Codeメタスキルのチーム展開：組織全体でAI支援開発の生産性を最大化する](/ja/blog/2026/03/10/claude-code-team-productivity)*
