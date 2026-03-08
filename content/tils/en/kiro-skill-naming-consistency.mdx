@@ -1,0 +1,28 @@
+---
+title: "Naming Kiro skills consistently with existing patterns improves discoverability"
+description: "When adding a page creation skill, choosing page-guide over add-page maintained the {type}-guide naming pattern used by post-guide and til-guide."
+date: 2026-03-08
+published: true
+tags:
+  - kiro
+  - ai-coding
+---
+
+I was about to create a skill for static page creation and initially named it `add-page`. Then I looked at the existing skills — content creation ones all followed a `{type}-guide` pattern: `post-guide`, `til-guide`.
+
+`add-page` starts with a verb, which groups it with action-oriented skills like `fix-lint` and `debug-build`. But `page-guide` immediately signals "content creation guide" alongside its siblings:
+
+```
+# Content creation ({type}-guide)
+post-guide
+til-guide
+page-guide     ← fits naturally here
+
+# Actions ({verb}-{target})
+fix-lint
+debug-build
+run-tests
+```
+
+Skill naming matters beyond aesthetics. Agents use the `name` and `description` fields for auto-selection, but consistent naming patterns also help humans scan and manage the skill directory without second-guessing where things belong.
+

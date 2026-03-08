@@ -1,0 +1,28 @@
+---
+title: "Kiro スキルの命名は既存パターンに揃えると発見しやすくなる"
+description: "page-guide スキルを追加する際、add-page ではなく post-guide・til-guide に合わせた命名にしたことで、コンテンツ系スキルの一貫性が保たれた。"
+date: 2026-03-08
+published: true
+tags:
+  - kiro
+  - ai-coding
+---
+
+ブログに静的ページ作成用のスキルを追加しようとしたとき、最初は `add-page` という名前を考えた。しかし既存のスキルを見ると、コンテンツ作成系は `post-guide`、`til-guide` という `{type}-guide` パターンで統一されていた。
+
+`add-page` だと動詞始まりで、`fix-lint` や `debug-build` のようなアクション系スキルと混同しやすい。一方 `page-guide` なら、一覧を見たときに「コンテンツ作成ガイド群」としてすぐグルーピングできる。
+
+```
+# コンテンツ作成系（{type}-guide）
+post-guide
+til-guide
+page-guide     ← ここに自然に収まる
+
+# アクション系（{verb}-{target}）
+fix-lint
+debug-build
+run-tests
+```
+
+スキルの命名は、エージェントが自動選択する際のマッチング精度にも影響する。`description` フィールドにキーワードを入れるのはもちろん大事だが、名前自体のパターンが揃っていると、人間が管理するときにも迷わない。
+
