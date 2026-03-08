@@ -1,7 +1,6 @@
 ---
 name: optimize-claude-md
 description: Optimize CLAUDE.md by moving detailed procedures to skills
-disable-model-invocation: true
 ---
 
 Optimize CLAUDE.md following Claude Code best practices.
@@ -9,9 +8,11 @@ Optimize CLAUDE.md following Claude Code best practices.
 ## Analysis Phase
 
 1. **Measure current state**
+
    ```bash
    wc -l CLAUDE.md
    ```
+
    - Target: Under 100 lines (ideally under 50)
 
 2. **Identify removable content**
@@ -37,6 +38,7 @@ Optimize CLAUDE.md following Claude Code best practices.
    - Team-shared workflows
 
 2. **Create skill structure**
+
    ```bash
    # For each identified workflow
    mkdir -p .claude/skills/skill-name
@@ -55,12 +57,14 @@ Optimize CLAUDE.md following Claude Code best practices.
 ## Validation
 
 1. **Check reduction**
+
    ```bash
    wc -l CLAUDE.md  # Should be significantly reduced
    ls -la .claude/skills/  # Should have new skills
    ```
 
 2. **Test skills**
+
    ```bash
    # Try each new skill
    /skill-name test-argument
@@ -74,6 +78,7 @@ Optimize CLAUDE.md following Claude Code best practices.
 ## Best Practices
 
 ### What stays in CLAUDE.md
+
 - Language rules (e.g., "respond in Japanese")
 - Non-obvious commands
 - Project-specific architecture decisions
@@ -81,6 +86,7 @@ Optimize CLAUDE.md following Claude Code best practices.
 - Skill directory listing
 
 ### What becomes a skill
+
 - Multi-step procedures
 - Build/test/deploy workflows
 - Content creation guides

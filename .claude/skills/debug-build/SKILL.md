@@ -1,7 +1,6 @@
 ---
 name: debug-build
 description: Troubleshoot and fix build errors
-disable-model-invocation: true
 ---
 
 Debug and fix build errors in the Next.js application.
@@ -9,6 +8,7 @@ Debug and fix build errors in the Next.js application.
 ## Common Issues & Solutions
 
 ### 1. **Google Fonts Network Errors**
+
 ```bash
 # Clear cache and retry (max 3 attempts)
 rm -rf .next
@@ -19,6 +19,7 @@ curl -I https://fonts.googleapis.com
 ```
 
 ### 2. **Velite Content Generation Issues**
+
 ```bash
 # Check Velite output
 ls -la .velite/
@@ -32,6 +33,7 @@ npx velite --debug
 ```
 
 ### 3. **TypeScript Errors**
+
 ```bash
 # Run type check separately
 npx tsc --noEmit
@@ -43,6 +45,7 @@ npx tsc --noEmit
 ```
 
 ### 4. **Module Resolution Issues**
+
 ```bash
 # Verify dependencies installed
 npm ls
@@ -57,12 +60,14 @@ npm run build
 ```
 
 ### 5. **Memory Issues**
+
 ```bash
 # Increase Node memory for large builds
 NODE_OPTIONS="--max-old-space-size=4096" npm run build
 ```
 
 ### 6. **Turbopack Issues**
+
 ```bash
 # Try building without Turbopack
 npx next build  # Instead of npm run build
@@ -71,6 +76,7 @@ npx next build  # Instead of npm run build
 ## Debugging Workflow
 
 1. **Capture full error**
+
    ```bash
    npm run build 2>&1 | tee build-error.log
    ```

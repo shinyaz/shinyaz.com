@@ -1,7 +1,6 @@
 ---
 name: new-post
 description: Create a new blog post with standardized workflow
-disable-model-invocation: true
 ---
 
 Create a new blog post: $ARGUMENTS
@@ -18,15 +17,16 @@ Create a new blog post: $ARGUMENTS
    - Create in both directories for bilingual posts
 
 3. **Set proper frontmatter**
+
    ```yaml
    ---
    title: "Specific, outcome-oriented title"
    description: "80-200 chars conveying unique value"
    date: "YYYY-MM-DD"
    published: true
-   featured: false  # Reserve for major milestones only
-   categories: [ai-tools]  # Available: ai-tools, programming, writing
-   tags: ["nextjs", "typescript", "tailwindcss"]  # lowercase, hyphenated
+   featured: false # Reserve for major milestones only
+   categories: [ai-tools] # Available: ai-tools, programming, writing
+   tags: ["nextjs", "typescript", "tailwindcss"] # lowercase, hyphenated
    ---
    ```
 
@@ -45,9 +45,11 @@ Create a new blog post: $ARGUMENTS
    - Avoid generic terms
 
 7. **Validate build**
+
    ```bash
    npm run build
    ```
+
    - Ensure no errors
    - Address any warnings
 

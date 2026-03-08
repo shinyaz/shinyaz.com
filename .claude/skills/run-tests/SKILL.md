@@ -1,7 +1,6 @@
 ---
 name: run-tests
 description: Run appropriate tests based on changes
-disable-model-invocation: true
 ---
 
 Run the appropriate test suite based on what was changed.
@@ -10,14 +9,14 @@ Run the appropriate test suite based on what was changed.
 
 ### 1. **Determine what to test**
 
-| Changed Files | Test Command | Why |
-|--------------|--------------|-----|
-| `src/lib/` | `npm test` | Unit tests for utilities |
-| `src/components/` | `npm test` | Component tests |
-| Routing/pages | `npm run test:e2e` | E2E tests for navigation |
-| i18n changes | `npm run test:e2e` | Verify locale switching |
-| `content/` only | Skip tests | Content-only changes |
-| MDX components | `npm test` + manual check | Component + visual verification |
+| Changed Files     | Test Command              | Why                             |
+| ----------------- | ------------------------- | ------------------------------- |
+| `src/lib/`        | `npm test`                | Unit tests for utilities        |
+| `src/components/` | `npm test`                | Component tests                 |
+| Routing/pages     | `npm run test:e2e`        | E2E tests for navigation        |
+| i18n changes      | `npm run test:e2e`        | Verify locale switching         |
+| `content/` only   | Skip tests                | Content-only changes            |
+| MDX components    | `npm test` + manual check | Component + visual verification |
 
 ### 2. **Unit/Component Tests (Vitest)**
 
@@ -36,6 +35,7 @@ npm test -- --coverage
 ```
 
 **What to test:**
+
 - Component rendering
 - Props handling
 - Event handlers
@@ -60,6 +60,7 @@ npm run test:e2e -- --project=chromium
 ```
 
 **What to test:**
+
 - Page navigation
 - Locale switching
 - Search functionality
@@ -86,6 +87,7 @@ npm run build
 ## Writing New Tests
 
 ### Component Test Template
+
 ```typescript
 // __tests__/components/[subdirectory]/YourComponent.test.tsx
 import { describe, it, expect, vi } from "vitest"
@@ -109,22 +111,23 @@ describe("YourComponent", () => {
 ```
 
 ### E2E Test Template
+
 ```typescript
 // e2e/your-feature.spec.ts
-import { test, expect } from "@playwright/test"
+import { test, expect } from "@playwright/test";
 
 test.describe("Your Feature", () => {
   test("should work as expected", async ({ page }) => {
-    await page.goto("/")
+    await page.goto("/");
 
     // Interact with page
-    await page.click('[data-testid="your-button"]')
+    await page.click('[data-testid="your-button"]');
 
     // Assert results
-    await expect(page).toHaveURL("/expected-url")
-    await expect(page.locator("h1")).toContainText("Expected Text")
-  })
-})
+    await expect(page).toHaveURL("/expected-url");
+    await expect(page.locator("h1")).toContainText("Expected Text");
+  });
+});
 ```
 
 ## Test Best Practices
@@ -138,6 +141,7 @@ test.describe("Your Feature", () => {
    - Use proper setup/teardown
 
 3. **Use meaningful assertions**
+
    ```typescript
    // Bad
    expect(result).toBeTruthy()

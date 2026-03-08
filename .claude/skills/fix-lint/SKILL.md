@@ -1,7 +1,6 @@
 ---
 name: fix-lint
 description: Fix linting and formatting errors automatically
-disable-model-invocation: true
 ---
 
 Fix all linting and formatting errors in the project.
@@ -9,15 +8,19 @@ Fix all linting and formatting errors in the project.
 ## Workflow
 
 1. **Run lint check**
+
    ```bash
    npm run lint
    ```
+
    - Identify all ESLint and Prettier errors
 
 2. **Apply automatic fixes**
+
    ```bash
    npm run lint -- --fix
    ```
+
    - Let ESLint fix auto-fixable issues
    - Prettier will format code automatically
 
@@ -30,15 +33,19 @@ Fix all linting and formatting errors in the project.
      - Import order → Organize imports properly
 
 4. **Verify all fixes**
+
    ```bash
    npm run lint
    ```
+
    - Must pass without errors
 
 5. **Run build to ensure no breaking changes**
+
    ```bash
    npm run build
    ```
+
    - Fix any build errors introduced
 
 6. **Commit if changes were made**

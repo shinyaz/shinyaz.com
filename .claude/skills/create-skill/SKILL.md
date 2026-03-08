@@ -1,7 +1,6 @@
 ---
 name: create-skill
 description: Create a new Claude Code skill with proper structure
-disable-model-invocation: true
 ---
 
 Create a new skill: $ARGUMENTS
@@ -14,23 +13,26 @@ Create a new skill: $ARGUMENTS
    - Side effects: Does it modify files or run commands?
 
 2. **Create skill directory**
+
    ```bash
    mkdir -p .claude/skills/{skill-name}
    ```
 
 3. **Create SKILL.md with proper frontmatter**
+
    ```markdown
    ---
-   name: {skill-name}
-   description: {concise description}
-   disable-model-invocation: {true if has side effects}
+   name: { skill-name }
+   description: { concise description }
+   disable-model-invocation: { true if has side effects }
    ---
    ```
 
 4. **Define skill content**
 
    ### For workflow skills:
-   ```markdown
+
+   ````markdown
    {Description of what this skill does}: $ARGUMENTS
 
    ## Workflow
@@ -41,10 +43,12 @@ Create a new skill: $ARGUMENTS
       ```bash
       command if needed
       ```
+   ````
 
    2. **Next step**
       [Continue...]
-   ```
+
+   ````
 
    ### For knowledge skills:
    ```markdown
@@ -56,22 +60,25 @@ Create a new skill: $ARGUMENTS
 
    ## Guidelines
    [Domain-specific knowledge]
-   ```
+   ````
 
 5. **Set disable-model-invocation**
 
-   | Set to `true` when: | Leave unset when: |
-   |-------------------|------------------|
-   | Creates/modifies files | Read-only operations |
-   | Runs tests or builds | Provides information |
-   | Executes commands | Analysis only |
-   | Has system side effects | Pure computation |
+   | Set to `true` when:     | Leave unset when:    |
+   | ----------------------- | -------------------- |
+   | Creates/modifies files  | Read-only operations |
+   | Runs tests or builds    | Provides information |
+   | Executes commands       | Analysis only        |
+   | Has system side effects | Pure computation     |
 
 6. **Add to skills documentation**
    Update `.claude/skills/README.md`:
+
    ```markdown
    #### `/{skill-name}` - {brief description}
+
    {1-2 sentences about what it does}
+
    - {key feature 1}
    - {key feature 2}
    ```
@@ -85,51 +92,63 @@ Create a new skill: $ARGUMENTS
 ## Skill Types and Templates
 
 ### 1. **Workflow Skill** (step-by-step procedures)
-   Examples: `/new-post`, `/fix-lint`, `/deploy`
-   - Clear numbered steps
-   - Command examples
-   - Validation steps
-   - Usually needs `disable-model-invocation: true`
+
+Examples: `/new-post`, `/fix-lint`, `/deploy`
+
+- Clear numbered steps
+- Command examples
+- Validation steps
+- Usually needs `disable-model-invocation: true`
 
 ### 2. **Diagnostic Skill** (troubleshooting)
-   Examples: `/debug-build`, `/analyze-performance`
-   - Problem identification
-   - Solution strategies
-   - Common issues and fixes
+
+Examples: `/debug-build`, `/analyze-performance`
+
+- Problem identification
+- Solution strategies
+- Common issues and fixes
 
 ### 3. **Knowledge Skill** (domain information)
-   Examples: `/api-conventions`, `/architecture`
-   - Reference information
-   - Best practices
-   - Conventions and standards
-   - Usually no `disable-model-invocation` needed
+
+Examples: `/api-conventions`, `/architecture`
+
+- Reference information
+- Best practices
+- Conventions and standards
+- Usually no `disable-model-invocation` needed
 
 ### 4. **Validation Skill** (checking and reporting)
-   Examples: `/sync-i18n`, `/audit-security`
-   - Check procedures
-   - Reporting format
-   - Action items
+
+Examples: `/sync-i18n`, `/audit-security`
+
+- Check procedures
+- Reporting format
+- Action items
 
 ## Best Practices
 
 ### Naming Conventions
+
 - Use kebab-case: `my-skill-name`
 - Be specific: `fix-typescript-errors` not `fix-errors`
 - Use verbs for actions: `create-`, `fix-`, `debug-`, `deploy-`
 - Use nouns for knowledge: `conventions`, `architecture`
 
 ### Documentation
+
 - First line: What the skill does
 - Include examples of usage
 - List prerequisites if any
 - Specify expected outcomes
 
 ### Organization
+
 - Group related skills in subdirectories if needed
 - Keep individual skills focused (single responsibility)
 - Avoid overlapping functionality between skills
 
 ### Maintenance
+
 - Regular review: Remove unused skills
 - Update outdated procedures
 - Consolidate similar skills
@@ -138,6 +157,7 @@ Create a new skill: $ARGUMENTS
 ## Common Skill Patterns
 
 ### File Generation
+
 ```markdown
 1. Determine file location
 2. Create file with template
@@ -146,6 +166,7 @@ Create a new skill: $ARGUMENTS
 ```
 
 ### Debugging
+
 ```markdown
 1. Identify symptoms
 2. Check common causes
@@ -155,6 +176,7 @@ Create a new skill: $ARGUMENTS
 ```
 
 ### Validation
+
 ```markdown
 1. Gather data
 2. Check against criteria
