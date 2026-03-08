@@ -141,6 +141,45 @@ Complex information is easier to understand in tables and flow diagrams than bul
 
 Don't just list rules — include the reasoning behind them. Why do we have a "Content-first development" principle? Why did we choose "No external i18n library"? This helps AI understand not just surface-level rules but the project's philosophy, enabling better decision-making.
 
+## An Easy-to-Miss Pitfall: Making Implicit Expectations Explicit
+
+You've written CLAUDE.md, but Claude Code still doesn't behave as intended — sound familiar? *[Practical Claude Code](https://gihyo.jp/book/2026/978-4-297-15354-0)* (Gijutsu-Hyoron) identifies the root cause: **implicit expectations that aren't documented**.
+
+### Steps Experts Consider "Obvious"
+
+When asked to "add a profile editing feature," an expert developer naturally follows these steps:
+
+1. Read README.md to understand the overall project
+2. Check architecture.md to understand the layer structure
+3. **Grep for existing similar features**
+4. **Read the found implementations to understand patterns**
+5. **Implement the new feature following those existing patterns**
+6. Run tests
+
+But if CLAUDE.md only says "When implementing new features, always check README.md and architecture.md" — what happens? Steps 3-5 (searching for and following existing patterns) aren't documented, so Claude Code treats them as "optional." It starts implementing based solely on architecture.md, producing code that follows different patterns from the existing codebase.
+
+For experts, "searching for similar features and matching existing patterns" is so natural that documenting it never occurs to them. But for Claude Code, **steps not written in CLAUDE.md aren't mandatory**.
+
+### Another Trap: Conflicting Instructions Across Documents
+
+Similar to implicit expectations, **contradictory instructions across multiple documents** cause problems. For example:
+
+- architecture.md: "UI layer must always access data through the service layer"
+- development-guidelines.md: "For performance-critical screens, access data sources directly"
+- Existing Dashboard.tsx: Implemented with direct data access
+
+When asked to "extend the dashboard," Claude Code faces three conflicting signals. Without explicit guidance on which takes priority, it may adopt different patterns each time — producing unstable behavior.
+
+### The Fix: Write Down Your Tacit Knowledge
+
+The solution is consciously documenting what you consider "obvious." These questions help surface blind spots:
+
+- **"What do I actually do first when implementing a new feature?"** — Identify the unconscious steps: searching, checking existing patterns, referencing design docs
+- **"Do any of my documents contradict each other?"** — When rules conflict, state the priority explicitly
+- **"Would a new hire take the same actions from reading this?"** — Imagining a junior developer reveals assumptions you've been taking for granted
+
+To maximize CLAUDE.md's effectiveness, don't just write rules — document the procedures for following those rules.
+
 ## CLAUDE.md Limitations and Future Outlook
 
 CLAUDE.md isn't perfect. It has current limitations.
@@ -155,6 +194,7 @@ There's also **variance in AI model comprehension**. Guidelines optimized for Cl
 - **Concrete examples beat abstract descriptions** — Specific paths, exact commands, and real code snippets give AI far more actionable guidance than vague prose like "follow project conventions."
 - **A bloated CLAUDE.md backfires** — Because the file is loaded into the context window every session, cramming in too much detail causes the AI to miss the instructions that actually matter.
 - **State the "why" behind each rule** — When AI understands the reasoning, it can generalize to novel situations rather than blindly pattern-matching against examples.
+- **Write down your implicit steps** — The procedures experts consider "obvious" are exactly what tends to be missing from CLAUDE.md. Use "Would a new hire do the same thing?" as your litmus test.
 
 If you're using AI coding assistants, definitely consider implementing CLAUDE.md. Start simple with a command list and architecture description, then gradually expand it. Your AI collaboration will surely become more comfortable.
 
