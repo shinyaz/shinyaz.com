@@ -1,9 +1,75 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { render, screen } from "@testing-library/react";
+
+// Mock Mermaid to avoid dynamic import of mermaid library
+vi.mock("@/components/mdx/mermaid", () => ({
+  Mermaid: ({ chart }: { chart: string }) => (
+    <div data-testid="mermaid-mock">{chart}</div>
+  ),
+}));
+
 import { mdxComponents } from "@/components/mdx/mdx-components";
 
+const MdxPre = mdxComponents.pre!;
 const MdxImg = mdxComponents.img!;
 const MdxA = mdxComponents.a!;
+
+describe("mdxComponents.pre", () => {
+  it("renders Mermaid for standard language-mermaid class", () => {
+    render(
+      // @ts-expect-error -- MDX component props
+      <MdxPre>
+        <code className="language-mermaid">{"graph TD; A-->B"}</code>
+      </MdxPre>,
+    );
+    const mermaid = screen.getByTestId("mermaid-mock");
+    expect(mermaid).toBeDefined();
+    expect(mermaid.textContent).toBe("graph TD; A-->B");
+  });
+
+  it("renders Mermaid for rehype-pretty-code data-language attribute", () => {
+    render(
+      // @ts-expect-error -- MDX component props
+      <MdxPre data-language="mermaid" data-theme="github-dark github-light">
+        <code data-language="mermaid">
+          <span data-line="">
+            <span>{"graph TD"}</span>
+          </span>
+          {"\n"}
+          <span data-line="">
+            <span>{"    A-->B"}</span>
+          </span>
+        </code>
+      </MdxPre>,
+    );
+    const mermaid = screen.getByTestId("mermaid-mock");
+    expect(mermaid).toBeDefined();
+    expect(mermaid.textContent).toContain("graph TD");
+    expect(mermaid.textContent).toContain("A-->B");
+  });
+
+  it("renders CodeBlock for non-mermaid code blocks", () => {
+    const { container } = render(
+      // @ts-expect-error -- MDX component props
+      <MdxPre>
+        <code className="language-typescript">{"const x = 1;"}</code>
+      </MdxPre>,
+    );
+    expect(screen.queryByTestId("mermaid-mock")).toBeNull();
+    expect(container.querySelector("pre")).not.toBeNull();
+  });
+
+  it("renders CodeBlock when no language class is present", () => {
+    const { container } = render(
+      // @ts-expect-error -- MDX component props
+      <MdxPre>
+        <code>{"plain code"}</code>
+      </MdxPre>,
+    );
+    expect(screen.queryByTestId("mermaid-mock")).toBeNull();
+    expect(container.querySelector("pre")).not.toBeNull();
+  });
+});
 
 describe("mdxComponents.img", () => {
   it("renders image with src and alt", () => {
