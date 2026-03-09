@@ -1,0 +1,45 @@
+---
+title: "rehype-pretty-code replaces language-mermaid className with data-language attribute"
+description: "When detecting mermaid code blocks in MDX components, className='language-mermaid' won't work because rehype-pretty-code transforms it to a data-language attribute and wraps content in span trees."
+date: 2026-03-09
+published: true
+tags:
+  - mdx
+  - rehype-pretty-code
+---
+
+I was adding Mermaid diagram rendering to an MDX blog. The plan was simple: override `pre` in `mdx-components` and check for `className="language-mermaid"`. It didn't match anything.
+
+Inspecting the Velite build output revealed `rehype-pretty-code` completely rewrites the structure:
+
+```json
+{
+  "before": "<pre><code class=\"language-mermaid\">graph TD...</code></pre>",
+  "after": "<figure data-rehype-pretty-code-figure><pre data-language=\"mermaid\"><code data-language=\"mermaid\"><span data-line><span style=\"...\">graph TD</span></span>...</code></pre></figure>"
+}
+```
+
+The `className` is gone, replaced by `data-language`. The text content is split into nested `<span data-line>` elements. The fix requires two steps:
+
+```tsx
+// 1. Detect via data-language
+function isMermaidBlock(props, child) {
+  if (props["data-language"] === "mermaid") return true;
+  if (child?.props?.className === "language-mermaid") return true;
+  return false;
+}
+
+// 2. Recursively walk span tree to recover text
+function extractTextFromChildren(children) {
+  const parts = [];
+  function walk(node) {
+    if (typeof node === "string") { parts.push(node); return; }
+    if (React.isValidElement(node)) walk(node.props.children);
+    if (Array.isArray(node)) node.forEach(walk);
+  }
+  walk(children);
+  return parts.join("");
+}
+```
+
+When overriding MDX components, always inspect the actual post-build HTML structure in `.velite/` output rather than assuming standard Markdown AST conventions. Rehype plugins can transform things in surprising ways.

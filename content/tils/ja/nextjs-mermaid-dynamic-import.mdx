@@ -1,0 +1,48 @@
+---
+title: "Next.js で Mermaid 図を描画するにはクライアントサイドの動的インポートが必要"
+description: "mermaid ライブラリは DOM API に依存するため Server Component では使えない。dynamic import + useEffect でクライアント描画し、next-themes の resolvedTheme でダークモードにも対応できる。"
+date: 2026-03-09
+published: true
+tags:
+  - nextjs
+  - mermaid
+---
+
+MDX ブログに Mermaid 対応を入れようとして、最初は Server Component 内で mermaid を呼んで SVG 文字列を生成しようとした。当然ながら mermaid は内部で `getBBox` 等の DOM API を使うため、サーバーサイドでは動かない。
+
+結局クライアントコンポーネントで動的インポートする形に落ち着いた。ポイントは `useEffect` 内で `import("mermaid")` を呼ぶことでバンドルサイズへの影響を最小化する点と、`next-themes` の `resolvedTheme` を依存配列に入れてテーマ切り替え時に再レンダリングさせる点だ。
+
+```tsx
+"use client";
+
+import { useEffect, useRef, useState } from "react";
+import { useTheme } from "next-themes";
+
+export function Mermaid({ chart }: { chart: string }) {
+  const containerRef = useRef<HTMLDivElement>(null);
+  const [svg, setSvg] = useState("");
+  const { resolvedTheme } = useTheme();
+
+  useEffect(() => {
+    let cancelled = false;
+    async function render() {
+      const mermaid = (await import("mermaid")).default;
+      mermaid.initialize({
+        startOnLoad: false,
+        theme: resolvedTheme === "dark" ? "dark" : "default",
+      });
+      const { svg } = await mermaid.render(
+        `mermaid-${Math.random().toString(36).slice(2, 9)}`,
+        chart,
+      );
+      if (!cancelled) setSvg(svg);
+    }
+    render();
+    return () => { cancelled = true; };
+  }, [chart, resolvedTheme]);
+
+  return <div ref={containerRef} dangerouslySetInnerHTML={{ __html: svg }} />;
+}
+```
+
+`resolvedTheme` を使うと `system` 設定でも実際のテーマ（`"light"` / `"dark"`）が取れる。`theme` だと `"system"` が返ってくるので mermaid のテーマ選択に使えない。

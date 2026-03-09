@@ -1,0 +1,45 @@
+---
+title: "rehype-pretty-code は mermaid コードブロックの className を data-language に書き換える"
+description: "MDX で language-mermaid クラスを検出しようとしても、rehype-pretty-code が data-language 属性に変換済みで見つからない。pre の data-language で判定し、span ツリーからテキストを復元する必要がある。"
+date: 2026-03-09
+published: true
+tags:
+  - mdx
+  - rehype-pretty-code
+---
+
+MDX ブログに Mermaid 図のレンダリングを実装しようとした。`mdx-components` の `pre` オーバーライドで `className="language-mermaid"` を検出すれば簡単だろうと思っていたが、まったく反応しなかった。
+
+ビルド後の Velite 出力を調べると、`rehype-pretty-code` が構造を完全に書き換えていた。
+
+```json
+{
+  "before": "<pre><code class=\"language-mermaid\">graph TD...</code></pre>",
+  "after": "<figure data-rehype-pretty-code-figure><pre data-language=\"mermaid\"><code data-language=\"mermaid\"><span data-line><span style=\"...\">graph TD</span></span>...</code></pre></figure>"
+}
+```
+
+`className` は消え、代わりに `data-language` が付与される。さらに中身のテキストは `<span data-line>` の入れ子に分割されている。対処は2段階だ：
+
+```tsx
+// 1. data-language で検出
+function isMermaidBlock(props, child) {
+  if (props["data-language"] === "mermaid") return true;
+  if (child?.props?.className === "language-mermaid") return true;
+  return false;
+}
+
+// 2. span ツリーを再帰的に歩いてテキスト復元
+function extractTextFromChildren(children) {
+  const parts = [];
+  function walk(node) {
+    if (typeof node === "string") { parts.push(node); return; }
+    if (React.isValidElement(node)) walk(node.props.children);
+    if (Array.isArray(node)) node.forEach(walk);
+  }
+  walk(children);
+  return parts.join("");
+}
+```
+
+`className` だけ見ていると rehype プラグインとの組み合わせで検出漏れする。MDX コンポーネントのオーバーライドでは、ビルド後の実際の HTML 構造を `.velite/` の出力で確認してから実装するのが確実だ。
