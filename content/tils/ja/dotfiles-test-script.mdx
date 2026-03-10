@@ -1,0 +1,43 @@
+---
+title: "dotfiles にテストスクリプトを書くとファイル差分まで検証できる"
+description: "dotfiles の install.sh でデプロイした設定ファイルを、配置・パーミッション・内容差分の3段階で検証するテストスクリプトの書き方。Git config の [user] セクションなど個人設定の除外パターンも紹介。"
+date: 2026-03-10
+published: true
+tags:
+  - dotfiles
+  - cli
+---
+
+dotfiles を複数マシンで使っていると、「リポジトリは更新したのにデプロイし忘れた」「手動で設定をいじって差分が出ている」という状況が頻発する。`install.sh` の横に `test.sh` を置いて、3段階で検証するようにした。
+
+```bash
+# ファイル存在チェック
+check_file() {
+  [[ -f "$1" ]] && ok "$2: $1" || ng "$2 not found: $1"
+}
+
+# パーミッションチェック（SSH 用に 700/600 を検証）
+check_permission() {
+  local actual=$(stat -c "%a" "$1" 2>/dev/null)
+  [[ "$actual" == "$2" ]] && ok "$3: $2" || ng "$3: $actual (expected: $2)"
+}
+
+# 内容差分チェック（リポジトリ vs デプロイ先）
+check_file_diff() {
+  local src_content dest_content
+  if [[ "$4" == "user_section" ]]; then
+    src_content=$(sed '/^\[user\]/,/^$/d' "$1")
+    dest_content=$(sed '/^\[user\]/,/^$/d' "$2")
+  else
+    src_content=$(cat "$1")
+    dest_content=$(cat "$2")
+  fi
+  diff -q <(echo "$src_content") <(echo "$dest_content") &>/dev/null \
+    && ok "$3 content matches" \
+    || ng "$3 content differs"
+}
+```
+
+ポイントは `check_file_diff` の除外パターンだ。Git config の `[user]` セクション（名前・メール・署名鍵）はマシンごとに異なるので、`sed` でセクションごと除外してから比較する。これがないとすべてのマシンで差分が出てしまい、テストが実質無意味になる。
+
+`./test.sh` を実行すれば色付きで pass/fail が一覧表示されるので、デプロイ忘れや意図しない差分に即座に気づける。

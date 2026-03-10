@@ -1,0 +1,43 @@
+---
+title: "A dotfiles test script can verify file diffs, not just existence"
+description: "How to write a test script that validates dotfiles deployment in three stages: file existence, permissions, and content diffs. Includes an exclusion pattern for Git config's [user] section."
+date: 2026-03-10
+published: true
+tags:
+  - dotfiles
+  - cli
+---
+
+When using dotfiles across multiple machines, I kept running into "updated the repo but forgot to deploy" and "manually tweaked a config and now it's drifted." Adding a `test.sh` next to `install.sh` with three levels of verification solved this.
+
+```bash
+# File existence check
+check_file() {
+  [[ -f "$1" ]] && ok "$2: $1" || ng "$2 not found: $1"
+}
+
+# Permission check (verify 700/600 for SSH)
+check_permission() {
+  local actual=$(stat -c "%a" "$1" 2>/dev/null)
+  [[ "$actual" == "$2" ]] && ok "$3: $2" || ng "$3: $actual (expected: $2)"
+}
+
+# Content diff check (repo vs deployed)
+check_file_diff() {
+  local src_content dest_content
+  if [[ "$4" == "user_section" ]]; then
+    src_content=$(sed '/^\[user\]/,/^$/d' "$1")
+    dest_content=$(sed '/^\[user\]/,/^$/d' "$2")
+  else
+    src_content=$(cat "$1")
+    dest_content=$(cat "$2")
+  fi
+  diff -q <(echo "$src_content") <(echo "$dest_content") &>/dev/null \
+    && ok "$3 content matches" \
+    || ng "$3 content differs"
+}
+```
+
+The key trick is the exclusion pattern in `check_file_diff`. Git config's `[user]` section (name, email, signing key) differs per machine, so `sed` strips the entire section before comparing. Without this, every machine reports a diff and the test becomes useless.
+
+Running `./test.sh` gives color-coded pass/fail output, making forgotten deploys and unintended drift immediately visible.
