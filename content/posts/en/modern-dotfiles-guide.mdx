@@ -1,0 +1,252 @@
+---
+title: "Building Modern Cross-Platform Dotfiles"
+description: "Build macOS/Linux dotfiles with XDG compliance, 1Password SSH integration, and a test script. Covers the design decision to use copy-based deployment over symlinks, and how CLAUDE.md enables AI-assisted maintenance."
+date: "2026-03-15"
+published: true
+featured: false
+categories: [programming]
+tags: ["dotfiles", "zsh", "git", "devops", "cli"]
+---
+
+## Introduction
+
+How much time do you spend setting up a new development environment? When you get a new machine or spin up a Dev Container, manually reconstructing your previous setup from memory is a waste of time.
+
+A well-maintained dotfiles repository lets you reproduce your environment with just `git clone` and `./install.sh`. This post covers the design of modern dotfiles that work on both macOS and Linux, with a testable architecture. The full repository is available on [GitHub](https://github.com/shinyaz/dotfiles) for reference.
+
+## Repository Structure
+
+The repository follows a "one directory per tool" principle.
+
+```text
+dotfiles/
+├── zsh/          # Shell config (zshenv + zshrc)
+├── git/          # Git global config + ignore
+├── ssh/          # SSH client config
+├── 1password/    # 1Password SSH Agent config
+├── antidote/     # Zsh plugin definitions
+├── ghostty/      # Ghostty terminal config
+├── starship/     # Starship prompt config
+├── karabiner/    # Karabiner-Elements keyboard config
+├── Brewfile      # Homebrew package list
+├── install.sh    # Installation script
+└── test.sh       # Test script
+```
+
+Many dotfiles repos dump config files flat in the root. Organizing by tool makes it immediately clear where everything lives, and adding a new tool is just a matter of creating one directory.
+
+## Design Decision: XDG Base Directory Compliance
+
+The first decision for any dotfiles repo is where files go. Many tools scatter dotfiles in your home directory, but following the [XDG Base Directory Specification](https://specifications.freedesktop.org/basedir-spec/latest/) consolidates everything into `~/.config`, `~/.cache`, and `~/.local/share`.
+
+```bash title="zsh/zshenv"
+export XDG_CONFIG_HOME=${XDG_CONFIG_HOME:-$HOME/.config}
+export XDG_CACHE_HOME=${XDG_CACHE_HOME:-$HOME/.cache}
+export XDG_DATA_HOME=${XDG_DATA_HOME:-$HOME/.local/share}
+
+# Redirect zshrc loading to ~/.config/zsh
+export ZDOTDIR=$XDG_CONFIG_HOME/zsh
+```
+
+With `ZDOTDIR` set, Zsh looks for `.zshrc` under `~/.config/zsh`. The only file left in your home directory is `~/.zshenv`.
+
+## Cross-Platform Support
+
+macOS and Linux differ in Homebrew paths, 1Password socket paths, and binary locations. OS detection with existence checks is the fundamental pattern.
+
+```bash title="zsh/zshenv"
+# Homebrew: /opt/homebrew on macOS, /home/linuxbrew/.linuxbrew on Linux
+if [[ -x /opt/homebrew/bin/brew ]]; then
+  eval "$(/opt/homebrew/bin/brew shellenv)"
+elif [[ -x /home/linuxbrew/.linuxbrew/bin/brew ]]; then
+  eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"
+fi
+```
+
+The key is to never hardcode paths. Using existence checks like `[[ -x ... ]]` and `(( $+commands[tool] ))` ensures no errors in environments where tools aren't installed.
+
+## Unifying Key Management with 1Password SSH Agent
+
+SSH authentication and Git commit signing are both handled by 1Password. Storing SSH keys in a password manager eliminates the need to distribute private key files across machines.
+
+```bash title="zsh/zshenv (1Password SSH Agent)"
+# Unify socket path to ~/.1password/agent.sock
+if [[ "$OSTYPE" == darwin* ]]; then
+  _1p_sock="$HOME/Library/Group Containers/2BUA8C4S2C.com.1password/t/agent.sock"
+  if [[ -S "$_1p_sock" ]] && [[ ! -S "$HOME/.1password/agent.sock" ]]; then
+    mkdir -p "$HOME/.1password"
+    ln -sf "$_1p_sock" "$HOME/.1password/agent.sock"
+  fi
+fi
+
+if [[ -S "$HOME/.1password/agent.sock" ]]; then
+  export SSH_AUTH_SOCK="$HOME/.1password/agent.sock"
+fi
+```
+
+On macOS, 1Password's socket lives at a deeply nested path, so a symlink to `~/.1password/agent.sock` normalizes it. The Git side just needs `gpg.format = ssh` and `gpg.ssh.program = op-ssh-sign`.
+
+```text title="git/config (signing excerpt)"
+[commit]
+  gpgsign = true
+
+[gpg]
+  format = ssh
+
+[gpg "ssh"]
+  program = op-ssh-sign    # Symlink placed in ~/.local/bin
+```
+
+Every `git commit` now triggers biometric authentication via 1Password for commit signing.
+
+## Modern Tool Stack
+
+### Ghostty — GPU-Accelerated Terminal
+
+Ghostty is a fast terminal emulator written in Zig. Configuration is a simple key-value format with native split pane support.
+
+```text title="ghostty/config (excerpt)"
+font-family = "FiraCode Nerd Font"
+font-family = "BIZ UDPGothic"
+theme = Monokai Pro
+background-opacity = 0.95
+
+# Split Pane
+keybind = super+d=new_split:right
+keybind = super+shift+d=new_split:down
+```
+
+BIZ UDPGothic is specified as a Japanese font fallback for environments where Nerd Font glyphs and Japanese text coexist.
+
+### Starship — Cross-Shell Prompt
+
+Starship is a Rust-based prompt that contextually displays Git status and language versions. The trick is disabling unnecessary modules to keep prompt response time fast.
+
+```toml title="starship/starship.toml (excerpt)"
+[character]
+success_symbol = "[❯](bold green)"
+error_symbol = "[❯](bold red)"
+
+# Disable unnecessary modules for speed
+[package]
+disabled = true
+
+[docker_context]
+disabled = true
+```
+
+### Antidote — Lightweight Zsh Plugin Manager
+
+Plugin definitions live in a single text file.
+
+```text title="antidote/zsh_plugins.txt"
+zsh-users/zsh-completions
+zsh-users/zsh-autosuggestions
+zsh-users/zsh-history-substring-search
+djui/alias-tips                          # Remind aliases when full command is typed
+zsh-users/zsh-syntax-highlighting        # Must be loaded last
+```
+
+`zsh-syntax-highlighting` must be placed last so it can properly highlight widgets defined by other plugins. Getting the order wrong causes some plugins to lose syntax highlighting.
+
+## Git Configuration That Matters
+
+Git configuration is unglamorous but directly impacts productivity. Here are the settings with the biggest payoff.
+
+```text title="git/config (excerpt)"
+[diff]
+  algorithm = histogram       # Smarter than default myers algorithm
+
+[merge]
+  conflictstyle = zdiff3      # Show common ancestor in conflicts
+
+[rerere]
+  enabled = true              # Remember and reuse conflict resolutions
+
+[rebase]
+  autoSquash = true           # Auto-sort fixup! / squash! commits
+  autoStash = true            # Auto stash/pop around rebase
+```
+
+`rerere` (Reuse Recorded Resolution) memorizes conflict resolutions and automatically applies them when the same pattern recurs. It's especially powerful for long-lived branch rebases.
+
+## Copy-Based Installer
+
+Dotfiles deployment falls into two camps: symlinks and copies. This repository uses copy-based deployment.
+
+```bash title="install.sh (core)"
+copy_file() {
+  local src="$1" dest="$2"
+  mkdir -p "$(dirname "$dest")"
+  if [[ -f "$dest" ]] && [[ "$FORCE" != true ]]; then
+    warn "Skipped (already exists): $dest"
+    return 1
+  else
+    cp "$src" "$dest"
+    ok "$dest"
+    return 0
+  fi
+}
+```
+
+**Why copy over symlinks:**
+
+- Machine-specific customizations at the destination don't get overwritten by repo changes
+- Symlinks break when the repository directory moves
+- Explicit `--force` overwrites are a safer workflow
+
+The trade-off is running `./install.sh --force` after repo updates, but preventing "my config changed without me knowing" accidents is worth it.
+
+## Testing Your Dotfiles
+
+The most distinctive feature of this repository is `test.sh`. It verifies file placement, permissions, and even content diffs.
+
+```bash title="test.sh (diff check)"
+check_file_diff() {
+  local src="$1" dest="$2" name="$3" exclude_pattern="${4:-}"
+
+  if [[ ! -f "$src" ]] || [[ ! -f "$dest" ]]; then
+    return 0
+  fi
+
+  local src_content dest_content
+  if [[ "$exclude_pattern" == "user_section" ]]; then
+    # Exclude [user] section in Git config (personal settings)
+    src_content=$(sed '/^\[user\]/,/^$/d' "$src")
+    dest_content=$(sed '/^\[user\]/,/^$/d' "$dest")
+  else
+    src_content=$(cat "$src")
+    dest_content=$(cat "$dest")
+  fi
+
+  if diff -q <(echo "$src_content") <(echo "$dest_content") &>/dev/null; then
+    ok "$name content matches"
+  else
+    ng "$name content differs: $dest (overwrite with ./install.sh --force)"
+  fi
+}
+```
+
+The Git config `[user]` section varies per machine, so it's excluded via pattern matching. Results display as color-coded pass/fail, and it runs in CI too.
+
+Testing dotfiles may seem like overkill. But without a way to verify "did my change break other environments?", you end up checking manually anyway. Tests let you commit changes with confidence.
+
+## CLAUDE.md for AI-Assisted Maintenance
+
+This repository includes a `CLAUDE.md` file. It enables AI coding agents to understand the dotfiles structure, naming conventions, and cross-platform considerations before proposing changes.
+
+When asked to "add configuration for a new tool," the AI reads from CLAUDE.md:
+
+- Directory conventions (one directory per tool)
+- Comment style (section separators with `# ===...===`)
+- OS branching patterns (`[[ "$OSTYPE" == darwin* ]]`)
+- How to extend install.sh (using the `copy_file` function)
+
+Just as humans read READMEs, AI reads CLAUDE.md. Dotfiles — the kind of repo only you use but maintain for years — benefit enormously from AI collaboration.
+
+## Takeaways
+
+- **XDG compliance declutters your home directory** — Consolidating under `~/.config` eliminates dotfile sprawl. Zsh's `ZDOTDIR` minimizes home directory footprint to a single `~/.zshenv`.
+- **Guard OS branching with existence checks** — Avoid hardcoded paths. Use `[[ -x ... ]]` and `(( $+commands[...] ))` for safe cross-platform branching.
+- **Test scripts enable confident changes** — Verifying placement, permissions, and content diffs prevents regression when modifying configs.
+- **CLAUDE.md gives AI the context it needs** — Documenting conventions lets both humans and AI make changes under the same rules.

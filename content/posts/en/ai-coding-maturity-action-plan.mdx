@@ -1,0 +1,145 @@
+---
+title: "AI Coding Maturity Model: Practical Guide — Action Plans and Operating Cadence"
+description: "Turning the AI coding maturity model into practice. A 30-day action plan, review guideline creation, cross-team metrics bootstrapping, and quarterly review cadence."
+date: "2026-03-14"
+published: true
+featured: false
+categories: [ai-tools]
+tags:
+  ["claude-code", "ai-tools", "organization", "team-productivity", "metrics"]
+---
+
+## Challenge
+
+The [AI Coding Maturity Model](/en/blog/2026/03/13/ai-coding-maturity-model) tells you where you stand. But what do you actually do to move to the next level?
+
+A maturity model is useful as a map, but a map alone won't get you to your destination. This post covers concrete action plans for the L1→L2, L2→L3, and L3→L4 transitions, plus an operating cadence to keep the model from becoming shelfware.
+
+## L1→L2: A 30-Day Action Plan
+
+The transition from Level 1 (Ad-hoc Exploration) to Level 2 (Individual Optimization) has the highest ROI across the entire maturity model. Policy creation and tool selection are low-cost and the results show up immediately.
+
+### Week 1: Assess the Current State
+
+- Run a 5-minute survey on agent usage across the team (tool names, frequency, primary use cases, personal vs. company billing)
+- Use the results to identify 2–3 people who are already using agents effectively
+
+Skipping this step and jumping to "everyone starts at once" is a common failure mode. Understanding reality is the starting point.
+
+### Week 2: Establish Policy
+
+Work with the security team to create a usage policy. The four minimum decisions:
+
+- Approved tools list
+- Scope of code that must not be sent to agents
+- Data retention policy
+- Whether personal accounts are allowed
+
+The key is defining "you may use these within this scope" rather than imposing a blanket ban. To prevent Shadow AI — developers sending proprietary code through personal accounts — explicit permission is more effective than prohibition.
+
+### Week 3: Start the Pilot
+
+- Ask the early adopters identified in Week 1 to set up initial CLAUDE.md configurations
+- Compare PRs for similar tasks with and without agent assistance
+- Hold a 15-minute end-of-week sharing session on results and challenges
+
+The comparison doesn't need to be a rigorous experiment. Simple labeling like "this PR used an agent" vs. "this one didn't" is enough to spot trends.
+
+### Week 4: Evaluate and Decide on Rollout
+
+- Assess quantitative impact from before/after PR comparisons
+- Categorize "what was effective" vs. "what didn't work well"
+- Draft a team-wide rollout plan (tools, budget, training)
+
+You don't need a perfect setup after 30 days. The entry point for Level 2 is: "a policy exists, tools are selected, and at least a few people are consciously using agents."
+
+## L2→L3: Start with Review Guidelines
+
+The highest-impact action for the L2→L3 transition isn't building a skills library — it's **creating review guidelines for agent-generated code**.
+
+The reason is simple: code review is something everyone does every day. Skills libraries tend to split into "builders" and "consumers," but review guidelines affect the entire team. Building shared understanding of "how to evaluate agent-generated code" raises AI literacy across the board.
+
+### Review Criteria for Agent-Generated Code
+
+The following is a starting template for review guidelines. Customize it for your team's tech stack and quality standards.
+
+**Always check:**
+
+- Business logic correctness (agents frequently misunderstand requirements)
+- Edge case handling (agents tend to bias toward happy paths)
+- Security (input validation, authentication/authorization gaps)
+- Consistency with existing code (naming conventions, architectural patterns)
+
+**Watch for:**
+
+- Unnecessary dependency additions
+- Over-abstraction (agents tend to favor abstraction)
+- Test coverage (are generated tests only covering happy paths?)
+
+### After Review Guidelines Are Established
+
+Once review guidelines have taken root, move to the next steps:
+
+1. **Build a team-shared CLAUDE.md (or agent configuration)** — Convert individual tacit knowledge into explicit shared knowledge. Don't aim for perfection; start with a draft based on what effective developers are already using
+2. **Build a skills library** — Define commonly used workflows (test creation, refactoring, review, etc.) as skills under version control
+3. **Incorporate agent usage into new member onboarding** — Creating an environment where new hires can use agents from day one lets team standards propagate naturally
+
+## L3→L4: Bootstrapping Cross-Team Visibility
+
+Once intra-team standardization stabilizes, the next step is cross-team visibility. The biggest obstacle here isn't technology — it's **getting teams to agree**.
+
+When different teams use different agents and prioritize different metrics, defining "common indicators" is politically difficult. The effective approach is starting with the minimum set of shared metrics that all teams can agree on.
+
+### Minimum Shared Metrics
+
+Limit required metrics to three:
+
+- **Monthly active user rate** — measures adoption breadth
+- **Average agent cost per PR** — measures cost efficiency
+- **Review revision rate for agent-generated code** — measures quality
+
+Beyond these, each team selects optional KPIs that fit their context (spec completion rate, autonomous execution success rate, etc.).
+
+Keeping required metrics to three lowers the consensus barrier while creating a foundation for cross-team comparison.
+
+### Metrics Operation Pitfalls
+
+Defining metrics is meaningless without thoughtful operation:
+
+- **Separate comparable from non-comparable metrics** — Usage rate can be compared across teams, but cost per PR depends on task characteristics and can't be directly compared
+- **Pre-define action thresholds** — "If revision rate exceeds 30%, revisit review guidelines." Decide responses to metric changes upfront
+- **Don't let optimization become the goal** — Prevent "increase agent usage rate" from becoming a target that forces agents onto unsuitable tasks
+
+## Operating Cadence for the Maturity Model
+
+Executing action plans isn't the finish line. A model that isn't revisited regularly becomes shelfware. You need a cycle of assessing your current position and deciding the next action.
+
+### Quarterly Review
+
+Run a level assessment every three months and check for changes since the last review. Even if the level hasn't increased, evaluate improvements within the same level — for instance, a richer skills library at Level 3.
+
+Specifically, have each team lead answer the [level assessment checklist from the previous article](/en/blog/2026/03/13/ai-coding-maturity-model#level-assessment-where-is-your-team) and share results across the organization. A 15-minute self-check is sufficient.
+
+### Connecting Metrics to Maturity
+
+Use dashboard data as evidence for maturity assessments. Quantitative data like "adoption rate increased" or "cost per PR decreased" becomes input for level transition decisions. Conversely, if the level increased but metrics didn't improve, the progress may be purely formal.
+
+The three shared metrics defined in the previous section (monthly active user rate, cost per PR, review revision rate) form the foundation for this connection.
+
+### Bottom-Up Improvement Proposals
+
+Maturity improvement shouldn't be exclusively top-down. Create channels for frontline developers to propose changes when they see opportunities. The simplest approach: solicit improvement proposals during quarterly reviews.
+
+## Takeaways
+
+- **L1→L2 can start in 30 days** — A four-week cycle of assessment, policy, pilot, and evaluation gets the first step done. Don't wait for perfection.
+- **Review guidelines are the L2→L3 catalyst** — Starting standardization with an activity everyone does daily lets skills library building and onboarding improvements follow naturally.
+- **L3→L4 starts with three shared metrics** — Keep required metrics minimal to lower the consensus barrier, combining them with team-specific optional KPIs.
+- **Run the model on a quarterly cadence** — Beyond executing action plans, regular assessment connected to metrics keeps the maturity model a living framework.
+
+---
+
+_Series articles:_
+
+1. _[AI Coding Maturity Model: Measuring Where Your Dev Team Stands and What to Do Next](/en/blog/2026/03/13/ai-coding-maturity-model)_
+2. _[AI Coding Maturity Model: Practical Guide — Action Plans and Operating Cadence](/en/blog/2026/03/14/ai-coding-maturity-action-plan)_ (this article)

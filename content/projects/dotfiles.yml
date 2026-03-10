@@ -1,0 +1,15 @@
+name: "dotfiles"
+slug: dotfiles
+description: "Cross-platform dotfiles for macOS and Linux. XDG Base Directory compliant, 1Password SSH Agent integration for authentication and Git commit signing, copy-based installer, and a test script that verifies file deployment, permissions, and content diffs."
+nameJa: "dotfiles"
+descriptionJa: "macOS/Linux クロスプラットフォーム対応の dotfiles。XDG Base Directory 準拠、1Password SSH Agent による認証・Git コミット署名の統合、コピー方式のインストーラー、ファイル配置・パーミッション・内容差分を検証するテストスクリプトを搭載。"
+github: https://github.com/shinyaz/dotfiles
+techStack:
+  - Zsh
+  - Antidote
+  - Starship
+  - Ghostty
+  - 1Password
+  - Homebrew
+featured: false
+order: 2

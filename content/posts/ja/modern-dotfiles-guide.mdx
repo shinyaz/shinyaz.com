@@ -1,0 +1,252 @@
+---
+title: "クロスプラットフォーム対応のモダン dotfiles を構築する"
+description: "macOS/Linux両対応のdotfilesをXDG準拠・1Password SSH統合・テストスクリプト付きで構築した。シンボリックリンクではなくコピー方式を選んだ設計判断と、AIエージェントにメンテさせる仕組みも紹介する。"
+date: "2026-03-15"
+published: true
+featured: false
+categories: [programming]
+tags: ["dotfiles", "zsh", "git", "devops", "cli"]
+---
+
+## はじめに
+
+開発環境のセットアップに毎回何時間もかけていないだろうか。新しいマシンを手にしたとき、あるいは Dev Container を立ち上げたとき、「前の環境ではどう設定していたか」を思い出しながら手作業で再構築する — これは時間の無駄だ。
+
+dotfiles リポジトリを整備すれば、`git clone` と `./install.sh` の2コマンドで環境が再現できる。この記事では、macOS と Linux の両方で動作するモダンな dotfiles の設計と、テスト可能な構成を紹介する。実際のリポジトリは [GitHub](https://github.com/shinyaz/dotfiles) で公開しているので、あわせて参考にしてほしい。
+
+## 全体構成
+
+リポジトリは「1ディレクトリ = 1ツール」の原則で整理している。
+
+```text
+dotfiles/
+├── zsh/          # シェル設定（zshenv + zshrc）
+├── git/          # Git グローバル設定 + ignore
+├── ssh/          # SSH クライアント設定
+├── 1password/    # 1Password SSH Agent 設定
+├── antidote/     # Zsh プラグイン定義
+├── ghostty/      # Ghostty ターミナル設定
+├── starship/     # Starship プロンプト設定
+├── karabiner/    # Karabiner-Elements キーボード設定
+├── Brewfile      # Homebrew パッケージ一覧
+├── install.sh    # インストールスクリプト
+└── test.sh       # テストスクリプト
+```
+
+設定ファイルをフラットに並べる dotfiles も多いが、ツールごとにディレクトリを分けることで「何がどこにあるか」が一目で分かる。新しいツールの設定を追加するときも、ディレクトリを1つ作るだけだ。
+
+## 設計判断：XDG Base Directory 準拠
+
+dotfiles で最初に決めるべきは、ファイルの配置先だ。多くのツールがホームディレクトリ直下にドットファイルを散らかすが、[XDG Base Directory Specification](https://specifications.freedesktop.org/basedir-spec/latest/) に従えば `~/.config`、`~/.cache`、`~/.local/share` の3ディレクトリに整理できる。
+
+```bash title="zsh/zshenv"
+export XDG_CONFIG_HOME=${XDG_CONFIG_HOME:-$HOME/.config}
+export XDG_CACHE_HOME=${XDG_CACHE_HOME:-$HOME/.cache}
+export XDG_DATA_HOME=${XDG_DATA_HOME:-$HOME/.local/share}
+
+# zshrc の読み込み先を ~/.config/zsh に変更
+export ZDOTDIR=$XDG_CONFIG_HOME/zsh
+```
+
+Zsh は `ZDOTDIR` を設定すれば `.zshrc` の読み込み先を変更できる。ホームディレクトリに置くのは `~/.zshenv` の1ファイルだけで済む。Git、Ghostty、Starship なども `XDG_CONFIG_HOME` 配下にネイティブ対応している。
+
+## クロスプラットフォーム対応
+
+macOS と Linux では Homebrew のパス、1Password のソケットパス、バイナリの配置場所がすべて異なる。OS 検出で分岐するのが基本パターンだ。
+
+```bash title="zsh/zshenv"
+# Homebrew: macOS は /opt/homebrew、Linux は /home/linuxbrew/.linuxbrew
+if [[ -x /opt/homebrew/bin/brew ]]; then
+  eval "$(/opt/homebrew/bin/brew shellenv)"
+elif [[ -x /home/linuxbrew/.linuxbrew/bin/brew ]]; then
+  eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"
+fi
+```
+
+ポイントは**ハードコードしないこと**だ。パスの存在チェック (`[[ -x ... ]]`) やコマンドの存在チェック (`(( $+commands[tool] ))`) を挟むことで、ツールがインストールされていない環境でもエラーにならない。
+
+## 1Password SSH Agent で鍵管理を統一する
+
+SSH 認証と Git コミット署名を 1Password に一本化している。パスワードマネージャーに SSH 鍵を預けることで、秘密鍵ファイルを各マシンに配置する必要がなくなる。
+
+```bash title="zsh/zshenv（1Password SSH Agent 部分）"
+# ソケットパスを ~/.1password/agent.sock に統一
+if [[ "$OSTYPE" == darwin* ]]; then
+  _1p_sock="$HOME/Library/Group Containers/2BUA8C4S2C.com.1password/t/agent.sock"
+  if [[ -S "$_1p_sock" ]] && [[ ! -S "$HOME/.1password/agent.sock" ]]; then
+    mkdir -p "$HOME/.1password"
+    ln -sf "$_1p_sock" "$HOME/.1password/agent.sock"
+  fi
+fi
+
+if [[ -S "$HOME/.1password/agent.sock" ]]; then
+  export SSH_AUTH_SOCK="$HOME/.1password/agent.sock"
+fi
+```
+
+macOS では 1Password のソケットが深いパスにあるため、`~/.1password/agent.sock` にシンボリックリンクを作って統一している。Git 側は `gpg.format = ssh` と `gpg.ssh.program = op-ssh-sign` を設定するだけだ。
+
+```text title="git/config（署名関連の抜粋）"
+[commit]
+  gpgsign = true
+
+[gpg]
+  format = ssh
+
+[gpg "ssh"]
+  program = op-ssh-sign    # ~/.local/bin に配置したシンボリックリンク
+```
+
+これで `git commit` するたびに 1Password の生体認証でコミット署名が行われる。
+
+## モダンなツールスタック
+
+### Ghostty — GPU アクセラレーション対応ターミナル
+
+Ghostty は Zig で書かれた高速ターミナルエミュレータだ。設定はシンプルな key-value 形式で、Split Pane のキーバインドもネイティブ対応している。
+
+```text title="ghostty/config（抜粋）"
+font-family = "FiraCode Nerd Font"
+font-family = "BIZ UDPGothic"
+theme = Monokai Pro
+background-opacity = 0.95
+
+# Split Pane
+keybind = super+d=new_split:right
+keybind = super+shift+d=new_split:down
+```
+
+日本語フォントとして BIZ UDPGothic を指定しているのは、Nerd Font のグリフと日本語が混在する環境でのフォールバック用だ。
+
+### Starship — クロスシェル対応プロンプト
+
+Starship は Rust 製のプロンプトで、Git ステータスや言語バージョンをコンテキストに応じて表示する。不要なモジュールを無効化してプロンプトの応答速度を保つのがコツだ。
+
+```toml title="starship/starship.toml（抜粋）"
+[character]
+success_symbol = "[❯](bold green)"
+error_symbol = "[❯](bold red)"
+
+# 不要なモジュールを無効化して高速化
+[package]
+disabled = true
+
+[docker_context]
+disabled = true
+```
+
+### Antidote — 軽量 Zsh プラグインマネージャー
+
+プラグイン定義をテキストファイル1つで管理できる。
+
+```text title="antidote/zsh_plugins.txt"
+zsh-users/zsh-completions
+zsh-users/zsh-autosuggestions
+zsh-users/zsh-history-substring-search
+djui/alias-tips                          # フルコマンド入力時にエイリアスをリマインド
+zsh-users/zsh-syntax-highlighting        # 最後に読み込む必要あり
+```
+
+`zsh-syntax-highlighting` を最後に配置するのは、他のプラグインが定義したウィジェットを正しくハイライトするためだ。順序を間違えるとハイライトが効かないプラグインが出てくる。
+
+## Git 設定のこだわり
+
+Git の設定は地味だが生産性に直結する。特に効果が大きい設定をいくつか紹介する。
+
+```text title="git/config（抜粋）"
+[diff]
+  algorithm = histogram       # デフォルトの myers より賢い差分アルゴリズム
+
+[merge]
+  conflictstyle = zdiff3      # コンフリクトに共通祖先を表示
+
+[rerere]
+  enabled = true              # コンフリクト解決を記憶・再利用
+
+[rebase]
+  autoSquash = true           # fixup! / squash! コミットを自動ソート
+  autoStash = true            # rebase 前後で自動 stash/pop
+```
+
+`rerere`（Reuse Recorded Resolution）は一度解決したコンフリクトを記憶して、同じパターンが再発したときに自動適用してくれる。長期ブランチのリベースで特に威力を発揮する。
+
+## コピー方式のインストーラー
+
+dotfiles のデプロイ方式には大きく「シンボリックリンク」と「コピー」の2派がある。このリポジトリではコピー方式を採用した。
+
+```bash title="install.sh（コア部分）"
+copy_file() {
+  local src="$1" dest="$2"
+  mkdir -p "$(dirname "$dest")"
+  if [[ -f "$dest" ]] && [[ "$FORCE" != true ]]; then
+    warn "Skipped (already exists): $dest"
+    return 1
+  else
+    cp "$src" "$dest"
+    ok "$dest"
+    return 0
+  fi
+}
+```
+
+**コピー方式を選んだ理由：**
+
+- 配置先でマシン固有のカスタマイズを加えても、リポジトリの変更に巻き込まれない
+- シンボリックリンクの場合、リポジトリを移動するとリンクが壊れる
+- `--force` オプションで明示的に上書きするフローが安全
+
+トレードオフとして、リポジトリを更新した後に `./install.sh --force` を実行する手間はあるが、「いつの間にか設定が変わっていた」事故を防げる方がメリットが大きい。
+
+## dotfiles にテストを書く
+
+このリポジトリの最大の特徴は `test.sh` の存在だ。設定ファイルの配置、パーミッション、ファイル内容の差分まで検証する。
+
+```bash title="test.sh（差分チェック部分）"
+check_file_diff() {
+  local src="$1" dest="$2" name="$3" exclude_pattern="${4:-}"
+
+  if [[ ! -f "$src" ]] || [[ ! -f "$dest" ]]; then
+    return 0
+  fi
+
+  local src_content dest_content
+  if [[ "$exclude_pattern" == "user_section" ]]; then
+    # Git config の [user] セクション（個人設定）を除外して比較
+    src_content=$(sed '/^\[user\]/,/^$/d' "$src")
+    dest_content=$(sed '/^\[user\]/,/^$/d' "$dest")
+  else
+    src_content=$(cat "$src")
+    dest_content=$(cat "$dest")
+  fi
+
+  if diff -q <(echo "$src_content") <(echo "$dest_content") &>/dev/null; then
+    ok "$name content matches"
+  else
+    ng "$name content differs: $dest (overwrite with ./install.sh --force)"
+  fi
+}
+```
+
+Git config の `[user]` セクションはマシンごとに異なるため、除外パターンで比較対象から外している。テスト結果は色付きで pass/fail が表示され、CI でも実行できる。
+
+「dotfiles にテストは過剰では？」と思うかもしれない。しかし、設定の変更を加えたときに「他の環境で壊れていないか」を確認する手段がないと、結局手動で確認する羽目になる。テストがあれば変更を安心してコミットできる。
+
+## CLAUDE.md で AI エージェントにメンテさせる
+
+このリポジトリには `CLAUDE.md` を配置している。AI コーディングエージェントが dotfiles の構造・命名規約・クロスプラットフォームの注意点を理解した上で変更を提案できるようにするためだ。
+
+例えば「新しいツールの設定を追加して」と依頼したとき、AI は CLAUDE.md から以下を読み取る：
+
+- ディレクトリ構成の規約（1ディレクトリ = 1ツール）
+- コメントスタイル（セクション区切りの `# ===...===`）
+- OS 分岐のパターン（`[[ "$OSTYPE" == darwin* ]]`）
+- install.sh への追記方法（`copy_file` 関数の使い方）
+
+人間が README を読むように、AI が CLAUDE.md を読む。dotfiles のような「自分しか使わないけど長く付き合うリポジトリ」こそ、AI との協働の恩恵が大きい。
+
+## まとめ
+
+- **XDG 準拠でホームディレクトリを整理する** — `~/.config` に統一するだけでドットファイルの散乱が解消される。Zsh は `ZDOTDIR` 設定で `~/.zshenv` 1ファイルに最小化できる。
+- **OS 分岐は存在チェックで守る** — パスのハードコードを避け、`[[ -x ... ]]` や `(( $+commands[...] ))` で安全に分岐することで、どちらの OS でもエラーなく動く。
+- **テストスクリプトで変更を安心してコミットする** — 配置・パーミッション・内容差分の検証があれば、設定変更のリグレッションを防げる。
+- **CLAUDE.md で AI にコンテキストを渡す** — 規約をドキュメント化しておけば、人間も AI も同じルールで変更を加えられる。
