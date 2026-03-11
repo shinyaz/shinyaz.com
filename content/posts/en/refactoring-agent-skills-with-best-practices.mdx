@@ -1,0 +1,193 @@
+---
+title: "Refactoring Agent Skills with Official Best Practices"
+description: "Applied Anthropic's two official best practice guides to a real skill set, uncovering reserved word violations, naming issues, and missing progressive disclosure. Includes a self-check workflow using a custom analysis skill."
+date: "2026-03-16"
+published: true
+featured: false
+categories: [ai-tools]
+tags: ["claude-code", "ai-tools", "best-practices", "automation"]
+---
+
+This is a bonus edition of the series on maximizing Claude Code productivity. The main series covered [CLAUDE.md design](/en/blog/2026/03/07/claude-md-ai-coding-assistant-guide), [skill-based optimization](/en/blog/2026/03/08/optimizing-claude-code-with-skills), [meta-skills](/en/blog/2026/03/09/claude-code-meta-skills), and [team deployment](/en/blog/2026/03/10/claude-code-team-productivity). This time, I validated the skill set built throughout the series against Anthropic's official best practices — and refactored what didn't pass.
+
+## The Problem
+
+Over the course of the series, I built 13 skills and a 59-line CLAUDE.md. Everything worked fine, but one question lingered: did these actually follow Anthropic's official best practices?
+
+"Working" and "correctly designed" are different things. The official docs specify concrete recommendations for skill naming, description writing, and progressive disclosure patterns. I decided to audit my skill set against these standards.
+
+## The Two Official Best Practice Guides
+
+### Skill Creation Best Practices
+
+[platform.claude.com's skill best practices](https://platform.claude.com/docs/agents-and-tools/agent-skills/best-practices) recommends:
+
+- **`name` field**: Lowercase, numbers, hyphens only. **"anthropic" and "claude" are reserved words**
+- **`description` field**: Write in third person, include both "what it does" and "when to use it"
+- **SKILL.md under 500 lines** — split into reference files when approaching this limit (progressive disclosure)
+- **References only 1 level deep** (SKILL.md → reference.md is fine; reference.md → detail.md is not)
+- **Table of contents for reference files over 100 lines**
+- **Gerund naming recommended** (`processing-pdfs`, `analyzing-data`)
+- **Copyable checklists for workflow skills**
+
+### Claude Code Best Practices
+
+[code.claude.com's best practices](https://code.claude.com/docs/best-practices) recommends for CLAUDE.md:
+
+- For each line, ask "Would removing this cause Claude to make a mistake?" — if no, remove it
+- Move domain knowledge and occasional workflows to **skills**
+- Keep CLAUDE.md **short and human-readable**
+
+## Analysis Results: 3 Violations Found
+
+Running my own `/analyzing-agent-instructions` skill revealed three issues.
+
+### 1. Reserved Word "claude" in Name Field
+
+The most unexpected violation. Two meta-skills created in Part 3 had "claude" in their names:
+
+```text
+analyze-claude-md    ← "claude" is a reserved word
+optimize-claude-md   ← same issue
+```
+
+The official docs explicitly prohibit "anthropic" and "claude" in the `name` field. No error was thrown at development time, so I never noticed.
+
+### 2. Skills Over 100 Lines Without Reference Files
+
+```text
+til-guide:         106 lines  ← no references/
+debug-build:       112 lines  ← no references/
+create-skill:      130 lines  ← no references/
+page-guide:        144 lines  ← no references/
+analyze-claude-md: 160 lines  ← no references/
+optimize-claude-md: 114 lines ← no references/
+```
+
+Six of 13 skills exceeded 100 lines with no reference file extraction. While the official limit is 500 lines, progressive disclosure means SKILL.md should focus on overview and navigation, with details in separate files.
+
+### 3. Workflow Skills Missing Checklists
+
+The official docs recommend "checklists that Claude can copy to track progress" for complex workflows. Only 3 of 8 workflow skills had them.
+
+## The Refactoring
+
+### Resolving Reserved Words and Adopting Gerund Naming
+
+```text
+# Before
+analyze-claude-md     → targeted CLAUDE.md only
+optimize-claude-md    → targeted CLAUDE.md only
+
+# After
+analyzing-agent-instructions  → targets both CLAUDE.md and skills
+optimizing-agent-instructions → targets both CLAUDE.md and skills
+```
+
+Beyond just renaming, I expanded the scope. The old skills only analyzed CLAUDE.md. The new ones also check skill file quality — name format, description quality, progressive disclosure, and checklist presence.
+
+### Applying Progressive Disclosure
+
+Extracted details from 6 skills into reference files:
+
+```text
+til-guide/
+├── SKILL.md              # 106 → 44 lines (guidelines + workflow)
+└── references/
+    └── EXAMPLES.md       # 37 lines (topic examples, title patterns)
+
+debug-build/
+├── SKILL.md              # 112 → 44 lines (debugging workflow)
+└── references/
+    └── COMMON-ISSUES.md  # 67 lines (6 error types with solutions)
+
+page-guide/
+├── SKILL.md              # 144 → 54 lines (architecture + workflow)
+└── references/
+    └── ROUTE-TEMPLATE.md # 72 lines (route file template)
+```
+
+The principle is clear: **SKILL.md keeps the "what to do"**, **reference files hold the "how to do it"**. Claude loads SKILL.md when the skill is relevant, and only reads reference files when specific details are needed.
+
+### Kiro Adaptation Pattern
+
+Both `analyzing-agent-instructions` and `optimizing-agent-instructions` were created for both Claude Code and Kiro. Since the file paths differ, I created path-adapted versions rather than direct copies:
+
+```text
+# Claude Code version
+wc -l CLAUDE.md
+for f in .claude/skills/*/SKILL.md; do ...
+
+# Kiro version
+wc -l .kiro/steering/project.md
+for f in .kiro/skills/*/SKILL.md; do ...
+```
+
+Reference files (PATTERNS.md, BEST-PRACTICES.md) contain universal principles, so they're identical on both sides.
+
+### Adding Workflow Checklists
+
+Added copyable progress checklists to three complex workflow skills:
+
+```markdown
+Copy this checklist to track progress:
+
+    Deploy Progress:
+    - [ ] Step 1: Lint & format
+    - [ ] Step 2: Type check
+    - [ ] Step 3: Unit & component tests
+    - [ ] Step 4: Production build
+    - [ ] Step 5: E2E tests
+    - [ ] Step 6: Manual spot check
+```
+
+Claude copies this into its response and checks off items as it completes each step. This prevents skipping steps in long workflows.
+
+## After Refactoring
+
+### CLAUDE.md: 59 Lines (Unchanged)
+
+Analysis confirmed CLAUDE.md was already optimal. Zero red flags. Every line contains project-specific information the agent can't infer from code.
+
+### Skills: All 13 Between 37-89 Lines
+
+| Skill | Before | After | Reference File |
+|---|---|---|---|
+| til-guide | 106 | 44 | EXAMPLES.md (37) |
+| debug-build | 112 | 44 | COMMON-ISSUES.md (67) |
+| create-skill | 130 | 57 | TEMPLATES.md (74) |
+| page-guide | 144 | 54 | ROUTE-TEMPLATE.md (72) |
+| analyzing-agent-instructions | 160 | 57 | PATTERNS.md (131) |
+| optimizing-agent-instructions | 114 | 79 | BEST-PRACTICES.md (94) |
+| deploy-checklist | 75 | 87 | — (checklist added) |
+| sync-agent-config | 77 | 89 | — (checklist added) |
+
+## The Self-Check Loop
+
+The most valuable outcome was improving `/analyzing-agent-instructions` itself and re-running it. The updated skill includes all official best practice checks, so running it after any skill addition or change maintains quality:
+
+```text
+Analysis Progress:
+- [x] Step 1: Measure CLAUDE.md — 59 lines, Good
+- [x] Step 2: Audit skills — All under 500 lines, references OK
+- [x] Step 3: Check descriptions — 13/13 third person, what + when
+- [x] Step 4: Generate report — All pass
+```
+
+Don't settle for "it works." Periodically self-check against official standards. That's how you maintain skill quality long-term.
+
+## Takeaways
+
+- **Official best practices turn "working skills" into "correctly designed skills"** — Rules like reserved word prohibition and gerund naming are invisible without reading the docs. Silent violations are the most dangerous kind
+- **Progressive disclosure keeps SKILL.md focused on overview** — Extracting details to reference files minimizes agent context consumption. Think of SKILL.md as the "table of contents" and reference files as the "chapters"
+- **Self-check skills maintain quality continuously** — Running `/analyzing-agent-instructions` periodically catches quality degradation from skill additions and changes early
+
+---
+
+_Series articles:_
+
+1. _[Maximizing AI Coding Assistants with CLAUDE.md](/en/blog/2026/03/07/claude-md-ai-coding-assistant-guide)_
+2. _[How I Reduced CLAUDE.md by 83% with Claude Code's Skill System](/en/blog/2026/03/08/optimizing-claude-code-with-skills)_
+3. _[Claude Code Meta-Skills: Building a Self-Improving Cycle](/en/blog/2026/03/09/claude-code-meta-skills)_
+4. _[Scaling Claude Code Meta-Skills for Team Productivity](/en/blog/2026/03/10/claude-code-team-productivity)_
+5. _Refactoring Agent Skills with Official Best Practices (this article — bonus edition)_

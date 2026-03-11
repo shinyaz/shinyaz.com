@@ -7,6 +7,18 @@ Run the full pre-deployment checklist: $ARGUMENTS
 
 ## Checklist Workflow
 
+Copy this checklist to track progress:
+
+```
+Deploy Progress:
+- [ ] Step 1: Lint & format
+- [ ] Step 2: Type check
+- [ ] Step 3: Unit & component tests
+- [ ] Step 4: Production build
+- [ ] Step 5: E2E tests
+- [ ] Step 6: Manual spot check
+```
+
 Execute each step in order. Stop at the first failure and fix before continuing.
 
 1. **Lint & format**

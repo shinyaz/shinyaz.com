@@ -24,6 +24,9 @@ npm run test:e2e     # E2E tests (Playwright, requires build)
 - `/page-guide` — Static page writing guide & creation
 - `/deploy-checklist` — Pre-deployment full validation pass
 - `/sync-agent-config` — Sync config between Claude Code & Kiro
+- `/create-skill` — Create new agent skill
+- `/analyzing-agent-instructions` — Analyze CLAUDE.md and skills quality
+- `/optimizing-agent-instructions` — Optimize CLAUDE.md and skills
 
 ## Architecture
 

@@ -5,6 +5,18 @@ description: Synchronize configuration between Claude Code and Kiro IDE. Checks 
 
 Synchronize agent configuration between Claude Code and Kiro IDE.
 
+Copy this checklist to track progress:
+
+```
+Sync Progress:
+- [ ] Step 1: Detect which side changed
+- [ ] Step 2: Compare project-level config
+- [ ] Step 3: Compare skills
+- [ ] Step 4: Generate sync report
+- [ ] Step 5: Apply changes
+- [ ] Step 6: Verify
+```
+
 ## File Mapping
 
 | Claude Code | Kiro | Notes |
@@ -12,10 +24,11 @@ Synchronize agent configuration between Claude Code and Kiro IDE.
 | `CLAUDE.md` | `.kiro/steering/project.md` | Kiro version has `inclusion: always` frontmatter |
 | `.claude/skills/*/SKILL.md` | `.kiro/skills/*/SKILL.md` | Identical format (agentskills.io standard) |
 
-### Files that do NOT sync
+### Skills with path-adapted versions (not direct copy)
 
-- `.claude/skills/analyze-claude-md/` — Claude Code specific
-- `.claude/skills/optimize-claude-md/` — Claude Code specific
+- `analyzing-agent-instructions` — Each side references its own config paths (CLAUDE.md vs project.md)
+- `optimizing-agent-instructions` — Each side references its own config paths (CLAUDE.md vs project.md)
+- Reference files (`references/`) are identical and can be synced directly
 
 ## Sync Workflow
 
@@ -36,7 +49,7 @@ Synchronize agent configuration between Claude Code and Kiro IDE.
 3. **Compare skills**
    ```bash
    # List skills in each directory (excluding Claude Code specific ones)
-   diff <(ls .claude/skills/ | grep -v -E '^(analyze-claude-md|optimize-claude-md|README.md)$' | sort) <(ls .kiro/skills/ | sort)
+   diff <(ls .claude/skills/ | grep -v -E '^(README.md)$' | sort) <(ls .kiro/skills/ | sort)
    ```
    - For each shared skill, compare SKILL.md content:
    ```bash
@@ -73,4 +86,4 @@ Synchronize agent configuration between Claude Code and Kiro IDE.
 
 6. **Verify**
    - Re-run comparison to confirm sync
-   - Ensure no Claude Code specific files were copied to Kiro
+   - For `analyzing-agent-instructions` and `optimizing-agent-instructions`: compare reference files only (SKILL.md differs by design)

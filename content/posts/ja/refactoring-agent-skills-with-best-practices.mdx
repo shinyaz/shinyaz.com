@@ -1,0 +1,195 @@
+---
+title: "公式ベストプラクティスでエージェントスキルをリファクタリングする"
+description: "Anthropicの公式ベストプラクティス2つを実際のスキルセットに適用し、予約語違反・命名規則・progressive disclosureの3点を改善した。自作の分析スキルでセルフチェックする手法も紹介する。"
+date: "2026-03-16"
+published: true
+featured: false
+categories: [ai-tools]
+tags: ["claude-code", "ai-tools", "best-practices", "automation"]
+---
+
+本記事は、Claude Codeの生産性を最大化するシリーズの番外編だ。本編では[CLAUDE.mdの設計](/ja/blog/2026/03/07/claude-md-ai-coding-assistant-guide)から[スキルシステム](/ja/blog/2026/03/08/optimizing-claude-code-with-skills)、[メタスキル](/ja/blog/2026/03/09/claude-code-meta-skills)、[チーム展開](/ja/blog/2026/03/10/claude-code-team-productivity)まで紹介した。今回は本編で構築したスキルセットを、Anthropicの公式ベストプラクティスに照らして検証し、リファクタリングした記録だ。
+
+## 課題
+
+シリーズを通じて13個のスキルと59行のCLAUDE.mdを構築した。動作に問題はなかったが、一つ気になることがあった。Anthropicが公開している公式ベストプラクティスに本当に準拠しているのだろうか。
+
+「動いている」と「正しく設計されている」は別の話だ。公式ドキュメントには、スキルの命名規則、descriptionの書き方、progressive disclosureのパターンなど、具体的な推奨事項が記載されている。自分のスキルセットをこれらの基準で検証してみることにした。
+
+## 参照した公式ベストプラクティス
+
+2つの公式ドキュメントを参照した。
+
+### スキル作成のベストプラクティス
+
+[platform.claude.com のスキルベストプラクティス](https://platform.claude.com/docs/ja/agents-and-tools/agent-skills/best-practices)では、以下が推奨されている：
+
+- **`name` フィールド**: 小文字・数字・ハイフンのみ。**"anthropic" と "claude" は予約語として使用禁止**
+- **`description` フィールド**: 三人称で記述し、「何をするか」と「いつ使うか」の両方を含める
+- **SKILL.md は500行以下**に保ち、超える場合は参照ファイルに分離する（progressive disclosure）
+- **参照は1階層のみ**（SKILL.md → reference.md は可。reference.md → detail.md はNG）
+- **100行超の参照ファイルには目次**を追加する
+- **命名は動名詞形を推奨**（`processing-pdfs`、`analyzing-data`）
+- **ワークフロースキルにはコピー可能なチェックリスト**を含める
+
+### Claude Code のベストプラクティス
+
+[code.claude.com のベストプラクティス](https://code.claude.com/docs/ja/best-practices)では、CLAUDE.mdについて以下が推奨されている：
+
+- 各行について「これを削除するとClaudeが間違いを犯しますか？」と問い、Noなら削除する
+- ドメイン知識やときどきしか使わないワークフローは**スキルに移動**する
+- CLAUDE.mdは**短く人間が読める状態**に保つ
+
+## 分析結果：3つの違反を発見
+
+自作の `/analyzing-agent-instructions` スキルで分析した結果、3つの問題が見つかった。
+
+### 1. name フィールドに予約語 "claude"
+
+最も予想外だった違反がこれだ。
+
+```text
+analyze-claude-md    ← "claude" は予約語
+optimize-claude-md   ← 同上
+```
+
+第3回の記事で作成したメタスキル2つの名前に "claude" が含まれていた。公式ドキュメントでは `name` フィールドに "anthropic" と "claude" を含めることが明示的に禁止されている。開発時にはこの制約を認識しておらず、エラーにもならなかったため気づかなかった。
+
+### 2. 100行超のスキルに参照ファイル未分離
+
+```text
+til-guide:       106 lines  ← references/ なし
+debug-build:     112 lines  ← references/ なし
+create-skill:    130 lines  ← references/ なし
+page-guide:      144 lines  ← references/ なし
+analyze-claude-md: 160 lines ← references/ なし
+optimize-claude-md: 114 lines ← references/ なし
+```
+
+13スキル中6つが100行を超えており、いずれも参照ファイルを持っていなかった。公式の推奨は500行以下だが、progressive disclosureの観点では、メインのSKILL.mdは概要とナビゲーションに集中させ、詳細は参照ファイルに分離すべきだ。
+
+### 3. ワークフロースキルにチェックリスト未設置
+
+公式ベストプラクティスでは、複雑なワークフローに対して「Claudeがコピーして進捗を追跡できるチェックリスト」を推奨している。本プロジェクトの8つのワークフロースキルのうち、チェックリストを持っていたのは3つだけだった。
+
+## リファクタリングの実施
+
+### 予約語の解消と動名詞命名への移行
+
+```text
+# Before
+analyze-claude-md     → CLAUDE.md のみ対象
+optimize-claude-md    → CLAUDE.md のみ対象
+
+# After
+analyzing-agent-instructions  → CLAUDE.md + スキル両方を対象
+optimizing-agent-instructions → CLAUDE.md + スキル両方を対象
+```
+
+名前を変えるだけでなく、対象範囲も拡張した。旧スキルはCLAUDE.mdの分析・最適化のみだったが、新スキルはスキルファイル自体の品質チェックも含む。公式ベストプラクティスの全チェック項目（命名、description、progressive disclosure、チェックリスト）を分析・最適化ワークフローに組み込んだ。
+
+### progressive disclosure の適用
+
+6つのスキルから詳細を参照ファイルに分離した。
+
+```text
+til-guide/
+├── SKILL.md              # 106 → 44 lines（ガイドライン + ワークフロー）
+└── references/
+    └── EXAMPLES.md       # 37 lines（トピック例、タイトルパターン）
+
+debug-build/
+├── SKILL.md              # 112 → 44 lines（デバッグワークフロー）
+└── references/
+    └── COMMON-ISSUES.md  # 67 lines（6種のエラーと解決策）
+
+page-guide/
+├── SKILL.md              # 144 → 54 lines（アーキテクチャ + ワークフロー）
+└── references/
+    └── ROUTE-TEMPLATE.md # 72 lines（ルートファイルのテンプレート）
+```
+
+分離の原則は明確だ。**SKILL.mdには「何をすべきか」の原則とワークフロー**を残し、**参照ファイルには「具体的にどうするか」のテンプレートや例**を移動する。Claudeは関連する作業をするときにSKILL.mdを読み込み、詳細が必要なときだけ参照ファイルにアクセスする。
+
+### Kiro 適応パターン
+
+`analyzing-agent-instructions` と `optimizing-agent-instructions` は、Claude Code と Kiro の両方で使えるようにした。ただし、パスが異なるため直接コピーではなく「パス適応版」を作成した。
+
+```text
+# Claude Code 版
+wc -l CLAUDE.md
+for f in .claude/skills/*/SKILL.md; do ...
+
+# Kiro 版
+wc -l .kiro/steering/project.md
+for f in .kiro/skills/*/SKILL.md; do ...
+```
+
+参照ファイル（`references/PATTERNS.md`、`references/BEST-PRACTICES.md`）はベストプラクティスの原則そのものなので、両側で同一の内容を共有している。
+
+### ワークフローチェックリストの追加
+
+複雑な複数ステップのワークフローを持つ3つのスキルにチェックリストを追加した。
+
+```markdown
+Copy this checklist to track progress:
+
+    Deploy Progress:
+    - [ ] Step 1: Lint & format
+    - [ ] Step 2: Type check
+    - [ ] Step 3: Unit & component tests
+    - [ ] Step 4: Production build
+    - [ ] Step 5: E2E tests
+    - [ ] Step 6: Manual spot check
+```
+
+Claudeはこのチェックリストをレスポンスにコピーし、各ステップの完了時にチェックを入れていく。長いワークフローで「どこまで終わったか」を追跡でき、ステップの飛ばしを防止できる。
+
+## リファクタリング後の状態
+
+### CLAUDE.md: 59行（変更なし）
+
+分析の結果、CLAUDE.md自体はすでに最適だった。Red flagsはゼロ。全行がプロジェクト固有の情報で、エージェントが推測できない内容のみで構成されている。
+
+### スキル: 全13スキルが37-89行
+
+| スキル | Before | After | 参照ファイル |
+|---|---|---|---|
+| til-guide | 106 | 44 | EXAMPLES.md (37) |
+| debug-build | 112 | 44 | COMMON-ISSUES.md (67) |
+| create-skill | 130 | 57 | TEMPLATES.md (74) |
+| page-guide | 144 | 54 | ROUTE-TEMPLATE.md (72) |
+| analyzing-agent-instructions | 160 | 57 | PATTERNS.md (131) |
+| optimizing-agent-instructions | 114 | 79 | BEST-PRACTICES.md (94) |
+| deploy-checklist | 75 | 87 | — (チェックリスト追加) |
+| sync-agent-config | 77 | 89 | — (チェックリスト追加) |
+
+## セルフチェックの仕組み
+
+今回のリファクタリングで最も価値があったのは、`/analyzing-agent-instructions` スキル自体を改善して再実行したことだ。新しいスキルは公式ベストプラクティスの全チェック項目を含んでいるため、今後スキルを追加・変更するたびに実行すれば、品質を維持できる。
+
+```text
+Analysis Progress:
+- [x] Step 1: Measure CLAUDE.md — 59 lines, Good
+- [x] Step 2: Audit skills — All under 500 lines, references OK
+- [x] Step 3: Check descriptions — 13/13 third person, what + when
+- [x] Step 4: Generate report — All pass
+```
+
+「動いているから大丈夫」ではなく、公式基準で定期的にセルフチェックする。これがスキルの品質を長期的に維持する鍵だ。
+
+## まとめ
+
+- **公式ベストプラクティスは「動くスキル」を「正しく設計されたスキル」に変える** — 予約語の禁止や動名詞命名のような規則は、ドキュメントを読まないと気づかない。エラーにならない違反こそ危険だ
+- **progressive disclosure でSKILL.mdは概要に集中させる** — 詳細を参照ファイルに分離すると、エージェントのコンテキスト消費が必要最小限になる。SKILL.mdは「目次」、参照ファイルは「本文」と考えるとよい
+- **セルフチェックスキルで品質を継続的に維持する** — `/analyzing-agent-instructions` を定期的に実行すれば、スキルの追加や変更による品質低下を早期に検出できる
+
+---
+
+_シリーズ記事：_
+
+1. _[CLAUDE.md でAIコーディングアシスタントを最大活用する](/ja/blog/2026/03/07/claude-md-ai-coding-assistant-guide)_
+2. _[Claude CodeのCLAUDE.mdを83%削減してスキルシステムで効率化した話](/ja/blog/2026/03/08/optimizing-claude-code-with-skills)_
+3. _[Claude Codeのメタスキル：スキルを管理するスキルで実現する自己改善サイクル](/ja/blog/2026/03/09/claude-code-meta-skills)_
+4. _[Claude Codeメタスキルのチーム展開：組織全体でAI支援開発の生産性を最大化する](/ja/blog/2026/03/10/claude-code-team-productivity)_
+5. _公式ベストプラクティスでエージェントスキルをリファクタリングする（本記事・番外編）_
