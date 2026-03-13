@@ -94,6 +94,7 @@ const dictionaries = {
     },
     footer: {
       copyright: "All rights reserved.",
+      privacy: "プライバシーポリシー",
     },
   },
   en: {
@@ -183,6 +184,7 @@ const dictionaries = {
     },
     footer: {
       copyright: "All rights reserved.",
+      privacy: "Privacy Policy",
     },
   },
 } as const;

@@ -32,7 +32,7 @@ export default function sitemap(): MetadataRoute.Sitemap {
   }
 
   // Static pages: About, Projects, Uses
-  const staticPages = ["about", "projects", "uses"];
+  const staticPages = ["about", "projects", "uses", "privacy"];
   for (const page of staticPages) {
     for (const locale of locales) {
       const pageAlternates: Record<string, string> = {};
