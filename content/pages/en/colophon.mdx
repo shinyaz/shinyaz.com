@@ -1,0 +1,49 @@
+---
+title: "Colophon"
+description: "How this site is built — the tools, technologies, and design decisions behind shinyaz.com"
+---
+
+## About This Site
+
+This site is a personal tech blog where I share notes, learnings, and write-ups about cloud architecture, AI/ML, and software engineering. It is designed to be fast, minimal, and accessible.
+
+## Tech Stack
+
+| Layer | Technology |
+| --- | --- |
+| Framework | [Next.js](https://nextjs.org/) 16 (App Router) |
+| Content | MDX via [Velite](https://velite.js.org/) |
+| Styling | [Tailwind CSS](https://tailwindcss.com/) v4 |
+| Language | TypeScript (strict mode) |
+| Hosting | [Vercel](https://vercel.com/) |
+| Analytics | Vercel Analytics & Speed Insights |
+
+## Content Authoring
+
+All posts and pages are written in MDX and stored in the repository alongside the code. Velite compiles MDX at build time into type-safe data that Next.js consumes as static content. This keeps the authoring workflow simple — just Markdown with optional JSX components.
+
+Blog posts and TIL entries are available in both Japanese and English, maintained as parallel files rather than machine translations.
+
+## Design Principles
+
+- **Performance first** — Static generation wherever possible, minimal client-side JavaScript
+- **Server Components by default** — Client components only where interactivity is required
+- **No external CSS** — All styling through Tailwind utility classes
+- **Dark mode support** — System preference detection with manual toggle via next-themes
+- **Bilingual** — Full Japanese/English support with custom i18n (no external library)
+
+## Development Tools
+
+- **Editor**: Visual Studio Code, Kiro
+- **AI Assistant**: [Claude Code](https://docs.anthropic.com/en/docs/claude-code) — used extensively for development and content creation
+- **Testing**: Vitest (unit/component) + Playwright (E2E)
+- **Linting**: ESLint + Prettier
+- **CI/CD**: GitHub Actions → Vercel
+
+## Typography
+
+Body text is rendered in the system font stack for fast loading and native feel. Code blocks use a monospace system font. The site uses a minimal color palette that adapts to light and dark modes.
+
+## Source Code
+
+The source code for this site is available on [GitHub](https://github.com/shinyaz/shinyaz.com).
