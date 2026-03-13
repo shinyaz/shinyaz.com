@@ -1,0 +1,31 @@
+---
+title: "RSS feeds need visible UI links, not just <head> tags"
+description: "link rel=alternate alone is invisible to users. Adding an RSS icon and text link to the footer solved feed discoverability"
+date: "2026-03-13"
+published: true
+tags:
+  - rss
+  - nextjs
+---
+
+I had `<link rel="alternate" type="application/rss+xml">` in my Next.js site's `<head>`, but almost no one noticed the RSS feed existed.
+
+The `<link rel="alternate">` tag is for feed reader auto-discovery, not for humans. Modern browsers have removed the RSS auto-detection bar, so users must actively hunt for the feed URL.
+
+The fix was simple -- add two visible entry points in the footer:
+
+```tsx
+{/* RSS icon alongside social icons */}
+<a href={`/${locale}/feed.xml`} aria-label="RSS Feed">
+  <svg viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2" fill="none">
+    <path d="M4 11a9 9 0 0 1 9 9" />
+    <path d="M4 4a16 16 0 0 1 16 16" />
+    <circle cx="5" cy="19" r="1" />
+  </svg>
+</a>
+
+{/* Text link for extra visibility */}
+<a href={`/${locale}/feed.xml`}>RSS</a>
+```
+
+Best practice for RSS discovery: provide both `<head>` tags (for machines) and visible UI links (for humans).
