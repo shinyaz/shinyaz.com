@@ -1,0 +1,49 @@
+---
+title: "Colophon"
+description: "このサイトの構成 — shinyaz.com を支える技術とデザインの裏側"
+---
+
+## このサイトについて
+
+クラウドアーキテクチャ、AI/ML、ソフトウェアエンジニアリングに関する技術メモや学びを発信する個人ブログ。高速で、シンプルで、アクセシブルなサイトを目指している。
+
+## 技術スタック
+
+| レイヤー | 技術 |
+| --- | --- |
+| フレームワーク | [Next.js](https://nextjs.org/) 16 (App Router) |
+| コンテンツ | MDX ([Velite](https://velite.js.org/) によるビルド時変換) |
+| スタイリング | [Tailwind CSS](https://tailwindcss.com/) v4 |
+| 言語 | TypeScript (strict モード) |
+| ホスティング | [Vercel](https://vercel.com/) |
+| アナリティクス | Vercel Analytics & Speed Insights |
+
+## コンテンツの管理
+
+記事やページはすべて MDX で記述し、コードと同じリポジトリで管理している。Velite がビルド時に MDX を型安全なデータにコンパイルし、Next.js が静的コンテンツとして利用する。Markdown に JSX コンポーネントを組み合わせるシンプルなワークフローで運用している。
+
+ブログ記事と TIL は日本語・英語の両方で公開しており、機械翻訳ではなくそれぞれ個別に執筆している。
+
+## 設計方針
+
+- **パフォーマンス重視** — 可能な限り静的生成、クライアントサイド JavaScript は最小限
+- **Server Components がデフォルト** — インタラクティブな要素にのみ Client Components を使用
+- **外部 CSS なし** — スタイリングはすべて Tailwind のユーティリティクラス
+- **ダークモード対応** — next-themes によるシステム設定検出と手動切り替え
+- **バイリンガル** — 外部ライブラリを使わないカスタム i18n で日英両対応
+
+## 開発ツール
+
+- **エディタ**: Visual Studio Code, Kiro
+- **AI アシスタント**: [Claude Code](https://docs.anthropic.com/en/docs/claude-code) — 開発やコンテンツ作成に活用
+- **テスト**: Vitest（ユニット/コンポーネント）+ Playwright（E2E）
+- **リンター**: ESLint + Prettier
+- **CI/CD**: GitHub Actions → Vercel
+
+## タイポグラフィ
+
+本文にはシステムフォントスタックを採用し、高速な読み込みとネイティブな表示を実現している。コードブロックにはモノスペースのシステムフォントを使用。ライトモードとダークモードに対応したミニマルなカラーパレットを採用している。
+
+## ソースコード
+
+このサイトのソースコードは [GitHub](https://github.com/shinyaz/shinyaz.com) で公開している。

@@ -93,6 +93,13 @@ export function Footer({ locale }: FooterProps) {
         </a>
         <span className="mx-1">&middot;</span>
         <a
+          href={`/${locale}/colophon`}
+          className="hover:text-foreground transition-colors"
+        >
+          Colophon
+        </a>
+        <span className="mx-1">&middot;</span>
+        <a
           href={`/${locale}/feed.xml`}
           className="hover:text-foreground transition-colors"
         >
