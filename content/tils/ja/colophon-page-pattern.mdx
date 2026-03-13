@@ -1,0 +1,22 @@
+---
+title: "Colophonページはサイトの技術的透明性を高める"
+description: "Aboutとは別にColophonページを用意することで、サイトの技術スタックや設計方針を整理して公開できる"
+date: "2026-03-13"
+published: true
+tags:
+  - nextjs
+  - web-design
+---
+
+個人サイトにAboutページとUsesページはあったが、「このサイト自体がどう作られているか」を説明するページがなかった。
+
+Colophon（奥付）はもともと書籍の印刷情報を記載するページだが、Webでは「サイトの構築技術やデザイン方針」を紹介するページとして使われている。Aboutが「誰が」、Usesが「何を使って仕事しているか」なら、Colophonは「このサイトをどう作ったか」にフォーカスする。
+
+Next.js + Velite構成では、既存のページパターンをそのまま流用できる。
+
+```text
+content/pages/{en,ja}/colophon.mdx   # MDXコンテンツ（日英）
+src/app/[locale]/colophon/page.tsx    # ルーティング（usesページと同じ構造）
+```
+
+コンテンツはフレームワーク、ホスティング、テスト、CI/CDなどをカテゴリ別に記載し、設計方針（Server Components優先、Tailwind onlyなど）も明文化した。技術ブログとして「自分が書いているブログの裏側」を公開するのは、読者にとっても参考になる情報である。

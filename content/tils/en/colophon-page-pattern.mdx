@@ -1,0 +1,22 @@
+---
+title: "A Colophon page adds technical transparency to your site"
+description: "Separate from About and Uses, a Colophon page documents how the site itself is built — tech stack, design principles, and tooling"
+date: "2026-03-13"
+published: true
+tags:
+  - nextjs
+  - web-design
+---
+
+My site had About and Uses pages, but nothing explaining how the site itself was built.
+
+A colophon traditionally lists printing details in books. On the web, it's become a page documenting the tech stack and design decisions behind a site. If About answers "who" and Uses answers "what tools do you work with," Colophon answers "how was this site made."
+
+With a Next.js + Velite setup, the existing page pattern works out of the box:
+
+```text
+content/pages/{en,ja}/colophon.mdx   # MDX content (bilingual)
+src/app/[locale]/colophon/page.tsx    # Route (same structure as uses page)
+```
+
+The content covers framework, hosting, testing, and CI/CD by category, plus explicit design principles (Server Components by default, Tailwind-only styling, etc.). For a tech blog, showing how the blog itself is built gives readers a concrete reference architecture.
