@@ -64,6 +64,13 @@ export function Footer({ locale }: FooterProps) {
             </svg>
           </a>
         </div>
+        <a
+          href={`/${locale}/privacy`}
+          className="hover:text-foreground transition-colors"
+        >
+          {t.footer.privacy}
+        </a>
+        <span className="mx-1">&middot;</span>
         &copy; {new Date().getFullYear()} {AUTHOR}. {t.footer.copyright}
       </div>
     </footer>
