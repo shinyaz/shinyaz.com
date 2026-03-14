@@ -40,6 +40,7 @@ const dictionaries = {
       til: "TIL",
       projects: "プロジェクト",
       uses: "使用ツール",
+      now: "Now",
       about: "自己紹介",
       menu: "メニュー",
       closeMenu: "メニューを閉じる",
@@ -89,6 +90,9 @@ const dictionaries = {
     relatedPosts: {
       title: "関連記事",
     },
+    now: {
+      lastUpdated: "最終更新",
+    },
     about: {
       authorName: "田原 慎也",
     },
@@ -130,6 +134,7 @@ const dictionaries = {
       til: "TIL",
       projects: "Projects",
       uses: "Uses",
+      now: "Now",
       about: "About",
       menu: "Menu",
       closeMenu: "Close menu",
@@ -178,6 +183,9 @@ const dictionaries = {
     },
     relatedPosts: {
       title: "Related Posts",
+    },
+    now: {
+      lastUpdated: "Last updated",
     },
     about: {
       authorName: "Shinya Tahara",

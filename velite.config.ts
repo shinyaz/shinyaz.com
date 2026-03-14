@@ -51,6 +51,7 @@ const pages = defineCollection({
     .object({
       title: s.string().max(200),
       description: s.string().max(500).optional(),
+      lastUpdated: s.isodate().optional(),
       filePath: s.path(),
       body: s.mdx(),
     })

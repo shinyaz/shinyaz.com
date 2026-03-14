@@ -51,6 +51,7 @@ src/app/[locale]/                   → Pages (all under locale prefix)
 - **Japanese style** — だ/である体 for all blog posts (not ですます体)
 - **Tags** — lowercase, hyphenated (`nextjs` not `Next.js`)
 - **Lint clean** — Commit前に `/fixing-lint` でエラーゼロを確認
+- **Test clean** — コード変更時は既存テストの更新も行い `npm test` パスを確認
 - **Content writing** — Posts → `/writing-posts`, TILs → `/writing-tils`, Pages → `/writing-pages`
 
 ## Git Workflow

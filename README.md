@@ -70,6 +70,7 @@ All pages are served under a locale prefix (`[locale]` = `en` | `ja`):
 - `/[locale]/til/2026/03/07/nextjs-use-cache-directive` - TIL entry
 - `/[locale]/projects` - Projects page
 - `/[locale]/uses` - Uses page
+- `/[locale]/now` - Now page
 - `/[locale]/about` - About page
 - `/[locale]/colophon` - Colophon page
 - `/[locale]/privacy` - Privacy policy page
@@ -284,6 +285,8 @@ src/
         page.tsx               # Projects page (YAML data)
       uses/
         page.tsx               # Uses page (MDX)
+      now/
+        page.tsx               # Now page (MDX)
       blog/
         page.tsx               # Blog listing with pagination
         [year]/[month]/[day]/[slug]/

@@ -70,6 +70,7 @@ npm run test:e2e
 - `/[locale]/til/2026/03/07/nextjs-use-cache-directive` - TIL エントリ
 - `/[locale]/projects` - Projects ページ
 - `/[locale]/uses` - Uses ページ
+- `/[locale]/now` - Now ページ
 - `/[locale]/about` - About ページ
 - `/[locale]/colophon` - Colophon ページ
 - `/[locale]/privacy` - プライバシーポリシーページ
@@ -284,6 +285,8 @@ src/
         page.tsx               # Projects ページ (YAML データ)
       uses/
         page.tsx               # Uses ページ (MDX)
+      now/
+        page.tsx               # Now ページ (MDX)
       blog/
         page.tsx               # ブログ一覧 (ページネーション付き)
         [year]/[month]/[day]/[slug]/

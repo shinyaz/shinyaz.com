@@ -44,6 +44,7 @@ describe("MobileNav", () => {
     expect(screen.getByText("Blog")).toBeDefined();
     expect(screen.getByText("Projects")).toBeDefined();
     expect(screen.getByText("Uses")).toBeDefined();
+    expect(screen.getByText("Now")).toBeDefined();
     expect(screen.getByText("About")).toBeDefined();
     expect(screen.getByText("Search")).toBeDefined();
   });

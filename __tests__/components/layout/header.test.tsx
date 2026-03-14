@@ -26,6 +26,7 @@ describe("Header", () => {
     expect(screen.getByText("Blog")).toBeDefined();
     expect(screen.getByText("Projects")).toBeDefined();
     expect(screen.getByText("Uses")).toBeDefined();
+    expect(screen.getByText("Now")).toBeDefined();
     expect(screen.getByText("About")).toBeDefined();
   });
 
