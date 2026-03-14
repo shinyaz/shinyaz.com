@@ -55,6 +55,8 @@ describe("MobileNav", () => {
 
     const blogLink = screen.getByText("Blog").closest("a");
     expect(blogLink?.getAttribute("href")).toBe("/en/blog");
+    const nowLink = screen.getByText("Now").closest("a");
+    expect(nowLink?.getAttribute("href")).toBe("/en/now");
     const aboutLink = screen.getByText("About").closest("a");
     expect(aboutLink?.getAttribute("href")).toBe("/en/about");
   });
@@ -66,6 +68,8 @@ describe("MobileNav", () => {
 
     const blogLink = screen.getByText("ブログ").closest("a");
     expect(blogLink?.getAttribute("href")).toBe("/ja/blog");
+    const nowLink = screen.getByText("Now").closest("a");
+    expect(nowLink?.getAttribute("href")).toBe("/ja/now");
   });
 
   it("closes drawer on Escape key", () => {

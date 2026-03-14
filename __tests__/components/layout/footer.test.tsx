@@ -33,4 +33,43 @@ describe("Footer", () => {
     render(<Footer locale="en" />);
     expect(screen.getByText(/shinyaz/)).toBeDefined();
   });
+
+  it("renders RSS feed icon link", () => {
+    render(<Footer locale="en" />);
+    const rssIcon = screen.getByLabelText("RSS Feed");
+    expect(rssIcon).toBeDefined();
+    expect(rssIcon.getAttribute("href")).toBe("/en/feed.xml");
+  });
+
+  it("renders RSS text link", () => {
+    render(<Footer locale="en" />);
+    const rssLink = screen.getByText("RSS");
+    expect(rssLink.getAttribute("href")).toBe("/en/feed.xml");
+  });
+
+  it("renders Privacy Policy link for en locale", () => {
+    render(<Footer locale="en" />);
+    const privacyLink = screen.getByText("Privacy Policy");
+    expect(privacyLink.getAttribute("href")).toBe("/en/privacy");
+  });
+
+  it("renders Privacy Policy link for ja locale", () => {
+    render(<Footer locale="ja" />);
+    const privacyLink = screen.getByText("プライバシーポリシー");
+    expect(privacyLink.getAttribute("href")).toBe("/ja/privacy");
+  });
+
+  it("renders Colophon link", () => {
+    render(<Footer locale="en" />);
+    const colophonLink = screen.getByText("Colophon");
+    expect(colophonLink.getAttribute("href")).toBe("/en/colophon");
+  });
+
+  it("renders footer links with correct ja locale prefix", () => {
+    render(<Footer locale="ja" />);
+    const rssIcon = screen.getByLabelText("RSS Feed");
+    expect(rssIcon.getAttribute("href")).toBe("/ja/feed.xml");
+    const colophonLink = screen.getByText("Colophon");
+    expect(colophonLink.getAttribute("href")).toBe("/ja/colophon");
+  });
 });
