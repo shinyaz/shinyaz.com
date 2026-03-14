@@ -6,42 +6,45 @@ This directory contains reusable skills for Claude Code to help with common deve
 
 ### Claude Code Management
 
-#### `/optimize-claude-md` - Optimize CLAUDE.md file
-Reduces CLAUDE.md size by extracting procedures to skills.
-- Analyzes current content
-- Identifies extractable procedures
-- Creates appropriate skills
-- Updates CLAUDE.md to reference skills
+#### `/optimizing-agent-instructions` - Analyze and optimize CLAUDE.md and skills
+Analyzes and optimizes CLAUDE.md and skill files for quality and best practices.
+- Phase 1: Analyze — measure, audit, generate report
+- Phase 2: Optimize — CLAUDE.md, skills, descriptions
+- Phase 3: Sync to Kiro
+- Phase 4: Validate
 
-#### `/create-skill` - Create new skills
+#### `/creating-skill` - Create new skills
 Standardized workflow for creating new Claude Code skills.
 - Proper frontmatter setup
 - Template selection
-- disable-model-invocation guidance
 - Documentation updates
 
-#### `/analyze-claude-md` - Analyze CLAUDE.md
-Analyzes current CLAUDE.md and suggests optimizations.
-- Line count metrics
-- Identifies redundancies
-- Suggests skill extractions
-- Provides optimization report
+#### `/syncing-agent-config` - Sync config between Claude Code & Kiro
+Synchronizes configuration between Claude Code and Kiro IDE.
+- Detects drift between agent configs
+- Compares project-level config and skills
+- Generates sync reports
 
 ### Content Management
 
-#### `/post-guide` - Blog post writing guide & creation
+#### `/writing-posts` - Blog post writing guide & creation
 Writing guidelines auto-loaded when editing posts, and creation workflow when explicitly invoked.
 - Writing principles (title, description, structure, voice)
 - Bilingual conventions (ja/en)
 - Validates tags, categories, and build
 
-#### `/til-guide` - TIL writing guide & creation
+#### `/writing-tils` - TIL writing guide & creation
 Writing guidelines auto-loaded when editing TILs, and creation workflow when explicitly invoked.
 - 100-300 words, no `##` headings, 1-2 code blocks
 - Title conveys the discovery, not just the topic
 - Casual tone, search-optimized content
 
-#### `/sync-i18n` - Synchronize bilingual content
+#### `/writing-pages` - Static page writing guide & creation
+Writing guidelines for creating and editing static pages.
+- Frontmatter, route setup, bilingual parity
+- MDX content structure
+
+#### `/syncing-i18n` - Synchronize bilingual content
 Checks and reports on translation status between Japanese and English content.
 - Identifies missing translations
 - Verifies frontmatter consistency
@@ -49,28 +52,33 @@ Checks and reports on translation status between Japanese and English content.
 
 ### Development Workflow
 
-#### `/fix-lint` - Fix linting errors
+#### `/fixing-lint` - Fix linting errors
 Automatically fixes ESLint and Prettier issues.
 - Runs auto-fix first
 - Handles remaining manual fixes
 - Validates with build
 
-#### `/debug-build` - Debug build errors
+#### `/debugging-build` - Debug build errors
 Troubleshoots common Next.js build issues.
 - Google Fonts network errors
 - Velite content generation
 - TypeScript errors
 - Memory issues
 
-#### `/run-tests` - Run appropriate tests
+#### `/running-tests` - Run appropriate tests
 Executes the right test suite based on changes.
 - Unit tests for components/utilities
 - E2E tests for routing/pages
 - Skip for content-only changes
 
+#### `/deploying-app` - Pre-deployment validation
+Runs lint, type check, unit tests, build, and E2E tests in sequence.
+- Step-by-step checklist
+- Skip matrix by change type
+
 ### Component Development
 
-#### `/add-mdx-component` - Add MDX component
+#### `/adding-mdx-component` - Add MDX component
 Creates a new MDX component with proper setup.
 - Component creation and registration
 - Tailwind v4 styling
@@ -87,7 +95,6 @@ To add a new skill:
    ---
    name: your-skill
    description: What this skill does
-   disable-model-invocation: true  # Optional: prevent automatic triggering
    ---
    ```
 3. Define the workflow steps
@@ -95,11 +102,11 @@ To add a new skill:
 
 ## Best Practices
 
+- Use gerund form for naming: `processing-pdfs`, `analyzing-data`
 - Keep skills focused on a single task
 - Include validation steps
 - Add example commands
 - Document expected outcomes
-- Use `disable-model-invocation: true` for skills with side effects
 
 ## Local-Only Skills
 

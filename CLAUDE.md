@@ -14,19 +14,18 @@ npm run test:e2e     # E2E tests (Playwright, requires build)
 
 ## Skills
 
-- `/post-guide` — Blog post writing guide & creation
-- `/til-guide` — TIL writing guide & creation
-- `/fix-lint` — Fix linting errors
-- `/sync-i18n` — Check bilingual content
-- `/debug-build` — Troubleshoot builds
-- `/run-tests` — Run appropriate tests
-- `/add-mdx-component` — Add MDX component
-- `/page-guide` — Static page writing guide & creation
-- `/deploy-checklist` — Pre-deployment full validation pass
-- `/sync-agent-config` — Sync config between Claude Code & Kiro
-- `/create-skill` — Create new agent skill
-- `/analyzing-agent-instructions` — Analyze CLAUDE.md and skills quality
-- `/optimizing-agent-instructions` — Optimize CLAUDE.md and skills
+- `/writing-posts` — Blog post writing guide & creation
+- `/writing-tils` — TIL writing guide & creation
+- `/fixing-lint` — Fix linting errors
+- `/syncing-i18n` — Check bilingual content
+- `/debugging-build` — Troubleshoot builds
+- `/running-tests` — Run appropriate tests
+- `/adding-mdx-component` — Add MDX component
+- `/writing-pages` — Static page writing guide & creation
+- `/deploying-app` — Pre-deployment full validation pass
+- `/syncing-agent-config` — Sync config between Claude Code & Kiro
+- `/creating-skill` — Create new agent skill
+- `/optimizing-agent-instructions` — Analyze and optimize CLAUDE.md and skills
 
 ## Architecture
 
@@ -47,13 +46,16 @@ src/app/[locale]/                   → Pages (all under locale prefix)
 - **Server Components by default** — `"use client"` only for interactivity
 - **TypeScript strict** — No `any` without justification
 - **Tailwind only** — No custom CSS
-- **Build must pass** — No warnings allowed
-- **Bilingual parity** — ja/en features work equally
+- **Build must pass** — No warnings allowed. Build fails → `/debugging-build`
+- **Bilingual parity** — ja/en features work equally. Drift check → `/syncing-i18n`
 - **Japanese style** — だ/である体 for all blog posts (not ですます体)
 - **Tags** — lowercase, hyphenated (`nextjs` not `Next.js`)
+- **Lint clean** — Commit前に `/fixing-lint` でエラーゼロを確認
+- **Content writing** — Posts → `/writing-posts`, TILs → `/writing-tils`, Pages → `/writing-pages`
 
 ## Git Workflow
 
 - Feature branches for code: `feat/`, `fix/`
 - Direct to main for `content/` only
 - Commit prefixes: `feat:`, `fix:`, `docs:`, `test:`, `refactor:`, `chore:`
+- Pre-merge validation → `/deploying-app`
