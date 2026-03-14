@@ -3,6 +3,7 @@ import { notFound } from "next/navigation";
 import { getAllTagsIncludingTils, getPostsByTag } from "@/lib/posts";
 import { getTilsByTag } from "@/lib/tils";
 import { PostList } from "@/components/blog/post-list";
+import Link from "next/link";
 import { locales, isValidLocale, getDictionary } from "@/lib/i18n";
 import { SITE_URL } from "@/lib/constants";
 import { buildAlternateLanguages } from "@/lib/seo";
@@ -68,7 +69,13 @@ export default async function TagPage({ params }: TagPageProps) {
 
   return (
     <div className="mx-auto max-w-3xl px-4 py-6 md:py-12">
-      <header className="mb-8">
+      <Link
+        href={`/${locale}/tag`}
+        className="text-sm text-muted-foreground transition-colors hover:text-foreground"
+      >
+        &larr; {t.tag.browseAll}
+      </Link>
+      <header className="mb-8 mt-4">
         <h1 className="text-2xl font-bold tracking-tight md:text-3xl">
           {t.tag.title}: #{slug}
         </h1>

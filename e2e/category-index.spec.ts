@@ -27,6 +27,17 @@ test.describe("Category Index Page", () => {
     await expect(page.locator("h1")).toBeVisible();
   });
 
+  test("category detail page has link back to category index", async ({ page }) => {
+    await page.goto("/en/category");
+    const firstLink = page.locator("a[href*='/en/category/']").first();
+    await firstLink.click();
+    await expect(page).toHaveURL(/\/en\/category\/.+/);
+    const backLink = page.locator("a[href='/en/category']");
+    await expect(backLink).toContainText("All Categories");
+    await backLink.click();
+    await expect(page).toHaveURL(/\/en\/category$/);
+  });
+
   test("blog page has link to category index", async ({ page }) => {
     await page.goto("/en/blog");
     const categoryLink = page.locator("a[href='/en/category']");

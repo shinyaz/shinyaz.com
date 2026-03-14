@@ -27,6 +27,17 @@ test.describe("Tag Index Page", () => {
     await expect(page.locator("h1")).toBeVisible();
   });
 
+  test("tag detail page has link back to tag index", async ({ page }) => {
+    await page.goto("/en/tag");
+    const firstLink = page.locator("a[href*='/en/tag/']").first();
+    await firstLink.click();
+    await expect(page).toHaveURL(/\/en\/tag\/.+/);
+    const backLink = page.locator("a[href='/en/tag']");
+    await expect(backLink).toContainText("All Tags");
+    await backLink.click();
+    await expect(page).toHaveURL(/\/en\/tag$/);
+  });
+
   test("blog page has link to tag index", async ({ page }) => {
     await page.goto("/en/blog");
     const tagLink = page.locator("a[href='/en/tag']");
