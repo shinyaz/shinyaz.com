@@ -1,0 +1,128 @@
+---
+title: "Standardizing Agent Skill Names and Optimizing Descriptions: Consolidating 13 Skills into 12"
+description: "Unified all skill names to gerund form, added pushy trigger clauses to descriptions, and merged overlapping skills. Centralized quality standards cut maintenance overhead."
+date: "2026-03-17"
+published: true
+featured: false
+categories: [ai-tools]
+tags: ["claude-code", "ai-tools", "best-practices", "automation"]
+---
+
+In the [previous post](/en/blog/2026/03/16/refactoring-agent-skills-with-best-practices), I applied official best practices to fix reserved word violations and add progressive disclosure. This time, I tackled three remaining issues: unifying naming patterns, optimizing descriptions for better triggering, and consolidating overlapping skills.
+
+## The Problem
+
+After the first refactoring pass, three problems remained.
+
+First, **inconsistent naming patterns**. The official best practices recommend gerund form (verb + -ing), but only 2 of 13 skills used it. Seven used imperative form, four used noun phrases — three different patterns coexisting in one collection.
+
+Second, **weak description triggers**. Claude tends to undertrigger skills. Several descriptions lacked specific trigger conditions, missing opportunities for automatic invocation.
+
+Third, **duplicated quality standards**. Three skills — `creating-skill`, `analyzing-agent-instructions`, and `optimizing-agent-instructions` — each maintained their own copy of naming rules, description guidelines, and progressive disclosure criteria. Any update required syncing three locations.
+
+## Unifying All Skill Names to Gerund Form
+
+The most important naming rule in the official best practices is consistency within the collection. Three mixed patterns was a clear violation.
+
+```text
+# Before → After
+fix-lint          → fixing-lint
+sync-i18n         → syncing-i18n
+run-tests         → running-tests
+debug-build       → debugging-build
+post-guide        → writing-posts
+til-guide         → writing-tils
+page-guide        → writing-pages
+deploy-checklist  → deploying-app
+add-mdx-component → adding-mdx-component
+create-skill      → creating-skill
+sync-agent-config → syncing-agent-config
+```
+
+Eleven skills were renamed. The noun-phrase skills like `post-guide` weren't simply prefixed with `-ing` — they were renamed to accurately describe the action: `writing-posts`.
+
+The change scope was broad (directory names, `name` fields, CLAUDE.md skill list, cross-references between skills, `.kiro/skills/` sync), but it was mechanical work with no surprises.
+
+## Making Descriptions "Pushy"
+
+Whether Claude auto-selects a skill depends entirely on the `description` field in SKILL.md. The official docs note that Claude tends to undertrigger, so descriptions should be slightly aggressive.
+
+Here's the before and after for `writing-posts`:
+
+```text
+# Before (passive)
+Blog post writing guidelines and creation workflow.
+Loaded when creating, editing, or reviewing blog posts
+in content/posts/.
+
+# After (pushy)
+Blog post writing guidelines and creation workflow.
+Covers title, description, structure, voice, and bilingual
+conventions. Use when the user wants to write a new blog post,
+asks about post format or structure, edits files in
+content/posts/, or mentions writing an article. Even if the
+user just says "write about X" or gives a topic, use this
+skill to guide the post creation.
+```
+
+Three key improvements: replacing the passive "Loaded when" with an explicit "Use when ..." clause, including casual phrasing like "write about X" as trigger conditions, and ending with an active instruction to use the skill.
+
+The same pattern was applied to seven skills. `debugging-build` gained Vercel deployment failure triggers, `deploying-app` gained PR review and casual expressions like "check everything."
+
+## Adding Context Hints to CLAUDE.md
+
+Beyond description improvements, I added skill references directly into CLAUDE.md's Critical Rules and Git Workflow sections.
+
+```markdown
+# Before
+- **Build must pass** — No warnings allowed
+
+# After
+- **Build must pass** — No warnings allowed. Build fails → `/debugging-build`
+- **Bilingual parity** — ja/en features work equally. Drift check → `/syncing-i18n`
+- **Lint clean** — Run `/fixing-lint` before commits for zero errors
+```
+
+CLAUDE.md is loaded into context every session, so skill references here have high triggering reliability. In contrast, cross-references within skill bodies (e.g., `writing-tils` referencing `/writing-posts`) are only in context while that skill is active — triggering is not guaranteed. For skill chaining, CLAUDE.md is the most reliable conduit.
+
+## Consolidating 3 Skills into 2
+
+The three skills `creating-skill`, `analyzing-agent-instructions`, and `optimizing-agent-instructions` had overlapping quality criteria. Additionally, `analyzing` and `optimizing` duplicated their entire analysis phase — one produced a report, the other executed changes.
+
+The consolidation was straightforward: merge `analyzing-agent-instructions` into `optimizing-agent-instructions`, and extract shared quality criteria into `QUALITY-STANDARDS.md`.
+
+```text
+# Before: 3 skills, quality standards scattered across 3 locations
+creating-skill/SKILL.md          ← naming/description rules inline
+analyzing-agent-instructions/    ← analysis workflow + quality criteria
+  references/PATTERNS.md         ← report template + quality checklist
+optimizing-agent-instructions/   ← optimization workflow + quality criteria
+  references/BEST-PRACTICES.md   ← quality criteria + optimization patterns
+
+# After: 2 skills, quality standards in one place
+creating-skill/
+  references/QUALITY-STANDARDS.md  ← single source of truth
+  references/TEMPLATES.md          ← templates only (standards → QS ref)
+optimizing-agent-instructions/     ← analysis + optimization combined
+  references/QUALITY-STANDARDS.md  ← same file
+  references/BEST-PRACTICES.md     ← optimization patterns only
+```
+
+`QUALITY-STANDARDS.md` (140 lines) consolidates naming conventions, description standards, body content standards, progressive disclosure rules, and CLAUDE.md criteria including content flags. Quality standard updates now happen in one place.
+
+## Takeaways
+
+- **Naming consistency is evaluated across the entire collection** — Individual skill names can be valid while the collection violates the standard. Unifying to gerund form brought 12 skills into a single coherent pattern
+- **Pushy descriptions prevent undertriggering** — Claude tends not to use skills unless prompted. Adding specific trigger conditions and casual expressions to "Use when" clauses increases automatic invocation opportunities
+- **Centralize quality standards** — Maintaining the same criteria across multiple skills creates sync problems and inconsistencies. A shared reference file with pointers from each skill is the correct design
+
+---
+
+_Series articles:_
+
+1. _[Maximizing AI Coding Assistants with CLAUDE.md](/en/blog/2026/03/07/claude-md-ai-coding-assistant-guide)_
+2. _[How I Cut Claude Code's CLAUDE.md by 83% with a Skill System](/en/blog/2026/03/08/optimizing-claude-code-with-skills)_
+3. _[Claude Code Meta-Skills: Self-Improving Cycles Through Skills That Manage Skills](/en/blog/2026/03/09/claude-code-meta-skills)_
+4. _[Scaling Claude Code Meta-Skills: Maximizing AI-Assisted Development Across Teams](/en/blog/2026/03/10/claude-code-team-productivity)_
+5. _[Refactoring Agent Skills with Official Best Practices](/en/blog/2026/03/16/refactoring-agent-skills-with-best-practices) (Extra 1)_
+6. _Standardizing Agent Skill Names and Optimizing Descriptions (this article, Extra 2)_

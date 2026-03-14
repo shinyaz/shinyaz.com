@@ -1,0 +1,128 @@
+---
+title: "エージェントスキルの命名統一とdescription最適化：13スキルを12に整理した記録"
+description: "全スキル名をgerund形に統一し、descriptionにpushyなトリガー句を追加、重複する3スキルを2つに統合した。品質基準の一元化でメンテナンスコストも削減。"
+date: "2026-03-17"
+published: true
+featured: false
+categories: [ai-tools]
+tags: ["claude-code", "ai-tools", "best-practices", "automation"]
+---
+
+[前回の記事](/ja/blog/2026/03/16/refactoring-agent-skills-with-best-practices)では、公式ベストプラクティスに照らして予約語の修正やprogressive disclosureの適用を行った。今回はその続きとして、スキル名の命名パターン統一、descriptionの最適化、スキル統合の3つに取り組んだ記録だ。
+
+## 課題
+
+前回のリファクタリングで公式ベストプラクティスの主要な違反は解消したが、3つの問題が残っていた。
+
+1つ目は**命名パターンの不統一**。公式ベストプラクティスはgerund形（verb + -ing）を推奨しているが、13スキル中gerund形は2つだけ。命令形が7つ、名詞句が4つと、3パターンが混在していた。
+
+2つ目は**descriptionのトリガー不足**。Claudeはスキルを「使わなすぎる」傾向がある。descriptionに具体的なトリガー条件が欠けているスキルが複数あり、自動呼び出しの機会を逃していた。
+
+3つ目は**スキル間の重複**。`creating-skill`、`analyzing-agent-instructions`、`optimizing-agent-instructions`の3スキルが命名規則やdescriptionの品質基準を個別に記述しており、更新時に3箇所の同期が必要だった。
+
+## 全スキル名をgerund形に統一
+
+公式ベストプラクティスの命名規則で最も重要なのは「コレクション内での一貫性」だ。3パターンの混在は明確な違反だった。
+
+```text
+# Before → After
+fix-lint          → fixing-lint
+sync-i18n         → syncing-i18n
+run-tests         → running-tests
+debug-build       → debugging-build
+post-guide        → writing-posts
+til-guide         → writing-tils
+page-guide        → writing-pages
+deploy-checklist  → deploying-app
+add-mdx-component → adding-mdx-component
+create-skill      → creating-skill
+sync-agent-config → syncing-agent-config
+```
+
+11スキルをリネームした。`analyzing-agent-instructions`と`optimizing-agent-instructions`は元からgerund形だったため変更なし。名詞句だった`post-guide`系は単に`-ing`を付けるのではなく、`writing-posts`のようにスキルの動作を正確に表す名前に変更した。
+
+変更範囲はディレクトリ名、SKILL.mdの`name`フィールド、CLAUDE.mdのスキルリスト、スキル間のクロスリファレンス、`.kiro/skills/`の同期と広いが、機械的な作業なので大きな問題は起きなかった。
+
+## descriptionを「pushy」に改善
+
+Claudeがスキルを自動選択するかどうかは、SKILL.mdの`description`フィールドで決まる。公式ドキュメントでは、Claudeがスキルを使わなすぎる（undertrigger）傾向があるため、descriptionはやや積極的に書くべきとされている。
+
+改善前の`writing-posts`のdescriptionを見てみる。
+
+```text
+# Before（受動的）
+Blog post writing guidelines and creation workflow.
+Loaded when creating, editing, or reviewing blog posts
+in content/posts/.
+
+# After（pushy）
+Blog post writing guidelines and creation workflow.
+Covers title, description, structure, voice, and bilingual
+conventions. Use when the user wants to write a new blog post,
+asks about post format or structure, edits files in
+content/posts/, or mentions writing an article. Even if the
+user just says "write about X" or gives a topic, use this
+skill to guide the post creation.
+```
+
+改善のポイントは3つある。「Loaded when」という受動的表現を排除し、明示的な「Use when ...」句を追加したこと。「write about X」のようなカジュアルな表現もトリガー条件に含めたこと。そして文末に「use this skill to guide the post creation」と積極的な指示を入れたこと。
+
+同様の改善を7スキルに適用した。`debugging-build`にはVercelデプロイ失敗、`deploying-app`にはPRレビュー準備や「全部確認して」のようなカジュアル表現を追加している。
+
+## CLAUDE.mdにコンテキストヒントを追加
+
+descriptionの改善に加え、CLAUDE.md側にもスキルへの導線を追加した。Critical RulesやGit Workflowのセクションに、関連スキルへの参照を埋め込む。
+
+```markdown
+# Before
+- **Build must pass** — No warnings allowed
+
+# After
+- **Build must pass** — No warnings allowed. Build fails → `/debugging-build`
+- **Bilingual parity** — ja/en features work equally. Drift check → `/syncing-i18n`
+- **Lint clean** — Commit前に `/fixing-lint` でエラーゼロを確認
+```
+
+CLAUDE.mdは毎回コンテキストに読み込まれるため、ここからのスキル呼び出しは確実性が高い。一方、スキル本文内の別スキル参照（例：`writing-tils`から`/writing-posts`）はそのスキル実行中しかコンテキストにないため、トリガーは保証されない。スキル間の連携が必要な場合は、CLAUDE.mdに導線を書くのが現時点での最善策だ。
+
+## 3スキルを2スキルに統合
+
+`creating-skill`、`analyzing-agent-instructions`、`optimizing-agent-instructions`の3スキルには、命名規則・description基準・progressive disclosureの品質基準が重複していた。さらに、`analyzing`と`optimizing`は「分析→レポート」と「分析→実行」で分析フェーズが丸々重複していた。
+
+統合方針はシンプルだ。`analyzing-agent-instructions`を`optimizing-agent-instructions`に統合し、共通の品質基準を`QUALITY-STANDARDS.md`に切り出す。
+
+```text
+# Before: 3スキル、品質基準が3箇所に分散
+creating-skill/SKILL.md          ← 命名・description基準をインライン記述
+analyzing-agent-instructions/    ← 分析ワークフロー + 品質基準
+  references/PATTERNS.md         ← レポートテンプレート + 品質チェックリスト
+optimizing-agent-instructions/   ← 最適化ワークフロー + 品質基準
+  references/BEST-PRACTICES.md   ← 品質基準 + 最適化パターン
+
+# After: 2スキル、品質基準が1箇所に集約
+creating-skill/
+  references/QUALITY-STANDARDS.md  ← 品質基準の唯一の情報源
+  references/TEMPLATES.md          ← テンプレートのみ（基準はQSを参照）
+optimizing-agent-instructions/     ← 分析 + 最適化を統合
+  references/QUALITY-STANDARDS.md  ← 同一ファイル
+  references/BEST-PRACTICES.md     ← 最適化パターンのみ（基準はQSを参照）
+```
+
+`QUALITY-STANDARDS.md`（140行）には命名規則、description基準、body基準、progressive disclosure、CLAUDE.md基準（content flags含む）を集約した。これにより品質基準の更新が1箇所で済むようになった。
+
+## まとめ
+
+- **命名の一貫性はコレクション全体で評価する** — 個々のスキル名が正しくても、パターンが混在していれば公式基準に違反する。gerund形への統一で12スキルが均一なパターンになった
+- **descriptionは「pushy」に書くことでundertriggerを防ぐ** — Claudeはスキルを使わなすぎる傾向がある。「Use when」句に具体的なトリガー条件とカジュアルな表現を含めることで、自動呼び出しの機会が増える
+- **品質基準は一元管理する** — 複数スキルに同じ基準を個別に書くと、更新漏れと矛盾が発生する。共有リファレンスファイルに集約し、各スキルから参照する設計が正しい
+
+---
+
+_シリーズ記事：_
+
+1. _[CLAUDE.md でAIコーディングアシスタントを最大活用する](/ja/blog/2026/03/07/claude-md-ai-coding-assistant-guide)_
+2. _[Claude CodeのCLAUDE.mdを83%削減してスキルシステムで効率化した話](/ja/blog/2026/03/08/optimizing-claude-code-with-skills)_
+3. _[Claude Codeのメタスキル：スキルを管理するスキルで実現する自己改善サイクル](/ja/blog/2026/03/09/claude-code-meta-skills)_
+4. _[Claude Codeメタスキルのチーム展開：組織全体でAI支援開発の生産性を最大化する](/ja/blog/2026/03/10/claude-code-team-productivity)_
+5. _[公式ベストプラクティスでエージェントスキルをリファクタリングする](/ja/blog/2026/03/16/refactoring-agent-skills-with-best-practices)（番外編1）_
+6. _エージェントスキルの命名統一とdescription最適化（本記事・番外編2）_
