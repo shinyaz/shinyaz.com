@@ -1,21 +1,20 @@
 import type { Metadata } from "next";
 import { notFound } from "next/navigation";
-import { getAllTags, getPostsByTag, getPaginatedPosts } from "@/lib/posts";
+import { getAllTagsIncludingTils, getPostsByTag } from "@/lib/posts";
+import { getTilsByTag } from "@/lib/tils";
 import { PostList } from "@/components/blog/post-list";
-import { Pagination } from "@/components/blog/pagination";
 import { locales, isValidLocale, getDictionary } from "@/lib/i18n";
 import { SITE_URL } from "@/lib/constants";
 import { buildAlternateLanguages } from "@/lib/seo";
 
 interface TagPageProps {
   params: Promise<{ locale: string; slug: string }>;
-  searchParams: Promise<{ page?: string }>;
 }
 
 export async function generateStaticParams() {
   const allParams: { locale: string; slug: string }[] = [];
   for (const locale of locales) {
-    const tags = getAllTags(locale);
+    const tags = getAllTagsIncludingTils(locale);
     for (const tag of tags) {
       allParams.push({ locale, slug: tag });
     }
@@ -47,17 +46,25 @@ export async function generateMetadata({ params }: TagPageProps): Promise<Metada
   };
 }
 
-export default async function TagPage({ params, searchParams }: TagPageProps) {
+export default async function TagPage({ params }: TagPageProps) {
   const { locale, slug } = await params;
   if (!isValidLocale(locale)) notFound();
-  const { page: pageParam } = await searchParams;
 
   const t = getDictionary(locale);
-  const allPosts = getPostsByTag(slug, locale);
-  if (allPosts.length === 0) notFound();
+  const posts = getPostsByTag(slug, locale);
+  const tilItems = getTilsByTag(slug, locale);
 
-  const page = Math.max(1, Number(pageParam) || 1);
-  const { posts, totalPages, currentPage } = getPaginatedPosts(page, allPosts);
+  if (posts.length === 0 && tilItems.length === 0) notFound();
+
+  const tilsAsPostCards = tilItems.map((til) => ({
+    title: til.title,
+    description: til.description,
+    date: til.date,
+    permalink: til.permalink,
+    categories: [] as string[],
+    tags: til.tags,
+    metadata: { readingTime: til.metadata.readingTime },
+  }));
 
   return (
     <div className="mx-auto max-w-3xl px-4 py-6 md:py-12">
@@ -69,8 +76,22 @@ export default async function TagPage({ params, searchParams }: TagPageProps) {
           {t.tag.description.replace("{tag}", slug)}
         </p>
       </header>
-      <PostList posts={posts} locale={locale} />
-      <Pagination currentPage={currentPage} totalPages={totalPages} basePath={`/${locale}/tag/${slug}`} locale={locale} />
+      {posts.length > 0 && (
+        <section>
+          {tilItems.length > 0 && (
+            <h2 className="mb-4 text-xl font-semibold">{t.tag.postsSection}</h2>
+          )}
+          <PostList posts={posts} locale={locale} />
+        </section>
+      )}
+      {tilItems.length > 0 && (
+        <section className={posts.length > 0 ? "mt-10" : ""}>
+          {posts.length > 0 && (
+            <h2 className="mb-4 text-xl font-semibold">{t.tag.tilsSection}</h2>
+          )}
+          <PostList posts={tilsAsPostCards} locale={locale} />
+        </section>
+      )}
     </div>
   );
 }

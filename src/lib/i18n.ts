@@ -57,9 +57,11 @@ const dictionaries = {
     },
     tag: {
       title: "タグ",
-      description: "「{tag}」タグが付いた記事一覧",
+      description: "「{tag}」タグが付いたコンテンツ一覧",
       indexTitle: "タグ",
       indexDescription: "すべてのタグ一覧",
+      postsSection: "ブログ記事",
+      tilsSection: "TIL",
     },
     share: {
       label: "共有する",
@@ -153,9 +155,11 @@ const dictionaries = {
     },
     tag: {
       title: "Tag",
-      description: 'Posts tagged with "{tag}"',
+      description: 'Content tagged with "{tag}"',
       indexTitle: "Tags",
       indexDescription: "Browse all tags",
+      postsSection: "Blog Posts",
+      tilsSection: "TIL",
     },
     share: {
       label: "Share this post",
