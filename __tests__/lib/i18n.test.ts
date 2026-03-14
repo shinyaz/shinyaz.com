@@ -65,6 +65,15 @@ describe("getDictionary", () => {
     expect(en.blog.browseTags).toBeTruthy();
   });
 
+  it("has home.latestTils and home.allTils keys", () => {
+    const ja = getDictionary("ja");
+    const en = getDictionary("en");
+    expect(ja.home.latestTils).toBe("最新 TIL");
+    expect(ja.home.allTils).toBe("すべての TIL");
+    expect(en.home.latestTils).toBe("Latest TILs");
+    expect(en.home.allTils).toBe("All TILs");
+  });
+
   it("has footer section with privacy key", () => {
     const ja = getDictionary("ja");
     const en = getDictionary("en");

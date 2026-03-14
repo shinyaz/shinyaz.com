@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import { getPublishedPosts, getFeaturedPosts } from "@/lib/posts";
+import { getPublishedTils } from "@/lib/tils";
 import { PostList } from "@/components/blog/post-list";
 import { FeaturedPostCard } from "@/components/blog/featured-post-card";
 import { ProfileCard } from "@/components/common/profile-card";
@@ -31,6 +32,7 @@ export default async function HomePage({ params }: HomePageProps) {
   const t = getDictionary(locale);
   const featuredPosts = getFeaturedPosts(locale);
   const posts = getPublishedPosts(locale).slice(0, 5);
+  const latestTils = getPublishedTils(locale).slice(0, 5);
 
   return (
     <div className="mx-auto max-w-3xl px-4 py-6 md:py-12">
@@ -60,6 +62,28 @@ export default async function HomePage({ params }: HomePageProps) {
         </div>
         <PostList posts={posts} locale={locale} />
       </section>
+      {latestTils.length > 0 && (
+        <section className="mt-8 md:mt-12">
+          <div className="flex items-center justify-between mb-4">
+            <h2 className="text-xl font-semibold">{t.home.latestTils}</h2>
+            <Link href={`/${locale}/til`} className="text-sm text-muted-foreground hover:text-foreground transition-colors">
+              {t.home.allTils} &rarr;
+            </Link>
+          </div>
+          <PostList
+            posts={latestTils.map((til) => ({
+              title: til.title,
+              description: til.description,
+              date: til.date,
+              permalink: til.permalink,
+              categories: [] as string[],
+              tags: til.tags,
+              metadata: { readingTime: til.metadata.readingTime },
+            }))}
+            locale={locale}
+          />
+        </section>
+      )}
     </div>
   );
 }
