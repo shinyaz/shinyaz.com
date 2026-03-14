@@ -3,7 +3,8 @@ import { notFound } from "next/navigation";
 import { getPostsByCategory, getAllCategories, getCategoryBySlug, getPaginatedPosts, getCategoryName, getCategoryDescription } from "@/lib/posts";
 import { PostList } from "@/components/blog/post-list";
 import { Pagination } from "@/components/blog/pagination";
-import { locales, isValidLocale } from "@/lib/i18n";
+import Link from "next/link";
+import { locales, isValidLocale, getDictionary } from "@/lib/i18n";
 import { SITE_URL } from "@/lib/constants";
 import { buildAlternateLanguages } from "@/lib/seo";
 
@@ -62,9 +63,17 @@ export default async function CategoryPage({ params, searchParams }: CategoryPag
   const page = Math.max(1, Number(pageParam) || 1);
   const { posts, totalPages, currentPage } = getPaginatedPosts(page, allPosts);
 
+  const t = getDictionary(locale);
+
   return (
     <div className="mx-auto max-w-3xl px-4 py-6 md:py-12">
-      <header className="mb-8">
+      <Link
+        href={`/${locale}/category`}
+        className="text-sm text-muted-foreground transition-colors hover:text-foreground"
+      >
+        &larr; {t.category.browseAll}
+      </Link>
+      <header className="mb-8 mt-4">
         <h1 className="text-2xl font-bold tracking-tight md:text-3xl">{name}</h1>
         {description && (
           <p className="mt-2 text-muted-foreground">{description}</p>

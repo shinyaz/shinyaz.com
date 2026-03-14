@@ -54,6 +54,7 @@ const dictionaries = {
       title: "カテゴリ",
       description: "すべてのカテゴリ一覧",
       postCount: "{count}件の記事",
+      browseAll: "すべてのカテゴリ",
     },
     tag: {
       title: "タグ",
@@ -62,6 +63,7 @@ const dictionaries = {
       indexDescription: "すべてのタグ一覧",
       postsSection: "ブログ記事",
       tilsSection: "TIL",
+      browseAll: "すべてのタグ",
     },
     share: {
       label: "共有する",
@@ -152,6 +154,7 @@ const dictionaries = {
       title: "Categories",
       description: "Browse all categories",
       postCount: "{count} post(s)",
+      browseAll: "All Categories",
     },
     tag: {
       title: "Tag",
@@ -160,6 +163,7 @@ const dictionaries = {
       indexDescription: "Browse all tags",
       postsSection: "Blog Posts",
       tilsSection: "TIL",
+      browseAll: "All Tags",
     },
     share: {
       label: "Share this post",
