@@ -71,6 +71,8 @@ All pages are served under a locale prefix (`[locale]` = `en` | `ja`):
 - `/[locale]/projects` - Projects page
 - `/[locale]/uses` - Uses page
 - `/[locale]/about` - About page
+- `/[locale]/colophon` - Colophon page
+- `/[locale]/privacy` - Privacy policy page
 - `/[locale]/search` - Search page
 - `/[locale]/category` - Category index
 - `/[locale]/tag` - Tag index
@@ -108,9 +110,13 @@ content/tils/
 content/pages/
   en/
     about.mdx
+    colophon.mdx
+    privacy.mdx
     uses.mdx
   ja/
     about.mdx
+    colophon.mdx
+    privacy.mdx
     uses.mdx
 ```
 
@@ -270,6 +276,10 @@ src/
         route.ts               # Atom 1.0 feed (SSG)
       about/
         page.tsx               # About page (MDX)
+      colophon/
+        page.tsx               # Colophon page (MDX)
+      privacy/
+        page.tsx               # Privacy policy page (MDX)
       projects/
         page.tsx               # Projects page (YAML data)
       uses/

@@ -71,6 +71,8 @@ npm run test:e2e
 - `/[locale]/projects` - Projects ページ
 - `/[locale]/uses` - Uses ページ
 - `/[locale]/about` - About ページ
+- `/[locale]/colophon` - Colophon ページ
+- `/[locale]/privacy` - プライバシーポリシーページ
 - `/[locale]/search` - 検索ページ
 - `/[locale]/category` - カテゴリ一覧
 - `/[locale]/tag` - タグ一覧
@@ -108,9 +110,13 @@ content/tils/
 content/pages/
   en/
     about.mdx
+    colophon.mdx
+    privacy.mdx
     uses.mdx
   ja/
     about.mdx
+    colophon.mdx
+    privacy.mdx
     uses.mdx
 ```
 
@@ -270,6 +276,10 @@ src/
         route.ts               # Atom 1.0 フィード (SSG)
       about/
         page.tsx               # About ページ (MDX)
+      colophon/
+        page.tsx               # Colophon ページ (MDX)
+      privacy/
+        page.tsx               # プライバシーポリシーページ (MDX)
       projects/
         page.tsx               # Projects ページ (YAML データ)
       uses/
