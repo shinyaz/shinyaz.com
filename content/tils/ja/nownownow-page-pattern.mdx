@@ -1,0 +1,28 @@
+---
+title: "nownownow.com の Now ページは About ページの補完として優秀だ"
+description: "Now ページは「今やっていること」を載せるページ。lastUpdated を Velite スキーマに追加し、Intl.DateTimeFormat で locale 対応の日付表示を実現した。"
+date: "2026-03-14"
+published: true
+tags:
+  - web-design
+---
+
+About ページや Uses ページは知っていたが、[nownownow.com](https://nownownow.com) が提唱する「Now ページ」という概念は知らなかった。About が「自分が誰か」を伝えるのに対し、Now は「今何をやっているか」を伝える。ブログ記事のようにイベント単位ではなく、定期的に更新するスタイルだ。
+
+実装のポイントは Velite の Page スキーマに `lastUpdated` を追加したことだ。
+
+```typescript
+lastUpdated: s.isodate().optional()
+```
+
+`optional` にすることで既存ページ（About、Uses、Colophon）に影響なし。ルート側では `Intl.DateTimeFormat` を使えばライブラリ不要で locale 対応の日付フォーマットが手に入る。
+
+```tsx
+{new Intl.DateTimeFormat(locale, {
+  year: "numeric",
+  month: "long",
+  day: "numeric",
+}).format(new Date(page.lastUpdated))}
+```
+
+英語なら "March 14, 2026"、日本語なら "2026年3月14日" と自動で出力される。
