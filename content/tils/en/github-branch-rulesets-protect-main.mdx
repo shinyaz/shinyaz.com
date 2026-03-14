@@ -1,0 +1,27 @@
+---
+title: "GitHub Branch Rulesets can protect main from force push and deletion without requiring PRs"
+description: "GitHub Rulesets let you block force pushes and branch deletion on main without requiring pull requests. Perfect for personal repos where you push content directly to main."
+date: "2026-03-14"
+published: true
+tags:
+  - github
+  - git
+---
+
+GitHub started showing a "Your main branch isn't protected" warning in repository settings. The old Branch Protection Rules still work, but **Rulesets** are now the recommended approach.
+
+For personal repos where code changes go through PRs but `content/` gets pushed directly to main, requiring PRs would block the content workflow. Rulesets let you pick only the rules you need.
+
+Go to **Settings → Rules → Rulesets → New branch ruleset** and configure:
+
+```text
+Ruleset name:       Protect main
+Enforcement status: Active
+Target branches:    Include default branch
+Block force pushes: ON
+Restrict deletions: ON
+```
+
+Leave everything else (Require PR, Require status checks, etc.) OFF. This prevents accidents like `git push --force` or `git branch -d main` while allowing normal pushes.
+
+Unlike the older Branch Protection Rules, Rulesets can combine multiple rules and apply across an entire Organization. For personal repos, starting with just force push protection + deletion protection is the easiest first step.

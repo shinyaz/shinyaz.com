@@ -1,0 +1,27 @@
+---
+title: "GitHub Branch Rulesets で main を force push と削除から守れる"
+description: "GitHub の Branch Rulesets を使えば、PR 必須にせずに main ブランチへの force push と削除だけを禁止できる。個人リポジトリで content/ を直接 push する運用と両立可能だ。"
+date: "2026-03-14"
+published: true
+tags:
+  - github
+  - git
+---
+
+GitHub リポジトリの Settings を開くと「Your main branch isn't protected」という警告が表示されるようになった。Branch Protection Rules は以前からあったが、今は **Rulesets** という新しい仕組みが推奨されている。
+
+個人リポジトリで「コード変更は PR 経由、`content/` は main に直接 push」という運用をしている場合、PR 必須にすると content の直接 push まで弾かれてしまう。Rulesets なら必要なルールだけを選べる。
+
+**Settings → Rules → Rulesets → New branch ruleset** から以下を設定するだけだ。
+
+```text
+Ruleset name:       Protect main
+Enforcement status: Active
+Target branches:    Include default branch
+Block force pushes: ON
+Restrict deletions: ON
+```
+
+他の項目（Require PR、Require status checks 等）は OFF のまま。これで `git push --force` や `git branch -d main` のような事故は防ぎつつ、通常の push はそのまま通る。
+
+旧来の Branch Protection Rules と違い、Rulesets は複数ルールを組み合わせたり Organization 全体に適用したりできる柔軟さがある。個人リポジトリでもまず force push 禁止 + 削除禁止から始めるのが手軽でおすすめだ。
