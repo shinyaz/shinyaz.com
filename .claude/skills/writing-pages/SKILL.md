@@ -50,5 +50,8 @@ Generated from file path: `/{locale}/{slug}`
 - [ ] `generateMetadata` sets title, description, OG, alternates
 - [ ] `buildAlternateLanguages` used for hreflang
 - [ ] Build passes without warnings
+- [ ] If nav link added → update `header.test.tsx` and `mobile-nav.test.tsx`
+- [ ] If i18n keys added → update `i18n.test.ts`
+- [ ] Run `npm test` to verify all existing tests pass
 
 See [route template and existing pages](references/ROUTE-TEMPLATE.md).

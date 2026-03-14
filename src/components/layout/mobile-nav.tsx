@@ -44,6 +44,7 @@ export function MobileNav({ locale, t }: MobileNavProps) {
     { href: `/${locale}/til`, label: t.nav.til },
     { href: `/${locale}/projects`, label: t.nav.projects },
     { href: `/${locale}/uses`, label: t.nav.uses },
+    { href: `/${locale}/now`, label: t.nav.now },
     { href: `/${locale}/about`, label: t.nav.about },
     { href: `/${locale}/search`, label: t.search.title },
   ];

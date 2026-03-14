@@ -64,6 +64,20 @@ describe("getDictionary", () => {
     expect(en.blog.browseCategories).toBeTruthy();
     expect(en.blog.browseTags).toBeTruthy();
   });
+
+  it("has now section with lastUpdated key", () => {
+    const ja = getDictionary("ja");
+    const en = getDictionary("en");
+    expect(ja.now.lastUpdated).toBe("最終更新");
+    expect(en.now.lastUpdated).toBe("Last updated");
+  });
+
+  it("has nav.now key", () => {
+    const ja = getDictionary("ja");
+    const en = getDictionary("en");
+    expect(ja.nav.now).toBe("Now");
+    expect(en.nav.now).toBe("Now");
+  });
 });
 
 describe("locales and defaultLocale", () => {
