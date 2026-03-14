@@ -1,0 +1,29 @@
+---
+title: "タグページがブログ記事しか見ていなくて TIL 専用タグが 404 になっていた"
+description: "タグページの generateStaticParams と表示ロジックがブログ記事のみを参照していたため、TIL にしか存在しないタグが 404 になっていた。getAllTags に TIL のタグも統合して解決した。"
+date: "2026-03-14"
+published: true
+tags:
+  - nextjs
+  - velite
+---
+
+タグページで TIL 専用のタグ（ブログ記事には使われていないタグ）にアクセスすると 404 になることに気づいた。
+
+原因はシンプルで、`getAllTags` がブログ記事（`posts`）だけを見ていたからだ。`generateStaticParams` もこの関数を使っていたので、TIL にしか存在しないタグのページはそもそも生成されていなかった。
+
+```ts
+// Before: ブログ記事のタグしか返さない
+export function getAllTags(locale?: Locale) {
+  const publishedPosts = getPublishedPosts(locale);
+  const tagSet = new Set<string>();
+  for (const post of publishedPosts) {
+    for (const tag of post.tags) tagSet.add(tag);
+  }
+  return Array.from(tagSet).sort();
+}
+```
+
+修正は `tils` もインポートして両方のタグを統合する `getAllTagsIncludingTils` を追加した。タグ詳細ページでもブログ記事と TIL を両方取得し、両方ある場合はセクション分けして表示するようにした。
+
+Velite で複数のコンテンツコレクション（`posts`, `tils`）を扱う場合、タグやカテゴリの集約関数がどのコレクションを対象にしているか意識しないと、こういう抜けが起きる。コンテンツタイプを追加したときはタグ・カテゴリ周りの関数も確認すべきだ。

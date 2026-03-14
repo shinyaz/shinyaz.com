@@ -1,0 +1,29 @@
+---
+title: "Tag pages only looked at blog posts, causing 404 for TIL-only tags"
+description: "Tag pages used getAllTags which only queried blog posts, so tags exclusive to TILs returned 404. Fixed by merging TIL tags into the tag aggregation function."
+date: "2026-03-14"
+published: true
+tags:
+  - nextjs
+  - velite
+---
+
+I noticed that visiting a tag page for a TIL-only tag (one not used by any blog post) returned a 404.
+
+The cause was straightforward: `getAllTags` only looked at blog posts. Since `generateStaticParams` used this function, pages for TIL-exclusive tags were never generated in the first place.
+
+```ts
+// Before: only returns tags from blog posts
+export function getAllTags(locale?: Locale) {
+  const publishedPosts = getPublishedPosts(locale);
+  const tagSet = new Set<string>();
+  for (const post of publishedPosts) {
+    for (const tag of post.tags) tagSet.add(tag);
+  }
+  return Array.from(tagSet).sort();
+}
+```
+
+The fix was adding `getAllTagsIncludingTils` that imports `tils` and merges tags from both collections. The tag detail page now fetches both blog posts and TILs, showing them in separate sections when both exist.
+
+When using Velite with multiple content collections (`posts`, `tils`), tag and category aggregation functions can silently ignore some collections. Whenever you add a new content type, double-check that shared features like tags still work across all of them.
