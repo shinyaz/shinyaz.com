@@ -1,7 +1,8 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 import { notFound } from "next/navigation";
-import { getAllTags, getPostsByTag } from "@/lib/posts";
+import { getAllTagsIncludingTils, getPostsByTag } from "@/lib/posts";
+import { getTilsByTag } from "@/lib/tils";
 import { locales, isValidLocale, getDictionary } from "@/lib/i18n";
 import { SITE_URL } from "@/lib/constants";
 import { buildAlternateLanguages } from "@/lib/seo";
@@ -38,7 +39,7 @@ export default async function TagIndexPage({ params }: TagIndexPageProps) {
   const { locale } = await params;
   if (!isValidLocale(locale)) notFound();
   const t = getDictionary(locale);
-  const tags = getAllTags(locale);
+  const tags = getAllTagsIncludingTils(locale);
 
   return (
     <div className="mx-auto max-w-3xl px-4 py-6 md:py-12">
@@ -48,7 +49,7 @@ export default async function TagIndexPage({ params }: TagIndexPageProps) {
       </header>
       <div className="flex flex-wrap gap-3">
         {tags.map((tag) => {
-          const postCount = getPostsByTag(tag, locale).length;
+          const count = getPostsByTag(tag, locale).length + getTilsByTag(tag, locale).length;
           return (
             <Link
               key={tag}
@@ -56,7 +57,7 @@ export default async function TagIndexPage({ params }: TagIndexPageProps) {
               className="inline-flex items-center gap-1.5 rounded-full border border-border px-3 py-1.5 text-sm text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
             >
               #{tag}
-              <span className="text-xs">({postCount})</span>
+              <span className="text-xs">({count})</span>
             </Link>
           );
         })}

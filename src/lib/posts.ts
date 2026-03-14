@@ -1,4 +1,4 @@
-import { posts, categories, pages, projects } from "#site/content";
+import { posts, categories, pages, projects, tils } from "#site/content";
 import type { Post } from "#site/content";
 import { POSTS_PER_PAGE } from "./constants";
 import type { Locale } from "./i18n";
@@ -60,6 +60,25 @@ export function getAllTags(locale?: Locale) {
   const tagSet = new Set<string>();
   for (const post of publishedPosts) {
     for (const tag of post.tags) {
+      tagSet.add(tag);
+    }
+  }
+  return Array.from(tagSet).sort();
+}
+
+export function getAllTagsIncludingTils(locale?: Locale) {
+  const tagSet = new Set<string>();
+  const publishedPosts = getPublishedPosts(locale);
+  for (const post of publishedPosts) {
+    for (const tag of post.tags) {
+      tagSet.add(tag);
+    }
+  }
+  const publishedTils = tils.filter(
+    (til) => til.published && (locale == null || til.locale === locale)
+  );
+  for (const til of publishedTils) {
+    for (const tag of til.tags) {
       tagSet.add(tag);
     }
   }

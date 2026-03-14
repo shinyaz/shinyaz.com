@@ -6,6 +6,7 @@ import {
   getPostsByTag,
   getPaginatedPosts,
   getAllTags,
+  getAllTagsIncludingTils,
   getCategoryName,
   getCategoryDescription,
   getProjectName,
@@ -149,6 +150,26 @@ describe("getAllTags", () => {
     const jaTags = getAllTags("ja");
     expect(enTags).toContain("typescript");
     expect(jaTags).toContain("nextjs");
+  });
+});
+
+describe("getAllTagsIncludingTils", () => {
+  it("returns unique sorted tags including TIL tags", () => {
+    const tags = getAllTagsIncludingTils();
+    expect(tags.length).toBeGreaterThan(0);
+    for (let i = 1; i < tags.length; i++) {
+      expect(tags[i - 1].localeCompare(tags[i])).toBeLessThanOrEqual(0);
+    }
+    expect(new Set(tags).size).toBe(tags.length);
+  });
+
+  it("includes tags from both posts and TILs", () => {
+    const postOnlyTags = getAllTags();
+    const allTags = getAllTagsIncludingTils();
+    expect(allTags.length).toBeGreaterThanOrEqual(postOnlyTags.length);
+    for (const tag of postOnlyTags) {
+      expect(allTags).toContain(tag);
+    }
   });
 });
 
