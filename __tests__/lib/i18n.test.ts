@@ -65,6 +65,13 @@ describe("getDictionary", () => {
     expect(en.blog.browseTags).toBeTruthy();
   });
 
+  it("has footer section with privacy key", () => {
+    const ja = getDictionary("ja");
+    const en = getDictionary("en");
+    expect(ja.footer.privacy).toBe("プライバシーポリシー");
+    expect(en.footer.privacy).toBe("Privacy Policy");
+  });
+
   it("has now section with lastUpdated key", () => {
     const ja = getDictionary("ja");
     const en = getDictionary("en");
