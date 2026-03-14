@@ -17,6 +17,8 @@ const dictionaries = {
       featuredPosts: "注目記事",
       latestPosts: "最新記事",
       allPosts: "すべての記事",
+      latestTils: "最新 TIL",
+      allTils: "すべての TIL",
       aboutRole: "ソリューションアーキテクト @ AWS",
       aboutBio:
         "AWS ソリューションアーキテクトとして金融業界のお客様を中心に技術支援を行っています。クラウドアーキテクチャや AI/ML に関する学びをこのブログで発信しています。",
@@ -111,6 +113,8 @@ const dictionaries = {
       featuredPosts: "Featured",
       latestPosts: "Latest Posts",
       allPosts: "All Posts",
+      latestTils: "Latest TILs",
+      allTils: "All TILs",
       aboutRole: "Solutions Architect @ AWS",
       aboutBio:
         "I'm a Solutions Architect at AWS, providing technical guidance primarily to financial industry customers. I share learnings about cloud architecture and AI/ML on this blog.",
