@@ -1,0 +1,287 @@
+---
+title: "Set Up EKS ArgoCD Capability with eksctl — One YAML File for a GitOps Environment"
+description: "Create an ArgoCD Capability using eksctl's declarative YAML config and deploy a sample app. Covers the differences from AWS CLI and CloudFormation behavior."
+date: "2026-03-22"
+published: true
+featured: false
+categories: [infrastructure]
+tags: ["aws", "eks", "kubernetes", "argocd", "gitops", "eksctl", "devops"]
+---
+
+## Introduction
+
+In the [previous post](/en/posts/eks-argocd-capability), I set up EKS ArgoCD Capability using AWS CLI. The CLI gives fine-grained control, but the inline JSON parameters get unwieldy.
+
+With eksctl, the same setup fits in a single YAML config file. Cluster configuration and Capability settings live in the same format, making the overall IaC picture cleaner.
+
+This post walks through adding ArgoCD Capability to an existing EKS Auto Mode cluster via eksctl and deploying a sample application.
+
+## Prerequisites
+
+- An EKS Auto Mode cluster up and running (see [cluster setup guide](/en/posts/eks-auto-mode-cluster-setup))
+- eksctl v0.220.0+ (`eksctl version` to verify)
+- AWS CLI v2.12.3+
+- kubectl configured
+- AWS IAM Identity Center enabled
+
+I'm working with `sandbox-cluster` (v1.32, ap-northeast-1).
+
+## Step 1: Create the IAM Capability Role
+
+Same as the [previous post](/en/posts/eks-argocd-capability)—create a [dedicated IAM role](https://docs.aws.amazon.com/eks/latest/userguide/capability-role.html) with the Capabilities trust policy.
+
+```bash
+cat > argocd-trust-policy.json << 'EOF'
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Principal": {
+        "Service": "capabilities.eks.amazonaws.com"
+      },
+      "Action": [
+        "sts:AssumeRole",
+        "sts:TagSession"
+      ]
+    }
+  ]
+}
+EOF
+
+aws iam create-role \
+  --role-name ArgoCDCapabilityRole \
+  --assume-role-policy-document file://argocd-trust-policy.json
+```
+
+## Step 2: Get Identity Center Information
+
+Retrieve the instance ARN, Identity Store ID, and user ID. See the [previous post](/en/posts/eks-argocd-capability) for how to identify the Identity Center home region.
+
+```bash
+aws sso-admin list-instances \
+  --query 'Instances[0].{InstanceArn:InstanceArn,IdentityStoreId:IdentityStoreId}' \
+  --output table
+
+aws identitystore list-users \
+  --identity-store-id d-1234567890 \
+  --query 'Users[].{UserName:UserName,UserId:UserId}' \
+  --output table
+```
+
+## Step 3: Create ArgoCD Capability with eksctl
+
+This is the key difference from the CLI approach. With eksctl, you define the Capability declaratively in a YAML file.
+
+```yaml
+# argocd-capability.yaml
+apiVersion: eksctl.io/v1alpha5
+kind: ClusterConfig
+
+metadata:
+  name: sandbox-cluster
+  region: ap-northeast-1
+
+capabilities:
+  - name: argocd
+    type: ARGOCD
+    roleArn: arn:aws:iam::111122223333:role/ArgoCDCapabilityRole
+    deletePropagationPolicy: RETAIN
+    configuration:
+      argocd:
+        awsIdc:
+          idcInstanceArn: arn:aws:sso:::instance/ssoins-1234567890abcdef
+          idcRegion: us-east-1
+        rbacRoleMappings:
+          - role: ADMIN
+            identities:
+              - id: a1b2c3d4-5678-90ab-cdef-EXAMPLE11111
+                type: SSO_USER
+```
+
+Create the capability:
+
+```bash
+eksctl create capability -f argocd-capability.yaml
+```
+
+Under the hood, eksctl creates a CloudFormation stack to manage the Capability. In my environment, it took about 4 minutes to complete.
+
+```text
+2026-03-15 19:26:59 [ℹ]  creating capability argocd
+2026-03-15 19:27:01 [ℹ]  deploying stack "eksctl-sandbox-cluster-capability-..."
+2026-03-15 19:27:01 [ℹ]  waiting for CloudFormation stack "eksctl-sandbox-cluster-capability-..."
+2026-03-15 19:31:15 [ℹ]  waiting for CloudFormation stack "eksctl-sandbox-cluster-capability-..."
+```
+
+Check status with eksctl:
+
+```bash
+eksctl get capability --cluster sandbox-cluster --name argocd
+```
+
+```text
+NAME    TYPE    STATUS  VERSION
+argocd  ARGOCD  ACTIVE  3.1.8-eks-1
+```
+
+Once `ACTIVE`, you're good to go.
+
+## Step 4: Verify Installation
+
+### CRDs
+
+```bash
+kubectl api-resources | grep argoproj.io
+```
+
+```text
+applications       app,apps       argoproj.io/v1alpha1   true   Application
+applicationsets    appset,appsets argoproj.io/v1alpha1   true   ApplicationSet
+appprojects        appproj        argoproj.io/v1alpha1   true   AppProject
+```
+
+### ArgoCD UI
+
+Open the `serverUrl` (from `aws eks describe-capability`) in a browser. It redirects to Identity Center login. After SSO authentication, the ArgoCD dashboard loaded successfully.
+
+## Step 5: Register Target Cluster
+
+Same as the [previous post](/en/posts/eks-argocd-capability)—associate an access policy and register the cluster.
+
+```bash
+aws eks associate-access-policy \
+  --region ap-northeast-1 \
+  --cluster-name sandbox-cluster \
+  --principal-arn arn:aws:iam::111122223333:role/ArgoCDCapabilityRole \
+  --policy-arn arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy \
+  --access-scope type=cluster
+```
+
+Register the cluster as a Secret. The `server` field uses the EKS cluster ARN, not the API server URL.
+
+```yaml
+# local-cluster.yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: local-cluster
+  namespace: argocd
+  labels:
+    argocd.argoproj.io/secret-type: cluster
+stringData:
+  name: local-cluster
+  server: arn:aws:eks:ap-northeast-1:111122223333:cluster/sandbox-cluster
+  project: default
+```
+
+```bash
+kubectl apply -f local-cluster.yaml
+```
+
+## Step 6: Deploy a Sample Application
+
+```yaml
+# guestbook-app.yaml
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: guestbook
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/argoproj/argocd-example-apps
+    targetRevision: HEAD
+    path: guestbook
+  destination:
+    name: local-cluster
+    namespace: default
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+```
+
+This time I added `finalizers`—a lesson learned from the previous post where Application deletion left orphaned resources.
+
+```bash
+kubectl apply -f guestbook-app.yaml
+```
+
+```bash
+kubectl get application guestbook -n argocd -o wide
+```
+
+```text
+NAME        SYNC STATUS   HEALTH STATUS   REVISION                                   PROJECT
+guestbook   Synced        Healthy         abc1234def5678901234567890abcdef12345678   default
+```
+
+Pods and Service are running:
+
+```bash
+kubectl get pods,svc -n default
+```
+
+```text
+NAME                                READY   STATUS    RESTARTS   AGE
+pod/guestbook-ui-xxxxxxxxxx-xxxxx   1/1     Running   0          100s
+
+NAME                   TYPE        CLUSTER-IP      EXTERNAL-IP   PORT(S)   AGE
+service/guestbook-ui   ClusterIP   10.100.xx.xx    <none>        80/TCP    100s
+```
+
+ArgoCD Capability enabled via eksctl, and a GitOps-deployed application running end-to-end.
+
+## AWS CLI vs eksctl
+
+| Aspect | AWS CLI | eksctl |
+|---|---|---|
+| Config format | Inline JSON parameters | YAML file |
+| Implementation | Direct EKS API call | CloudFormation stack |
+| Creation time | ~4 minutes | ~4 minutes (via CloudFormation) |
+| Deletion | `aws eks delete-capability` | `eksctl delete capability -f` |
+| Dependencies | AWS CLI only | Requires eksctl |
+| State management | None (direct API calls) | CloudFormation stack |
+| Cluster integration | Separate management | Single YAML for cluster + capabilities |
+
+AWS CLI has minimal dependencies and its JSON output is easy to parse with `jq` for scripting. eksctl defines configuration declaratively in YAML, with CloudFormation managing state. By version-controlling the YAML in Git, you get a single source of truth for "what's installed on this cluster"—making eksctl a better fit for infrastructure GitOps.
+
+## Takeaways
+
+- **One YAML file for declarative Capability management** — eksctl's ClusterConfig bundles cluster and Capability settings together, improving visibility and enabling Git-based version control.
+- **Creation time is comparable to AWS CLI** — In my environment, eksctl also completed in about 4 minutes. However, since it goes through CloudFormation, waiter timeouts may occur depending on conditions.
+- **Lesson applied: add finalizers** — Adding `resources-finalizer.argocd.argoproj.io` to the Application manifest ensures cascade deletion on cleanup—a lesson from the previous post.
+- **Choose CLI or eksctl by style** — AWS CLI has fewer dependencies and is easy to embed in scripts. eksctl manages configuration declaratively in YAML, making it a natural fit for infrastructure GitOps. Pick what matches your team's workflow.
+
+## Cleanup
+
+```bash
+# 1. Delete the Application (finalizer handles cascade deletion)
+kubectl delete application guestbook -n argocd
+
+# 2. Remove cluster registration
+kubectl delete secret local-cluster -n argocd
+
+# 3. Disassociate the access policy
+aws eks disassociate-access-policy \
+  --region ap-northeast-1 \
+  --cluster-name sandbox-cluster \
+  --principal-arn arn:aws:iam::111122223333:role/ArgoCDCapabilityRole \
+  --policy-arn arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy
+
+# 4. Delete the Capability (via eksctl, ~2 minutes)
+eksctl delete capability -f argocd-capability.yaml
+
+# 5. Delete the namespace (left behind by RETAIN policy)
+kubectl delete ns argocd
+
+# 6. Delete the IAM role
+aws iam delete-role --role-name ArgoCDCapabilityRole
+```
+

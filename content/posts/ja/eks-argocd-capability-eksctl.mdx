@@ -1,0 +1,290 @@
+---
+title: "eksctl で EKS ArgoCD Capability を構築する — YAML 一枚で GitOps 環境を立ち上げる"
+description: "eksctl の YAML 設定ファイルで ArgoCD Capability を作成し、サンプルアプリのデプロイまでを実施。AWS CLI 版との違いや CloudFormation 経由の挙動を整理する。"
+date: "2026-03-22"
+published: true
+featured: false
+categories: [infrastructure]
+tags: ["aws", "eks", "kubernetes", "argocd", "gitops", "eksctl", "devops"]
+---
+
+## はじめに
+
+[前回の記事](/ja/posts/eks-argocd-capability)では、AWS CLI を使って EKS ArgoCD Capability を構築した。CLI は細かい制御が効くが、JSON のインラインパラメータが長くなりがちだ。
+
+eksctl を使えば、同じ構成を YAML 設定ファイル1枚で宣言的に管理できる。クラスター構成と Capability 設定を同じフォーマットで扱えるため、IaC としての見通しがよくなる。
+
+この記事では、既存の EKS Auto Mode クラスターに eksctl で ArgoCD Capability を追加し、サンプルアプリケーションのデプロイまでを実施する。
+
+## 前提条件
+
+- EKS クラスター（Auto Mode）が稼働中であること（[クラスター構築手順](/ja/posts/eks-auto-mode-cluster-setup)を参照）
+- eksctl v0.220.0 以上（`eksctl version` で確認）
+- AWS CLI v2.12.3 以上
+- kubectl が設定済みであること
+- AWS IAM Identity Center が有効であること
+
+今回は `sandbox-cluster`（v1.32、ap-northeast-1）に対して作業する。
+
+## Step 1: IAM Capability ロールの作成
+
+[前回の記事](/ja/posts/eks-argocd-capability)と同じ手順で、ArgoCD Capability 用の [IAM ロール](https://docs.aws.amazon.com/eks/latest/userguide/capability-role.html)を作成する。
+
+```bash
+cat > argocd-trust-policy.json << 'EOF'
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Principal": {
+        "Service": "capabilities.eks.amazonaws.com"
+      },
+      "Action": [
+        "sts:AssumeRole",
+        "sts:TagSession"
+      ]
+    }
+  ]
+}
+EOF
+
+aws iam create-role \
+  --role-name ArgoCDCapabilityRole \
+  --assume-role-policy-document file://argocd-trust-policy.json
+```
+
+## Step 2: Identity Center 情報の取得
+
+Identity Center のインスタンス ARN、Identity Store ID、ユーザー ID を取得する。Identity Center のホームリージョンの特定方法は[前回の記事](/ja/posts/eks-argocd-capability)を参照。
+
+```bash
+# インスタンス情報の取得
+aws sso-admin list-instances \
+  --query 'Instances[0].{InstanceArn:InstanceArn,IdentityStoreId:IdentityStoreId}' \
+  --output table
+
+# ユーザー ID の取得
+aws identitystore list-users \
+  --identity-store-id d-1234567890 \
+  --query 'Users[].{UserName:UserName,UserId:UserId}' \
+  --output table
+```
+
+## Step 3: eksctl で ArgoCD Capability を作成
+
+ここが AWS CLI 版との最大の違いだ。eksctl では YAML 設定ファイルで Capability を宣言的に定義する。
+
+```yaml
+# argocd-capability.yaml
+apiVersion: eksctl.io/v1alpha5
+kind: ClusterConfig
+
+metadata:
+  name: sandbox-cluster
+  region: ap-northeast-1
+
+capabilities:
+  - name: argocd
+    type: ARGOCD
+    roleArn: arn:aws:iam::111122223333:role/ArgoCDCapabilityRole
+    deletePropagationPolicy: RETAIN
+    configuration:
+      argocd:
+        awsIdc:
+          idcInstanceArn: arn:aws:sso:::instance/ssoins-1234567890abcdef
+          idcRegion: us-east-1
+        rbacRoleMappings:
+          - role: ADMIN
+            identities:
+              - id: a1b2c3d4-5678-90ab-cdef-EXAMPLE11111
+                type: SSO_USER
+```
+
+この YAML を使って Capability を作成する。
+
+```bash
+eksctl create capability -f argocd-capability.yaml
+```
+
+eksctl は内部で CloudFormation スタックを作成し、Capability のプロビジョニングを管理する。AWS CLI 版が直接 EKS API を呼ぶのに対し、eksctl は CloudFormation を経由する。今回の環境では約4分で完了した。
+
+```text
+2026-03-15 19:26:59 [ℹ]  creating capability argocd
+2026-03-15 19:27:01 [ℹ]  deploying stack "eksctl-sandbox-cluster-capability-..."
+2026-03-15 19:27:01 [ℹ]  waiting for CloudFormation stack "eksctl-sandbox-cluster-capability-..."
+2026-03-15 19:31:15 [ℹ]  waiting for CloudFormation stack "eksctl-sandbox-cluster-capability-..."
+```
+
+ステータス確認も eksctl で行える。
+
+```bash
+eksctl get capability --cluster sandbox-cluster --name argocd
+```
+
+```text
+NAME    TYPE    STATUS  VERSION
+argocd  ARGOCD  ACTIVE  3.1.8-eks-1
+```
+
+`ACTIVE` になれば準備完了だ。
+
+## Step 4: インストール確認
+
+### CRD
+
+```bash
+kubectl api-resources | grep argoproj.io
+```
+
+```text
+applications       app,apps       argoproj.io/v1alpha1   true   Application
+applicationsets    appset,appsets argoproj.io/v1alpha1   true   ApplicationSet
+appprojects        appproj        argoproj.io/v1alpha1   true   AppProject
+```
+
+### ArgoCD UI
+
+`aws eks describe-capability` で取得できる `serverUrl` をブラウザで開くと、Identity Center のログイン画面にリダイレクトされる。SSO 認証後、ArgoCD のダッシュボードが表示された。
+
+## Step 5: ターゲットクラスターの登録
+
+[前回の記事](/ja/posts/eks-argocd-capability)と同様に、アクセスポリシーの関連付けとクラスター登録を行う。
+
+```bash
+# アクセスポリシーの関連付け
+aws eks associate-access-policy \
+  --region ap-northeast-1 \
+  --cluster-name sandbox-cluster \
+  --principal-arn arn:aws:iam::111122223333:role/ArgoCDCapabilityRole \
+  --policy-arn arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy \
+  --access-scope type=cluster
+```
+
+クラスター情報を Secret として登録する。`server` フィールドには API サーバー URL ではなく EKS クラスター ARN を指定する。
+
+```yaml
+# local-cluster.yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: local-cluster
+  namespace: argocd
+  labels:
+    argocd.argoproj.io/secret-type: cluster
+stringData:
+  name: local-cluster
+  server: arn:aws:eks:ap-northeast-1:111122223333:cluster/sandbox-cluster
+  project: default
+```
+
+```bash
+kubectl apply -f local-cluster.yaml
+```
+
+## Step 6: サンプルアプリケーションのデプロイ
+
+```yaml
+# guestbook-app.yaml
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: guestbook
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/argoproj/argocd-example-apps
+    targetRevision: HEAD
+    path: guestbook
+  destination:
+    name: local-cluster
+    namespace: default
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+```
+
+今回は前回の教訓を活かし、`finalizers` を追加している。これにより Application 削除時にデプロイ済みリソースもカスケード削除される。
+
+```bash
+kubectl apply -f guestbook-app.yaml
+```
+
+```bash
+kubectl get application guestbook -n argocd -o wide
+```
+
+```text
+NAME        SYNC STATUS   HEALTH STATUS   REVISION                                   PROJECT
+guestbook   Synced        Healthy         abc1234def5678901234567890abcdef12345678   default
+```
+
+Pod と Service も正常に起動している。
+
+```bash
+kubectl get pods,svc -n default
+```
+
+```text
+NAME                                READY   STATUS    RESTARTS   AGE
+pod/guestbook-ui-xxxxxxxxxx-xxxxx   1/1     Running   0          100s
+
+NAME                   TYPE        CLUSTER-IP      EXTERNAL-IP   PORT(S)   AGE
+service/guestbook-ui   ClusterIP   10.100.xx.xx    <none>        80/TCP    100s
+```
+
+eksctl 経由で ArgoCD Capability を有効化し、GitOps によるアプリケーションデプロイまでが完了した。
+
+## AWS CLI 版との比較
+
+| 観点 | AWS CLI | eksctl |
+|---|---|---|
+| 設定形式 | JSON インラインパラメータ | YAML ファイル |
+| 内部実装 | EKS API を直接呼び出し | CloudFormation スタック経由 |
+| 作成時間 | 約4分 | 約4分（CloudFormation 経由） |
+| 削除 | `aws eks delete-capability` | `eksctl delete capability -f` |
+| 依存 | AWS CLI のみ | eksctl が必要 |
+| 状態管理 | なし（直接 API 呼び出し） | CloudFormation がスタックで管理 |
+| クラスター設定との統合 | 別管理 | 同一 YAML で管理可能 |
+
+AWS CLI は依存が少なく、レスポンスの JSON を `jq` でパースしてスクリプトに組み込みやすい。一方 eksctl は YAML で構成を宣言的に定義でき、CloudFormation が状態管理を担う。Git リポジトリで YAML を管理すれば「このクラスターにどの Capability が入っているか」がファイル1つで把握できるため、インフラの GitOps には eksctl の方が適している。
+
+## まとめ
+
+- **YAML 1枚で Capability を宣言的に管理できる** — eksctl の ClusterConfig にクラスター設定と Capability 設定をまとめられるため、構成の見通しがよくなる。Git リポジトリでのバージョン管理にも適している。
+- **作成時間は AWS CLI 版とほぼ同等** — 今回の環境では eksctl 版も約4分で完了した。ただし CloudFormation スタック経由のため、環境によってはウェイターのタイムアウトが発生する可能性がある。
+- **前回の教訓を反映: finalizer の追加** — Application マニフェストに `resources-finalizer.argocd.argoproj.io` を追加することで、削除時のカスケード削除が有効になり、クリーンアップが確実になる。
+- **CLI と eksctl はスタイルで使い分ける** — AWS CLI は依存が少なくスクリプトに組み込みやすい。eksctl は宣言的 YAML で構成を Git 管理でき、インフラの GitOps に向いている。チームのワークフローに合わせて選択すればよい。
+
+## クリーンアップ
+
+```bash
+# 1. Application の削除（finalizer 付きなのでリソースもカスケード削除される）
+kubectl delete application guestbook -n argocd
+
+# 2. クラスター登録の削除
+kubectl delete secret local-cluster -n argocd
+
+# 3. アクセスポリシーの解除
+aws eks disassociate-access-policy \
+  --region ap-northeast-1 \
+  --cluster-name sandbox-cluster \
+  --principal-arn arn:aws:iam::111122223333:role/ArgoCDCapabilityRole \
+  --policy-arn arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy
+
+# 4. Capability の削除（eksctl 経由、約2分）
+eksctl delete capability -f argocd-capability.yaml
+
+# 5. namespace の削除（RETAIN ポリシーのため手動）
+kubectl delete ns argocd
+
+# 6. IAM ロールの削除
+aws iam delete-role --role-name ArgoCDCapabilityRole
+```
+
