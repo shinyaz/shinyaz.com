@@ -66,6 +66,57 @@ This single command creates:
 
 The process takes about 15-20 minutes. Progress is visible in real-time through eksctl logs.
 
+### What Gets Created Under the Hood
+
+Despite being a single command, eksctl creates numerous resources via CloudFormation. Understanding these helps with troubleshooting and production deployments.
+
+#### VPC and Networking
+
+eksctl creates a new VPC with CIDR `192.168.0.0/16`, placing one public and one private subnet in each of 3 AZs.
+
+| Subnet | AZ | CIDR | Public IP |
+|---|---|---|---|
+| Public 1d | ap-northeast-1d | 192.168.0.0/19 | Yes |
+| Public 1c | ap-northeast-1c | 192.168.32.0/19 | Yes |
+| Public 1a | ap-northeast-1a | 192.168.64.0/19 | Yes |
+| Private 1d | ap-northeast-1d | 192.168.96.0/19 | No |
+| Private 1c | ap-northeast-1c | 192.168.128.0/19 | No |
+| Private 1a | ap-northeast-1a | 192.168.160.0/19 | No |
+
+Public subnets route through an Internet Gateway, while private subnets route through a single NAT Gateway (with an EIP). Nodes are placed in private subnets, so they're never directly exposed to the internet.
+
+#### IAM Roles
+
+Auto Mode creates two IAM roles.
+
+**Cluster Service Role (ServiceRole)** — Used by the EKS control plane, assumed by `eks.amazonaws.com`. Compared to traditional setups, Auto Mode adds several policies:
+
+- `AmazonEKSClusterPolicy` — Core cluster management
+- `AmazonEKSComputePolicy` — Auto Mode compute management
+- `AmazonEKSNetworkingPolicy` — Auto Mode networking management
+- `AmazonEKSBlockStoragePolicy` — Auto Mode storage management
+- `AmazonEKSLoadBalancingPolicy` — Load balancer management
+- `AmazonEKSVPCResourceController` — VPC resource control
+
+Traditional setups only need `AmazonEKSClusterPolicy` and `AmazonEKSVPCResourceController`. The additional compute, networking, and storage policies are what enable EKS to automatically manage infrastructure.
+
+**Auto Mode Node Role (AutoModeNodeRole)** — Assigned to nodes (EC2 instances), assumed by `ec2.amazonaws.com`.
+
+- `AmazonEKSWorkerNodeMinimalPolicy` — Minimal permissions for node operation
+- `AmazonEC2ContainerRegistryPullOnly` — ECR image pull permissions
+
+The node-side policies follow least privilege. This is simpler than the traditional `AmazonEKSWorkerNodePolicy` and `AmazonEKS_CNI_Policy` combination.
+
+#### Security Groups
+
+Two security groups are created with three ingress rules controlling communication.
+
+**ControlPlaneSecurityGroup** — For control plane to node communication. No ingress rules, all outbound allowed.
+
+**ClusterSharedNodeSecurityGroup** — For inter-node communication. Allows all traffic from itself and from the control plane, enabling unrestricted node-to-node communication.
+
+This configuration ensures both control plane ↔ node and node ↔ node communication paths are established.
+
 ### How This Differs from Traditional Setup
 
 With traditional managed node groups, you had to explicitly specify node configuration:

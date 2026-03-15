@@ -66,6 +66,57 @@ eksctl create cluster \
 
 作成には15〜20分ほどかかる。進捗は eksctl のログでリアルタイムに確認できる。
 
+### 作成されるリソースの詳細
+
+コマンド一発とはいえ、裏では CloudFormation を通じて多数のリソースが作成される。中身を理解しておくことで、トラブルシュート時や本番環境への適用時に役立つ。
+
+#### VPC とネットワーク
+
+eksctl は `192.168.0.0/16` の CIDR を持つ VPC を新規作成し、3つの AZ にパブリック・プライベートサブネットを1つずつ配置する。
+
+| サブネット | AZ | CIDR | パブリック IP 自動割当 |
+|---|---|---|---|
+| Public 1d | ap-northeast-1d | 192.168.0.0/19 | あり |
+| Public 1c | ap-northeast-1c | 192.168.32.0/19 | あり |
+| Public 1a | ap-northeast-1a | 192.168.64.0/19 | あり |
+| Private 1d | ap-northeast-1d | 192.168.96.0/19 | なし |
+| Private 1c | ap-northeast-1c | 192.168.128.0/19 | なし |
+| Private 1a | ap-northeast-1a | 192.168.160.0/19 | なし |
+
+パブリックサブネットはインターネットゲートウェイ経由で外部と通信し、プライベートサブネットは NAT ゲートウェイ（1台、EIP 付き）を経由する。ノードはプライベートサブネットに配置されるため、直接インターネットに晒されることはない。
+
+#### IAM ロール
+
+Auto Mode では2つの IAM ロールが作成される。
+
+**クラスターサービスロール（ServiceRole）** — EKS コントロールプレーンが使用するロールで、`eks.amazonaws.com` が AssumeRole する。従来方式と比べて Auto Mode 固有のポリシーが追加されている点が特徴的だ。
+
+- `AmazonEKSClusterPolicy` — クラスター管理の基本権限
+- `AmazonEKSComputePolicy` — Auto Mode のコンピュート管理
+- `AmazonEKSNetworkingPolicy` — Auto Mode のネットワーク管理
+- `AmazonEKSBlockStoragePolicy` — Auto Mode のストレージ管理
+- `AmazonEKSLoadBalancingPolicy` — ロードバランサー管理
+- `AmazonEKSVPCResourceController` — VPC リソース制御
+
+従来方式では `AmazonEKSClusterPolicy` と `AmazonEKSVPCResourceController` の2つだけだが、Auto Mode ではコンピュート・ネットワーク・ストレージの管理権限が追加される。これが「EKS がインフラを自動管理する」仕組みの正体だ。
+
+**Auto Mode ノードロール（AutoModeNodeRole）** — ノード（EC2 インスタンス）に割り当てられるロールで、`ec2.amazonaws.com` が AssumeRole する。
+
+- `AmazonEKSWorkerNodeMinimalPolicy` — ノード動作に必要な最小権限
+- `AmazonEC2ContainerRegistryPullOnly` — ECR からのイメージ Pull 権限
+
+ノード側のポリシーは最小権限に絞られている。従来方式で必要だった `AmazonEKSWorkerNodePolicy` や `AmazonEKS_CNI_Policy` よりもシンプルだ。
+
+#### セキュリティグループ
+
+2つのセキュリティグループが作成され、3つのイングレスルールで通信を制御する。
+
+**ControlPlaneSecurityGroup** — コントロールプレーンとノード間の通信用。イングレスルールなし、アウトバウンドは全許可。
+
+**ClusterSharedNodeSecurityGroup** — ノード間の通信用。自身のセキュリティグループとコントロールプレーンからの全トラフィックを許可し、ノード間通信を制限なく可能にしている。
+
+この構成により、コントロールプレーン↔ノード、ノード↔ノードの通信が確保される。
+
 ### 従来方式との作成コマンドの違い
 
 従来のマネージドノードグループ方式では、以下のようにノード構成を明示的に指定する必要があった。
