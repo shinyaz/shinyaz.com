@@ -1,0 +1,34 @@
+---
+title: "AWS CLIの設定ファイルをXDG Base Directoryに準拠させるには環境変数2つで済む"
+description: "AWS CLIはデフォルトで~/.aws/以下を使うが、AWS_CONFIG_FILEとAWS_SHARED_CREDENTIALS_FILEを設定するだけでXDG準拠にできる。"
+date: 2026-03-15
+published: true
+tags:
+  - aws
+  - cli
+  - xdg
+  - dotfiles
+  - zsh
+---
+
+dotfiles に AWS CLI を追加するとき、設定ファイルの置き場所を `~/.aws/` から XDG Base Directory に合わせたかった。`~/.config/aws/config` に置けばホームディレクトリが散らからない。
+
+AWS CLI は `~/.aws/` をハードコードしているように見えるが、実は環境変数2つで変更できる。
+
+```bash
+export AWS_CONFIG_FILE="$XDG_CONFIG_HOME/aws/config"
+export AWS_SHARED_CREDENTIALS_FILE="$XDG_CONFIG_HOME/aws/credentials"
+```
+
+これを `zshenv` に書いておけば、`aws configure` や `aws sso login` もすべて `$XDG_CONFIG_HOME/aws/` 以下を参照するようになる。
+
+ついでに zsh の補完も入れておくと便利だ。AWS CLI v2 は `aws_completer` という補完コマンドを同梱しているが、これは bash の `complete` インターフェースで動作する。zsh ネイティブの補完関数は提供されていないので、`bashcompinit` で bash 互換レイヤーを読み込んで使う。これは AWS 公式ドキュメントでも推奨されている方法だ。
+
+```bash
+if (( $+commands[aws] )); then
+  autoload -Uz bashcompinit && bashcompinit
+  complete -C aws_completer aws
+fi
+```
+
+SSO プロファイルのテンプレートはコメントアウト状態で `aws/config` に置いておくと、新しい環境でもすぐに使い始められる。テンプレートなので内容が環境ごとに変わる前提だ。テストスクリプトでは diff ではなくファイル存在チェックだけにしておくのがコツだ。

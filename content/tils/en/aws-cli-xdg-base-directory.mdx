@@ -1,0 +1,34 @@
+---
+title: "Two environment variables are all you need to make AWS CLI follow XDG Base Directory"
+description: "AWS CLI defaults to ~/.aws/, but setting AWS_CONFIG_FILE and AWS_SHARED_CREDENTIALS_FILE is enough to make it XDG-compliant."
+date: 2026-03-15
+published: true
+tags:
+  - aws
+  - cli
+  - xdg
+  - dotfiles
+  - zsh
+---
+
+When adding AWS CLI to my dotfiles, I wanted the config files under XDG Base Directory instead of `~/.aws/`. Putting them in `~/.config/aws/config` keeps the home directory clean.
+
+AWS CLI looks like it hardcodes `~/.aws/`, but two environment variables are all it takes to change that.
+
+```bash
+export AWS_CONFIG_FILE="$XDG_CONFIG_HOME/aws/config"
+export AWS_SHARED_CREDENTIALS_FILE="$XDG_CONFIG_HOME/aws/credentials"
+```
+
+Drop these in `zshenv` and everything — `aws configure`, `aws sso login` — points to `$XDG_CONFIG_HOME/aws/`.
+
+While at it, zsh completion is worth setting up too. AWS CLI v2 ships `aws_completer`, but it works through bash's `complete` interface. There's no native zsh completion function provided, so you need `bashcompinit` to load a bash compatibility layer. This is also the method recommended in the official AWS documentation.
+
+```bash
+if (( $+commands[aws] )); then
+  autoload -Uz bashcompinit && bashcompinit
+  complete -C aws_completer aws
+fi
+```
+
+I keep an SSO profile template (commented out) in `aws/config` so new machines are ready to go immediately. Since it's a template that varies per environment, the test script should only check for file existence — not content diff.
