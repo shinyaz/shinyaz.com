@@ -1,6 +1,8 @@
 ---
 title: "topologySpreadConstraints needs zone spread, not just hostname"
+description: "hostname spread alone can land all pods in the same AZ. Add topology.kubernetes.io/zone to guarantee cross-AZ distribution."
 date: "2026-03-23"
+published: true
 tags:
   - kubernetes
   - aws
