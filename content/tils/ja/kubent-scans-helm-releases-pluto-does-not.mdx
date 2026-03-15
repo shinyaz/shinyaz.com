@@ -1,0 +1,22 @@
+---
+title: "kubent は Helm リリースもスキャンするが pluto はしない"
+date: "2026-03-23"
+tags:
+  - kubernetes
+  - cli
+---
+
+非推奨 API のスキャンツールとして kubent と pluto の両方を試した。どちらも `detect-all-in-cluster` 的なことができるが、スキャン範囲が違った。
+
+```bash
+kubent
+# Retrieved 34 resources from collector name=Cluster
+# Retrieved 0 resources from collector name="Helm v3"
+
+pluto detect-all-in-cluster
+# There were no resources found with known deprecated apiVersions.
+```
+
+kubent のログをよく見ると、`Cluster` コレクターと `Helm v3` コレクターの2つが動いている。Helm v3 コレクターは、クラスター内の Helm リリースシークレットからテンプレートをデコードして非推奨 API を検出する。つまり `kubectl apply` 後のリソースだけでなく、Helm テンプレートに残っている古い API バージョンも見つけてくれる。
+
+pluto もファイルや Helm チャートのスキャンは `pluto detect-helm` で別途できるが、`detect-all-in-cluster` は live リソースだけが対象だ。本番環境で Helm を使っているなら、両方併用する意味がある。

@@ -1,0 +1,26 @@
+---
+title: "aws eks list-insights でアップグレード前のブロッカーを事前検出できる"
+date: "2026-03-23"
+tags:
+  - aws
+  - eks
+  - kubernetes
+---
+
+EKS のアップグレード前チェックを手動でやっていたが、AWS が Cluster Insights という機能を提供していることを知らなかった。`list-insights` を叩くだけで、kubelet version skew やアドオン互換性の問題を AWS 側が自動で検出してくれる。
+
+```bash
+aws eks list-insights --region ap-northeast-1 --cluster-name my-cluster
+# 詳細を見るには describe-insight
+aws eks describe-insight --region ap-northeast-1 --cluster-name my-cluster --id <insight-id>
+```
+
+チェックされる項目は以下の5つ:
+
+- Kubelet version skew
+- Amazon Linux 2 compatibility
+- Cluster health issues
+- EKS add-on version compatibility
+- kube-proxy version skew
+
+新規クラスターだと空で返ってくるが、本番環境では WARNING が出るケースがある。kubent や pluto での手動スキャンと併用すると、アップグレードの go/no-go 判断がかなり楽になる。

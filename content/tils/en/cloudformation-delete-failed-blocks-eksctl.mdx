@@ -1,0 +1,30 @@
+---
+title: "A DELETE_FAILED CloudFormation stack blocks eksctl create cluster"
+date: "2026-03-23"
+tags:
+  - aws
+  - eks
+  - cloudformation
+---
+
+Ran `eksctl create cluster --name sandbox` and it failed instantly:
+
+```text
+creating CloudFormation stack "eksctl-sandbox-cluster": AlreadyExistsException:
+Stack [eksctl-sandbox-cluster] already exists
+```
+
+The cluster itself didn't exist — `aws eks describe-cluster` returned nothing. But a CloudFormation stack from a previous failed deletion was stuck in `DELETE_FAILED` state.
+
+```bash
+# Check the orphaned stack
+aws cloudformation describe-stacks --stack-name eksctl-sandbox-cluster \
+  --query 'Stacks[0].StackStatus'
+# "DELETE_FAILED"
+
+# Manually delete it
+aws cloudformation delete-stack --stack-name eksctl-sandbox-cluster
+aws cloudformation wait stack-delete-complete --stack-name eksctl-sandbox-cluster
+```
+
+After cleaning up the stack, `eksctl create cluster` worked fine. eksctl generates stack names as `eksctl-{name}-cluster`, so this trap is easy to hit when recreating a cluster with the same name.

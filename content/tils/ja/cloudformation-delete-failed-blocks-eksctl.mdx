@@ -1,0 +1,30 @@
+---
+title: "CloudFormation スタックが DELETE_FAILED で残ると eksctl create cluster が失敗する"
+date: "2026-03-23"
+tags:
+  - aws
+  - eks
+  - cloudformation
+---
+
+`eksctl create cluster --name sandbox` を実行したら、こんなエラーで即座に失敗した。
+
+```text
+creating CloudFormation stack "eksctl-sandbox-cluster": AlreadyExistsException:
+Stack [eksctl-sandbox-cluster] already exists
+```
+
+`aws eks describe-cluster` ではクラスターが見つからないのに、CloudFormation スタックだけが `DELETE_FAILED` 状態で残っていた。以前の削除が中途半端に終わっていたらしい。
+
+```bash
+# スタックの状態を確認
+aws cloudformation describe-stacks --stack-name eksctl-sandbox-cluster \
+  --query 'Stacks[0].StackStatus'
+# "DELETE_FAILED"
+
+# 手動で削除
+aws cloudformation delete-stack --stack-name eksctl-sandbox-cluster
+aws cloudformation wait stack-delete-complete --stack-name eksctl-sandbox-cluster
+```
+
+スタック削除後に `eksctl create cluster` を再実行したら正常に作成できた。eksctl はクラスター名から `eksctl-{name}-cluster` というスタック名を生成するので、同名クラスターの作り直しではこの罠にハマりやすい。

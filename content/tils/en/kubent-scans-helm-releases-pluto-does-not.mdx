@@ -1,0 +1,22 @@
+---
+title: "kubent scans Helm releases for deprecated APIs, pluto doesn't"
+date: "2026-03-23"
+tags:
+  - kubernetes
+  - cli
+---
+
+Tried both kubent and pluto for deprecated API scanning. Both can scan live cluster resources, but their scope differs in a subtle way.
+
+```bash
+kubent
+# Retrieved 34 resources from collector name=Cluster
+# Retrieved 0 resources from collector name="Helm v3"
+
+pluto detect-all-in-cluster
+# There were no resources found with known deprecated apiVersions.
+```
+
+Look at kubent's output closely — it runs two collectors: `Cluster` (live resources) and `Helm v3` (release secrets). The Helm collector decodes release secrets stored in the cluster and scans the rendered templates for deprecated APIs. This catches old API versions baked into Helm templates that might not show up in live resources.
+
+pluto can scan Helm charts separately via `pluto detect-helm`, but `detect-all-in-cluster` only covers live resources. If you're running Helm in production, using both tools together gives you the most complete picture.
