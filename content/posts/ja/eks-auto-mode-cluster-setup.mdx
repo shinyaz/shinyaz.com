@@ -1,0 +1,171 @@
+---
+title: "EKS Auto Mode で運用負荷を最小化したKubernetesクラスターを構築する"
+description: "eksctl一発でAuto Modeを有効化したEKSクラスターを作成する手順を解説。ノードグループ管理が不要になるAuto Modeの仕組みと、従来方式との違いを整理する。"
+date: "2026-03-18"
+published: true
+featured: false
+categories: [infrastructure]
+tags: ["aws", "eks", "kubernetes", "eksctl", "devops"]
+---
+
+## はじめに
+
+Kubernetes を本番運用する上で、ノードのスケーリングやアップグレードは避けて通れない運用負荷だ。EKS では Karpenter や Cluster Autoscaler で自動化してきたが、それでもノードグループの設計やライフサイクル管理は利用者の責務だった。
+
+2024年末に登場した **EKS Auto Mode** は、このノード管理を EKS 側に完全に委譲する仕組みだ。この記事では、eksctl を使って Auto Mode を有効にした EKS クラスターを構築する手順と、従来方式との設計思想の違いを整理する。
+
+## EKS Auto Mode とは
+
+EKS Auto Mode は、コンピュート（EC2 インスタンス）、ネットワーキング、ストレージといったクラスターのインフラ管理を EKS が自動で行う機能だ。従来の EKS では以下のような作業が必要だった。
+
+- **ノードグループの設計** — インスタンスタイプ、最小/最大台数の決定
+- **スケーリング設定** — Karpenter や Cluster Autoscaler の導入・チューニング
+- **ノードのアップグレード** — AMI 更新やローリングアップデートの実施
+- **セキュリティパッチ** — OS レベルのパッチ適用
+
+Auto Mode ではこれらがすべて EKS 側で管理される。利用者はワークロード（Pod）をデプロイするだけで、必要なノードが自動的にプロビジョニングされる。
+
+### 従来方式との比較
+
+| 項目 | マネージドノードグループ | Auto Mode |
+|---|---|---|
+| ノード管理 | 利用者 | EKS |
+| スケーリング | Karpenter / CA が必要 | 自動 |
+| インスタンスタイプ選択 | 利用者が指定 | ワークロードに応じて自動選択 |
+| OS パッチ適用 | 利用者 | EKS |
+| 料金モデル | EC2 料金 + EKS 料金 | EKS Auto Mode 料金 |
+
+つまり Auto Mode は「Kubernetes を使いたいが、インフラの運用は最小限にしたい」というユースケースに最適だ。
+
+## 構築手順
+
+### 前提条件
+
+- AWS CLI が設定済みであること
+- eksctl がインストールされていること（`brew install eksctl` で導入可能）
+- 適切な IAM 権限があること
+
+### クラスター作成
+
+Auto Mode での EKS クラスター作成は驚くほどシンプルだ。`--enable-auto-mode` フラグを付けるだけでよい。
+
+```bash
+eksctl create cluster \
+  --name sandbox \
+  --region ap-northeast-1 \
+  --version 1.32 \
+  --enable-auto-mode
+```
+
+このコマンド一発で以下が自動作成される。
+
+- **VPC** — パブリック/プライベートサブネットを持つ新規 VPC
+- **EKS クラスター** — Kubernetes 1.32、Auto Mode 有効
+- **IAM ロール** — クラスターおよびノード用のロール
+- **セキュリティグループ** — クラスター通信に必要なルール
+
+作成には15〜20分ほどかかる。進捗は eksctl のログでリアルタイムに確認できる。
+
+### 従来方式との作成コマンドの違い
+
+従来のマネージドノードグループ方式では、以下のようにノード構成を明示的に指定する必要があった。
+
+```bash
+# 従来方式（マネージドノードグループ）
+eksctl create cluster \
+  --name sandbox \
+  --region ap-northeast-1 \
+  --version 1.32 \
+  --nodegroup-name sandbox-nodes \
+  --node-type t3.medium \
+  --nodes 2 \
+  --nodes-min 1 \
+  --nodes-max 3 \
+  --managed
+```
+
+Auto Mode ではノードグループの指定が一切不要だ。インスタンスタイプや台数はワークロードの要求に応じて EKS が判断する。
+
+## 動作確認
+
+### クラスターの状態確認
+
+クラスター作成完了後、まずコントロールプレーンとノードの状態を確認する。
+
+```bash
+kubectl cluster-info
+```
+
+```text
+Kubernetes control plane is running at https://xxxxx.gr7.ap-northeast-1.eks.amazonaws.com
+```
+
+```bash
+kubectl get nodes
+```
+
+```text
+NAME                  STATUS   ROLES    AGE   VERSION
+i-0a3b6967393de6f9d   Ready    <none>   18s   v1.32.11-eks-ac2d5a0
+i-0bc928a12acfe91a2   Ready    <none>   18s   v1.32.11-eks-ac2d5a0
+```
+
+クラスター作成直後の時点で、Auto Mode が2台のノードを自動的にプロビジョニングしている。インスタンスタイプやノード数はこちらで一切指定していない点がポイントだ。
+
+### サンプルワークロードのデプロイ
+
+Auto Mode の真価はワークロードに応じた動的なノードプロビジョニングにある。nginx を3レプリカでデプロイして動作を確認する。
+
+```bash
+kubectl create deployment nginx --image=nginx:latest --replicas=3
+```
+
+デプロイ直後は Pod が Pending 状態になるが、約30秒後に再確認すると全 Pod が Running になっている。
+
+```bash
+kubectl get pods -o wide
+```
+
+```text
+NAME                     READY   STATUS    RESTARTS   AGE   IP                NODE
+nginx-54c98b4f84-7sc9x   1/1     Running   0          54s   192.168.163.242   i-04012a4d55813e76a
+nginx-54c98b4f84-8kp22   1/1     Running   0          54s   192.168.163.240   i-04012a4d55813e76a
+nginx-54c98b4f84-mc9lw   1/1     Running   0          54s   192.168.163.241   i-04012a4d55813e76a
+```
+
+ノード一覧を再確認すると、3台目のノード（`i-04012a4d55813e76a`）が自動で追加されていることがわかる。
+
+```bash
+kubectl get nodes
+```
+
+```text
+NAME                  STATUS   ROLES    AGE   VERSION
+i-04012a4d55813e76a   Ready    <none>   35s   v1.32.11-eks-ac2d5a0
+i-0a3b6967393de6f9d   Ready    <none>   81s   v1.32.11-eks-ac2d5a0
+i-0bc928a12acfe91a2   Ready    <none>   81s   v1.32.11-eks-ac2d5a0
+```
+
+ワークロードの要求に応じて Auto Mode がノードを自動追加する動作を確認できた。Karpenter や Cluster Autoscaler の設定は一切不要だ。
+
+## Auto Mode を選ぶべきケース
+
+Auto Mode は万能ではない。以下の基準で判断するとよい。
+
+**Auto Mode が適しているケース:**
+
+- 開発・検証用クラスターで、インフラ管理に時間をかけたくない
+- チームに Kubernetes のインフラ運用経験が少ない
+- ワークロードが標準的で、特殊なインスタンスタイプを必要としない
+
+**従来方式が適しているケース:**
+
+- GPU インスタンスなど、特定のハードウェアが必要
+- コスト最適化のためにスポットインスタンスを細かく制御したい
+- ノードの OS レベルでカスタマイズが必要
+
+## まとめ
+
+- **`--enable-auto-mode` の一行でインフラ管理が不要に** — ノードグループの設計・スケーリング設定・パッチ適用がすべて EKS 側に委譲されるため、ワークロード開発に集中できる。
+- **eksctl との組み合わせで構築の敷居が下がった** — VPC やIAM ロールも含めてコマンド一発で環境が揃うため、検証環境の立ち上げが格段に速くなる。
+- **「どこまで自分で管理するか」の設計判断が重要** — Auto Mode は運用を楽にする反面、細かい制御はできない。ユースケースに応じて従来方式と使い分ける視点が必要だ。

@@ -1,0 +1,171 @@
+---
+title: "Building a Low-Maintenance Kubernetes Cluster with EKS Auto Mode"
+description: "Set up an EKS cluster with Auto Mode enabled using a single eksctl command. Covers how Auto Mode eliminates node group management and when to choose it over traditional managed node groups."
+date: "2026-03-18"
+published: true
+featured: false
+categories: [infrastructure]
+tags: ["aws", "eks", "kubernetes", "eksctl", "devops"]
+---
+
+## Introduction
+
+Node scaling and upgrades are an unavoidable operational burden when running Kubernetes in production. While EKS has offered Karpenter and Cluster Autoscaler for automation, node group design and lifecycle management have always remained the user's responsibility.
+
+**EKS Auto Mode**, introduced in late 2024, fully delegates node management to EKS itself. This post walks through creating an Auto Mode EKS cluster with eksctl and clarifies the design philosophy differences from the traditional approach.
+
+## What Is EKS Auto Mode?
+
+EKS Auto Mode automatically manages cluster infrastructure — compute (EC2 instances), networking, and storage. In traditional EKS, you had to handle:
+
+- **Node group design** — choosing instance types, min/max counts
+- **Scaling configuration** — setting up Karpenter or Cluster Autoscaler
+- **Node upgrades** — AMI updates and rolling updates
+- **Security patches** — OS-level patching
+
+With Auto Mode, EKS handles all of this. You just deploy workloads (Pods), and the required nodes are provisioned automatically.
+
+### Comparison with Traditional Approach
+
+| Aspect | Managed Node Groups | Auto Mode |
+|---|---|---|
+| Node management | User | EKS |
+| Scaling | Requires Karpenter / CA | Automatic |
+| Instance type selection | User-specified | Auto-selected based on workload |
+| OS patching | User | EKS |
+| Pricing model | EC2 + EKS pricing | EKS Auto Mode pricing |
+
+Auto Mode is ideal when you want Kubernetes without the infrastructure overhead.
+
+## Setup Steps
+
+### Prerequisites
+
+- AWS CLI configured
+- eksctl installed (`brew install eksctl`)
+- Appropriate IAM permissions
+
+### Creating the Cluster
+
+Creating an EKS cluster with Auto Mode is remarkably simple — just add the `--enable-auto-mode` flag.
+
+```bash
+eksctl create cluster \
+  --name sandbox \
+  --region ap-northeast-1 \
+  --version 1.32 \
+  --enable-auto-mode
+```
+
+This single command creates:
+
+- **VPC** — A new VPC with public/private subnets
+- **EKS Cluster** — Kubernetes 1.32 with Auto Mode enabled
+- **IAM Roles** — Roles for cluster and nodes
+- **Security Groups** — Rules for cluster communication
+
+The process takes about 15-20 minutes. Progress is visible in real-time through eksctl logs.
+
+### How This Differs from Traditional Setup
+
+With traditional managed node groups, you had to explicitly specify node configuration:
+
+```bash
+# Traditional approach (managed node groups)
+eksctl create cluster \
+  --name sandbox \
+  --region ap-northeast-1 \
+  --version 1.32 \
+  --nodegroup-name sandbox-nodes \
+  --node-type t3.medium \
+  --nodes 2 \
+  --nodes-min 1 \
+  --nodes-max 3 \
+  --managed
+```
+
+Auto Mode removes all node group specifications. EKS decides instance types and counts based on workload requirements.
+
+## Verification
+
+### Checking Cluster Status
+
+After cluster creation, start by verifying the control plane and nodes.
+
+```bash
+kubectl cluster-info
+```
+
+```text
+Kubernetes control plane is running at https://xxxxx.gr7.ap-northeast-1.eks.amazonaws.com
+```
+
+```bash
+kubectl get nodes
+```
+
+```text
+NAME                  STATUS   ROLES    AGE   VERSION
+i-0a3b6967393de6f9d   Ready    <none>   18s   v1.32.11-eks-ac2d5a0
+i-0bc928a12acfe91a2   Ready    <none>   18s   v1.32.11-eks-ac2d5a0
+```
+
+Right after creation, Auto Mode has already provisioned 2 nodes automatically. The key point is that we never specified instance types or node counts.
+
+### Deploying a Sample Workload
+
+The real power of Auto Mode lies in dynamic node provisioning based on workload demand. Let's deploy nginx with 3 replicas to see it in action.
+
+```bash
+kubectl create deployment nginx --image=nginx:latest --replicas=3
+```
+
+Pods start in Pending state, but after about 30 seconds all are Running.
+
+```bash
+kubectl get pods -o wide
+```
+
+```text
+NAME                     READY   STATUS    RESTARTS   AGE   IP                NODE
+nginx-54c98b4f84-7sc9x   1/1     Running   0          54s   192.168.163.242   i-04012a4d55813e76a
+nginx-54c98b4f84-8kp22   1/1     Running   0          54s   192.168.163.240   i-04012a4d55813e76a
+nginx-54c98b4f84-mc9lw   1/1     Running   0          54s   192.168.163.241   i-04012a4d55813e76a
+```
+
+Checking nodes again reveals a third node (`i-04012a4d55813e76a`) was automatically added.
+
+```bash
+kubectl get nodes
+```
+
+```text
+NAME                  STATUS   ROLES    AGE   VERSION
+i-04012a4d55813e76a   Ready    <none>   35s   v1.32.11-eks-ac2d5a0
+i-0a3b6967393de6f9d   Ready    <none>   81s   v1.32.11-eks-ac2d5a0
+i-0bc928a12acfe91a2   Ready    <none>   81s   v1.32.11-eks-ac2d5a0
+```
+
+Auto Mode automatically added a node in response to workload demand — no Karpenter or Cluster Autoscaler configuration required.
+
+## When to Choose Auto Mode
+
+Auto Mode isn't a silver bullet. Use these criteria to decide:
+
+**Auto Mode is a good fit when:**
+
+- You want a dev/staging cluster without infrastructure management overhead
+- Your team has limited Kubernetes infrastructure experience
+- Your workloads are standard and don't require specialized instance types
+
+**Traditional approach is better when:**
+
+- You need specific hardware like GPU instances
+- You want fine-grained control over spot instances for cost optimization
+- You need OS-level customization on nodes
+
+## Takeaways
+
+- **One flag eliminates infrastructure management** — `--enable-auto-mode` delegates node group design, scaling, and patching to EKS, letting you focus on workload development.
+- **eksctl makes the barrier to entry even lower** — VPC, IAM roles, and everything else are created with a single command, making environment setup dramatically faster.
+- **The key decision is "how much do you want to manage yourself?"** — Auto Mode simplifies operations but limits fine-grained control. Evaluate your use case to choose between Auto Mode and traditional node groups.
