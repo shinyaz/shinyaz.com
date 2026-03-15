@@ -199,6 +199,28 @@ i-0bc928a12acfe91a2   Ready    <none>   81s   v1.32.11-eks-ac2d5a0
 
 ワークロードの要求に応じて Auto Mode がノードを自動追加する動作を確認できた。Karpenter や Cluster Autoscaler の設定は一切不要だ。
 
+### ワークロード削除とスケールダウン
+
+スケールアップだけでなく、スケールダウンも確認しておこう。先ほどデプロイした nginx を削除する。
+
+```bash
+kubectl delete deployment nginx
+```
+
+削除後にノード一覧を確認すると、ワークロード用に追加された3台目のノードが自動的に除去され、2台に戻っていた。
+
+```bash
+kubectl get nodes
+```
+
+```text
+NAME                  STATUS   ROLES    AGE   VERSION
+i-0bc928a12acfe91a2   Ready    <none>   79m   v1.32.11-eks-ac2d5a0
+i-04012a4d55813e76a   Ready    <none>   78m   v1.32.11-eks-ac2d5a0
+```
+
+スケールアップ・スケールダウンの両方が Auto Mode によって自動管理されることを確認できた。従来方式では Karpenter の `consolidationPolicy` や Cluster Autoscaler の `scale-down-unneeded-time` といったパラメータを調整する必要があったが、Auto Mode ではこれらの設定も不要だ。
+
 ## Auto Mode を選ぶべきケース
 
 Auto Mode は万能ではない。以下の基準で判断するとよい。

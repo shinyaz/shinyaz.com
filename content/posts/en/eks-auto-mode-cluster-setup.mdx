@@ -199,6 +199,28 @@ i-0bc928a12acfe91a2   Ready    <none>   81s   v1.32.11-eks-ac2d5a0
 
 Auto Mode automatically added a node in response to workload demand — no Karpenter or Cluster Autoscaler configuration required.
 
+### Workload Deletion and Scale-Down
+
+Let's verify scale-down as well. Delete the nginx deployment we just created.
+
+```bash
+kubectl delete deployment nginx
+```
+
+Checking nodes after deletion, the third node that was added for the workload has been automatically removed, bringing the count back to 2.
+
+```bash
+kubectl get nodes
+```
+
+```text
+NAME                  STATUS   ROLES    AGE   VERSION
+i-0bc928a12acfe91a2   Ready    <none>   79m   v1.32.11-eks-ac2d5a0
+i-04012a4d55813e76a   Ready    <none>   78m   v1.32.11-eks-ac2d5a0
+```
+
+Both scale-up and scale-down are fully managed by Auto Mode. With traditional setups, you'd need to tune parameters like Karpenter's `consolidationPolicy` or Cluster Autoscaler's `scale-down-unneeded-time` — Auto Mode eliminates all of that.
+
 ## When to Choose Auto Mode
 
 Auto Mode isn't a silver bullet. Use these criteria to decide:
