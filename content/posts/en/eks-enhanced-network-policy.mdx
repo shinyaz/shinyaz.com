@@ -1,0 +1,242 @@
+---
+title: "FQDN-Based Traffic Control with EKS Enhanced Network Policies"
+description: "Verified ClusterNetworkPolicy and ApplicationNetworkPolicy on EKS Auto Mode. Domain name-based egress filtering enables multi-layered access control that restricts pods to specific external services only."
+date: "2026-03-20"
+published: true
+featured: false
+categories: [infrastructure]
+tags: ["aws", "eks", "kubernetes", "networking", "devops"]
+---
+
+## Introduction
+
+Standard Kubernetes NetworkPolicy is useful for controlling pod-to-pod communication, but falls short when you need "this pod should only access specific domains." CIDR-based rules exist, but CDN and cloud service IPs change dynamically, making them impractical.
+
+A [December 2025 update](https://aws.amazon.com/about-aws/whats-new/2025/12/amazon-eks-enhanced-network-security-policies/) introduced enhanced network policy capabilities to EKS. **ClusterNetworkPolicy** enables cluster-wide policy management, while **ApplicationNetworkPolicy** adds FQDN-based traffic control. Notably, FQDN filtering is exclusive to Auto Mode environments.
+
+In this post, I verify these features on the [Auto Mode cluster built previously](/en/post/eks-auto-mode-cluster-setup).
+
+## New Policy Resources
+
+EKS enhanced network policies add two new resources alongside standard NetworkPolicy:
+
+| Resource | Scope | Key Feature |
+|---|---|---|
+| **NetworkPolicy** | Namespace | Standard K8s. IP/port-based control |
+| **ApplicationNetworkPolicy** | Namespace | EKS extension. `domainNames` for FQDN-based control |
+| **ClusterNetworkPolicy** | Cluster | EKS extension. Admin/Baseline tier priority system |
+
+ClusterNetworkPolicy introduces `tier` and `priority` concepts. According to the [AWS documentation](https://docs.aws.amazon.com/eks/latest/userguide/cni-network-policy.html), the policy evaluation order is:
+
+1. **Admin tier ClusterNetworkPolicy** (evaluated first, lowest priority number first)
+   - **Deny** (highest precedence) → immediately block. No further ClusterNetworkPolicy or NetworkPolicy rules are processed. This ensures organization-wide security controls cannot be overridden by namespace-level policies
+   - **Allow** → accept traffic, skip further evaluation
+   - **Pass** → skip **all remaining Admin tier rules** and proceed directly to the NetworkPolicy tier. Used to explicitly delegate control for certain traffic patterns to application teams
+2. **NetworkPolicy tier** (namespace scope: ApplicationNetworkPolicy + standard NetworkPolicy) — evaluates traffic not matched by Admin Deny/Allow, or passed by Admin Pass. Namespace-scoped policies **can only be more restrictive** than Admin policies — they cannot override an Admin Deny, but can further restrict traffic that was allowed or passed
+3. **Baseline tier ClusterNetworkPolicy** — provides default security postures that can be overridden by namespace-scoped policies, giving teams flexibility to customize
+4. **Default → Deny** — if no policies match, traffic is denied
+
+## Enabling Network Policies
+
+Prerequisites: Kubernetes 1.29+ and VPC CNI v1.21.0+ are required. In Auto Mode environments, VPC CNI is managed and built-in, so you don't need to worry about the version.
+
+Two configuration steps are required in Auto Mode environments.
+
+### Enable the Controller via ConfigMap
+
+```bash
+kubectl apply -f - <<EOF
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: amazon-vpc-cni
+  namespace: kube-system
+data:
+  enable-network-policy-controller: "true"
+EOF
+```
+
+### Set NodeClass to DefaultDeny
+
+By default, NodeClass `networkPolicy` is set to `DefaultAllow`. Change it to `DefaultDeny`:
+
+```bash
+kubectl patch nodeclass default --type=merge \
+  -p '{"spec":{"networkPolicy":"DefaultDeny"}}'
+```
+
+Critical caveat: **this change only applies to newly created nodes**. Existing nodes retain `DefaultAllow`. You'll need to rotate nodes — either by deleting workloads and waiting for Auto Mode to provision new ones, or manually replacing them.
+
+```bash
+$ kubectl get cninodes -o jsonpath='{range .items[*]}{.metadata.name}: {.spec.networkPolicy}{"\n"}{end}'
+i-0676bb1b28ac86c6a: DefaultDeny    # New node → applied
+i-0e088c13093d6f297: DefaultAllow   # Existing node → not applied
+```
+
+## Verification: Step-by-Step Policy Application
+
+The test environment consists of three pods in an `app` namespace:
+
+- **backend** (`role=backend`) — nginx acting as an API server
+- **curl-backend** (`role=backend`) — same label, for testing
+- **curl-frontend** (`role=frontend`) — different label, to verify policy targeting
+
+### Step 1: Confirm DefaultDeny
+
+With NodeClass set to `DefaultDeny` and no policies applied:
+
+| Route | Result |
+|---|---|
+| curl-backend → backend Service | Blocked |
+| curl-backend → example.com | Blocked |
+| curl-frontend → backend Service | Blocked |
+
+All communication is blocked without explicit policies.
+
+### Step 2: Allow DNS
+
+FQDN filtering requires DNS resolution to work first. Allow DNS egress with a standard NetworkPolicy:
+
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-dns
+  namespace: app
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+  egress:
+    - ports:
+        - protocol: TCP
+          port: 53
+        - protocol: UDP
+          port: 53
+```
+
+At this point, name resolution succeeds but HTTP traffic remains blocked. Note that the [AWS documentation](https://docs.aws.amazon.com/eks/latest/userguide/cni-network-policy.html) states standard NetworkPolicy only applies to pods in a Deployment, yet in our testing it also worked on standalone pods created with `kubectl run`. In a DefaultDeny environment, existing policies appear to be evaluated regardless of how pods are created.
+
+### Step 3: FQDN Filtering with ApplicationNetworkPolicy
+
+Apply a policy allowing `role=backend` pods to reach only `example.com` on port 80. **The `domainNames` field is the core of FQDN-based filtering.**
+
+```yaml
+apiVersion: networking.k8s.aws/v1alpha1
+kind: ApplicationNetworkPolicy
+metadata:
+  name: allow-example-com-only
+  namespace: app
+spec:
+  podSelector:
+    matchLabels:
+      role: backend
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - domainNames:
+            - "example.com"
+      ports:
+        - protocol: TCP
+          port: 80
+```
+
+Results:
+
+| Source | Destination | Result | Reason |
+|---|---|---|---|
+| curl-backend | example.com:80 | **Allowed** | Matches FQDN rule |
+| curl-backend | httpbin.org:80 | **Blocked** | No matching FQDN rule |
+| curl-frontend | example.com:80 | **Blocked** | `role=frontend` not targeted |
+
+FQDN filtering works precisely, and pod label selection behaves as expected.
+
+### Step 4: Cluster-Wide Rules with ClusterNetworkPolicy
+
+Finally, allow intra-namespace communication using a ClusterNetworkPolicy at Admin tier. Service-based communication requires explicitly allowing the ClusterIP CIDR (`10.100.0.0/16`).
+
+```yaml
+apiVersion: networking.k8s.aws/v1alpha1
+kind: ClusterNetworkPolicy
+metadata:
+  name: allow-intra-app
+spec:
+  tier: Admin
+  priority: 50
+  subject:
+    namespaces:
+      matchLabels:
+        kubernetes.io/metadata.name: app
+  ingress:
+    - name: allow-from-app
+      action: Accept
+      from:
+        - namespaces:
+            matchLabels:
+              kubernetes.io/metadata.name: app
+  egress:
+    - name: allow-to-app-pods
+      action: Accept
+      to:
+        - namespaces:
+            matchLabels:
+              kubernetes.io/metadata.name: app
+    - name: allow-to-cluster-services
+      action: Accept
+      to:
+        - networks:
+            - "10.100.0.0/16"
+```
+
+Final results:
+
+| Route | Result |
+|---|---|
+| curl-backend → backend Service | **Allowed** (CNP) |
+| curl-backend → example.com | **Allowed** (ANP FQDN) |
+| curl-backend → httpbin.org | **Blocked** |
+| curl-frontend → backend Service | **Allowed** (CNP) |
+| curl-frontend → example.com | **Allowed** (unintended) |
+| curl-frontend → httpbin.org | **Blocked** |
+
+`curl-frontend` (`role=frontend`) can consistently reach `example.com` despite not being targeted by the FQDN policy, while `httpbin.org` is correctly blocked. The cause of this unintended access is analyzed in the next section.
+
+## FQDN Filtering Internals and Same-Node Side Effects
+
+The behavior where `curl-frontend` accessed `example.com` is explained by the FQDN filtering implementation. According to the [AWS documentation](https://docs.aws.amazon.com/eks/latest/userguide/auto-net-pol.html), FQDN policy enforcement works as follows:
+
+1. DNS requests pass through an eBPF filter proxy
+2. CoreDNS resolves the name
+3. Resolved IPs are **written to an eBPF map**
+4. **eBPF probes attached to the pod's veth interface** filter egress traffic based on TTL
+
+When a `role=backend` pod resolves `example.com`, the IP address is registered in the node-level eBPF map. When `curl-frontend` on the same node resolves the same domain, the IP already exists in the eBPF map, allowing the traffic through. `httpbin.org` is correctly blocked because no pod's FQDN rule includes it, so its IP is never registered in the eBPF map.
+
+In production, be aware that pods not targeted by a FQDN policy may gain unintended access when co-located on the same node. Consider pod anti-affinity rules or dedicated node pools to mitigate this.
+
+## Gotchas Discovered During Verification
+
+### NodeClass Changes Don't Apply to Existing Nodes
+
+Only nodes created after the `DefaultDeny` change pick it up. Plan a rolling update strategy for production environments.
+
+### DNS Must Be Allowed Before FQDN Filtering Works
+
+In a `DefaultDeny` environment, DNS itself is blocked. Without explicit DNS egress rules, all name resolution fails and FQDN policies become useless.
+
+## Limitations
+
+- **FQDN filtering is Auto Mode only** — The `domainNames` field only works on Auto Mode-launched EC2 instances. Not available with managed node groups
+- **Standard NetworkPolicy targets Deployment pods only** — Per the [AWS documentation](https://docs.aws.amazon.com/eks/latest/userguide/cni-network-policy.html), standalone pods from `kubectl run` are not affected. ClusterNetworkPolicy and ApplicationNetworkPolicy do not have this limitation
+- **Supported nodes** — EC2 Linux nodes only. Not supported on Fargate or Windows nodes
+- **IP family** — IPv4 or IPv6 only, not both. IPv4 policies are ignored on IPv6 clusters and vice versa
+- **Ports/protocols** — Maximum of 24 port and protocol combinations per CIDR
+- **EC2 IMDS** — Avoid blocking access to EC2 IMDS (`169.254.169.254`) with network policies. Pods using IAM Roles for Service Accounts or EKS Pod Identity are not affected
+- **Route 53 DNS Firewall interaction** — Per the [AWS documentation](https://docs.aws.amazon.com/eks/latest/userguide/auto-net-pol.html), EKS network policies and Route 53 DNS Firewall are complementary security layers. Even if an EKS policy allows egress, a DNS Firewall blocking the domain query will cause DNS resolution to fail, preventing the connection
+
+## Takeaways
+
+- **`domainNames` eliminates IP-chasing for access control** — Control egress by domain name instead of dynamic IPs. This is intuitive and practical for CDN and cloud service endpoints, though it's currently an Auto Mode exclusive.
+- **Three policy layers build defense in depth** — NodeClass `DefaultDeny`, ClusterNetworkPolicy for global rules, and ApplicationNetworkPolicy for per-pod FQDN control combine to create granular access control.
+- **Ordering and prerequisites matter** — ConfigMap creation → NodeClass change → node rotation → DNS allowance → policy application. Skip a step and you'll either break all traffic or have policies that don't enforce.

@@ -1,0 +1,242 @@
+---
+title: "EKS の強化ネットワークポリシーで FQDN ベースのトラフィック制御を実現する"
+description: "EKS Auto Mode 環境で ClusterNetworkPolicy と ApplicationNetworkPolicy を検証。ドメイン名ベースの Egress フィルタリングにより、特定の外部サービスのみへの通信を許可する多層的なアクセス制御を実現した。"
+date: "2026-03-20"
+published: true
+featured: false
+categories: [infrastructure]
+tags: ["aws", "eks", "kubernetes", "networking", "devops"]
+---
+
+## はじめに
+
+Kubernetes の標準 NetworkPolicy は Pod 間通信の制御に有用だが、「この Pod からは特定のドメインにだけアクセスを許可したい」というユースケースには対応できなかった。IP アドレスの CIDR で制御する方法はあるが、CDN やクラウドサービスの IP は動的に変わるため現実的ではない。
+
+[2025年12月のアップデート](https://aws.amazon.com/jp/about-aws/whats-new/2025/12/amazon-eks-enhanced-network-security-policies/)で、EKS に強化ネットワークポリシー機能が導入された。**ClusterNetworkPolicy** によるクラスター全体のポリシー管理と、**ApplicationNetworkPolicy** による FQDN ベースのトラフィック制御が可能になった。特に FQDN フィルタリングは Auto Mode 環境限定の機能だ。
+
+この記事では、[前回構築した Auto Mode クラスター](/ja/post/eks-auto-mode-cluster-setup)で実際にこれらの機能を検証した結果を共有する。
+
+## 新しいポリシーリソースの概要
+
+EKS の強化ネットワークポリシーでは、従来の NetworkPolicy に加えて2つの新しいリソースが追加された。
+
+| リソース | スコープ | 特徴 |
+|---|---|---|
+| **NetworkPolicy** | Namespace | 従来の K8s 標準。IP/Port ベースの制御 |
+| **ApplicationNetworkPolicy** | Namespace | EKS 拡張。`domainNames` で FQDN ベースの制御が可能 |
+| **ClusterNetworkPolicy** | Cluster | EKS 拡張。Admin/Baseline tier による優先度制御 |
+
+ClusterNetworkPolicy には `tier` と `priority` の概念がある。[AWS ドキュメント](https://docs.aws.amazon.com/eks/latest/userguide/cni-network-policy.html)によると、ポリシーの評価順序は以下の通りだ。
+
+1. **Admin tier ClusterNetworkPolicy**（priority の数値が小さい順に評価）
+   - **Deny**（最高優先度）→ 即座に遮断。後続の ClusterNetworkPolicy や NetworkPolicy は一切評価されない。組織全体のセキュリティ制御を namespace レベルのポリシーで上書きできないことを保証する
+   - **Allow** → 即座に許可、以降の評価をスキップ
+   - **Pass** → 残りの Admin tier ルールを**全てスキップ**し、NetworkPolicy tier に直行。特定のトラフィックパターンの制御をアプリケーションチームに明示的に委譲する際に使用する
+2. **NetworkPolicy tier**（namespace スコープ：ApplicationNetworkPolicy + 標準 NetworkPolicy）— Admin tier で Deny/Allow にマッチしなかった、または Pass されたトラフィックが評価される。namespace スコープのポリシーは **Admin ポリシーより制限的にしかできない**。Admin の Deny を上書きすることはできないが、Allow や Pass されたトラフィックをさらに制限できる
+3. **Baseline tier ClusterNetworkPolicy** — Admin tier や namespace スコープのポリシーにマッチしなかったトラフィックが評価される。組織全体のデフォルトセキュリティポスチャを提供しつつ、namespace スコープのポリシーで上書きできる柔軟性を持つ
+4. **デフォルト → Deny** — どのポリシーにもマッチしない場合は拒否
+
+## 有効化手順
+
+前提条件として、Kubernetes 1.29 以上かつ VPC CNI v1.21.0 以上が必要だ。Auto Mode 環境では VPC CNI がマネージドで組み込まれているため、バージョンを意識する必要はない。
+
+Auto Mode 環境でネットワークポリシーを有効化するには、2つの設定が必要だ。
+
+### ConfigMap によるコントローラーの有効化
+
+```bash
+kubectl apply -f - <<EOF
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: amazon-vpc-cni
+  namespace: kube-system
+data:
+  enable-network-policy-controller: "true"
+EOF
+```
+
+### NodeClass の DefaultDeny 設定
+
+デフォルトでは NodeClass の `networkPolicy` は `DefaultAllow`（全通信許可）に設定されている。これを `DefaultDeny` に変更する。
+
+```bash
+kubectl patch nodeclass default --type=merge \
+  -p '{"spec":{"networkPolicy":"DefaultDeny"}}'
+```
+
+重要な注意点として、**この変更は既存ノードには反映されない**。変更後に作成された新しいノードにのみ `DefaultDeny` が適用される。既存のワークロードを削除してノードのローテーションを待つか、ノードを手動で入れ替える必要がある。
+
+```bash
+$ kubectl get cninodes -o jsonpath='{range .items[*]}{.metadata.name}: {.spec.networkPolicy}{"\n"}{end}'
+i-0676bb1b28ac86c6a: DefaultDeny    # 新規ノード → 反映済み
+i-0e088c13093d6f297: DefaultAllow   # 既存ノード → 未反映
+```
+
+## 検証: 段階的なポリシー適用
+
+テスト環境として `app` namespace に3つの Pod を配置した。
+
+- **backend**（`role=backend`）— nginx による API サーバー役
+- **curl-backend**（`role=backend`）— backend と同じラベル、テスト用
+- **curl-frontend**（`role=frontend`）— 異なるラベル、ポリシー対象外の確認用
+
+### Step 1: DefaultDeny の確認
+
+NodeClass を `DefaultDeny` に設定し、ポリシーを一切適用しない状態でテストした。
+
+| 通信経路 | 結果 |
+|---|---|
+| curl-backend → backend Service | ブロック |
+| curl-backend → example.com | ブロック |
+| curl-frontend → backend Service | ブロック |
+
+`DefaultDeny` により、明示的なポリシーなしではすべての通信がブロックされることを確認した。
+
+### Step 2: DNS 通信の許可
+
+ドメインベースのフィルタリングを機能させるには、まず DNS（port 53）の Egress を許可する必要がある。これは標準の NetworkPolicy で設定する。
+
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-dns
+  namespace: app
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+  egress:
+    - ports:
+        - protocol: TCP
+          port: 53
+        - protocol: UDP
+          port: 53
+```
+
+この時点で名前解決は成功するが、HTTP 通信はまだブロックされる。なお、[AWS ドキュメント](https://docs.aws.amazon.com/eks/latest/userguide/cni-network-policy.html)では標準 NetworkPolicy は Deployment の Pod のみが対象とされているが、今回の検証ではスタンドアロン Pod（`kubectl run` で作成）に対しても DNS 許可が機能した。DefaultDeny 環境では Pod の作成方法にかかわらず、存在するポリシーが評価される挙動と考えられる。
+
+### Step 3: ApplicationNetworkPolicy で FQDN フィルタリング
+
+`role=backend` の Pod に対して、`example.com` への HTTP 通信のみを許可するポリシーを適用する。**`domainNames` フィールドが FQDN ベースフィルタリングの核心だ。**
+
+```yaml
+apiVersion: networking.k8s.aws/v1alpha1
+kind: ApplicationNetworkPolicy
+metadata:
+  name: allow-example-com-only
+  namespace: app
+spec:
+  podSelector:
+    matchLabels:
+      role: backend
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - domainNames:
+            - "example.com"
+      ports:
+        - protocol: TCP
+          port: 80
+```
+
+テスト結果:
+
+| 通信元 | 宛先 | 結果 | 理由 |
+|---|---|---|---|
+| curl-backend | example.com:80 | **許可** | FQDN ルールに一致 |
+| curl-backend | httpbin.org:80 | **ブロック** | FQDN ルールに不一致 |
+| curl-frontend | example.com:80 | **ブロック** | `role=frontend` はポリシー対象外 |
+
+`domainNames` によるフィルタリングが正確に機能し、ラベルによる Pod の選択も期待通り動作した。
+
+### Step 4: ClusterNetworkPolicy でクラスター内通信を許可
+
+最後に、ClusterNetworkPolicy で `app` namespace 内の Pod 間通信を Admin tier で許可する。Service 経由の通信には ClusterIP CIDR（`10.100.0.0/16`）への Egress 許可も必要だ。
+
+```yaml
+apiVersion: networking.k8s.aws/v1alpha1
+kind: ClusterNetworkPolicy
+metadata:
+  name: allow-intra-app
+spec:
+  tier: Admin
+  priority: 50
+  subject:
+    namespaces:
+      matchLabels:
+        kubernetes.io/metadata.name: app
+  ingress:
+    - name: allow-from-app
+      action: Accept
+      from:
+        - namespaces:
+            matchLabels:
+              kubernetes.io/metadata.name: app
+  egress:
+    - name: allow-to-app-pods
+      action: Accept
+      to:
+        - namespaces:
+            matchLabels:
+              kubernetes.io/metadata.name: app
+    - name: allow-to-cluster-services
+      action: Accept
+      to:
+        - networks:
+            - "10.100.0.0/16"
+```
+
+最終テスト結果:
+
+| 通信元 | 宛先 | 結果 |
+|---|---|---|
+| curl-backend → backend Service | **許可**（CNP） |
+| curl-backend → example.com | **許可**（ANP FQDN） |
+| curl-backend → httpbin.org | **ブロック** |
+| curl-frontend → backend Service | **許可**（CNP） |
+| curl-frontend → example.com | **許可**（意図しない許可） |
+| curl-frontend → httpbin.org | **ブロック** |
+
+`curl-frontend`（`role=frontend`）は FQDN ポリシーの対象外にもかかわらず、`example.com` に安定してアクセスできている。一方で `httpbin.org` はブロックされる。この意図しない許可の原因は次のセクションで考察する。
+
+## FQDN フィルタリングの内部実装と同一ノードの影響
+
+最終テストで `curl-frontend` が `example.com` にアクセスできた挙動は、FQDN フィルタリングの内部実装に起因すると考えられる。[AWS ドキュメント](https://docs.aws.amazon.com/eks/latest/userguide/auto-net-pol.html)によると、FQDN ポリシーの適用は以下のフローで動作する。
+
+1. DNS リクエストが eBPF フィルタ proxy を通過
+2. CoreDNS で名前解決
+3. 解決された IP が **eBPF マップに書き込まれる**
+4. Pod の **veth インターフェースに attach された eBPF probes** が TTL ベースで Egress トラフィックをフィルタ
+
+`role=backend` の Pod が `example.com` を解決した際に、その IP アドレスがノードレベルの eBPF マップに登録される。同一ノード上の `curl-frontend` が同じドメインを解決すると、eBPF マップに該当 IP が存在するためトラフィックが許可されたと考えられる。`httpbin.org` はどの Pod の FQDN ルールにも含まれないため、eBPF マップに IP が登録されず正しくブロックされる。
+
+本番環境では、FQDN ポリシー対象外の Pod が同一ノードに配置された場合に意図しない許可が発生しうる。Pod のアンチアフィニティや専用ノードプールの活用など、配置戦略を慎重に検討する必要がある。
+
+## 検証で得られた注意点
+
+### NodeClass 変更は既存ノードに反映されない
+
+`DefaultDeny` への変更後に新規作成されたノードのみに適用される。本番環境ではローリングアップデート戦略を検討する必要がある。
+
+### DNS 許可は FQDN フィルタリングの前提条件
+
+`DefaultDeny` 環境では DNS 自体がブロックされるため、ドメインベースのフィルタリングが機能しない。DNS Egress の許可を忘れると、すべての名前解決が失敗してハマる。
+
+## 制限事項
+
+- **FQDN フィルタリングは Auto Mode 限定** — `domainNames` フィールドは Auto Mode で起動された EC2 インスタンス上のワークロードのみに適用。マネージドノードグループでは利用不可
+- **標準 NetworkPolicy は Deployment の Pod のみ** — [AWS ドキュメント](https://docs.aws.amazon.com/eks/latest/userguide/cni-network-policy.html)によると、`kubectl run` で作成したスタンドアロン Pod には標準 NetworkPolicy は適用されない。ClusterNetworkPolicy と ApplicationNetworkPolicy にはこの制限なし
+- **対応ノード** — EC2 Linux ノードのみ。Fargate および Windows ノードには適用不可
+- **IP ファミリー** — IPv4 または IPv6 のいずれか一方のみ。IPv4 ポリシーは IPv6 クラスターでは無視される（逆も同様）
+- **ポート/プロトコル** — 単一 CIDR 当たりの組み合わせは最大24個
+- **EC2 IMDS** — ネットワークポリシーで EC2 IMDS（`169.254.169.254`）へのアクセスをブロックしないよう注意。IAM Roles for Service Accounts や EKS Pod Identity を使用している場合は影響なし
+- **Route 53 DNS Firewall との相互作用** — [AWS ドキュメント](https://docs.aws.amazon.com/eks/latest/userguide/auto-net-pol.html)によると、EKS ネットワークポリシーと Route 53 DNS Firewall は補完的なセキュリティレイヤーとして機能する。EKS ポリシーで Egress を許可しても、DNS Firewall がドメインクエリをブロックした場合は DNS 解決が失敗し接続できない
+
+## まとめ
+
+- **`domainNames` で IP を意識しないアクセス制御が実現** — CDN やクラウドサービスの動的 IP に悩まされることなく、ドメイン名で直感的に Egress を制御できる。ただし Auto Mode 限定の機能であることに注意。
+- **3層のポリシーで多層防御を構築** — NodeClass の `DefaultDeny`、ClusterNetworkPolicy による全体ルール、ApplicationNetworkPolicy による Pod 単位の FQDN 制御を組み合わせることで、きめ細かいアクセス制御が実現できる。
+- **有効化の順序と前提条件を見落とさない** — ConfigMap 作成 → NodeClass 変更 → ノードローテーション → DNS 許可 → ポリシー適用という順序を守らないと、通信が全断するか、ポリシーが効かない状態になる。
