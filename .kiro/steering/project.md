@@ -35,13 +35,17 @@ src/app/[locale]/                   → Pages (all under locale prefix)
 - **Server Components by default** — `"use client"` only for interactivity
 - **TypeScript strict** — No `any` without justification
 - **Tailwind only** — No custom CSS
-- **Build must pass** — No warnings allowed
-- **Bilingual parity** — ja/en features work equally
+- **Build must pass** — No warnings allowed. Build fails → `/debugging-build`
+- **Bilingual parity** — ja/en features work equally. Drift check → `/syncing-i18n`
 - **Japanese style** — だ/である体 for all blog posts (not ですます体)
 - **Tags** — lowercase, hyphenated (`nextjs` not `Next.js`)
+- **Lint clean** — Commit前に `/fixing-lint` でエラーゼロを確認
+- **Test clean** — コード変更時は既存テストの更新も行い `npm test` パスを確認
+- **Content writing** — Posts → `/writing-posts`, TILs → `/writing-tils`, Pages → `/writing-pages`
+- **Branch rule** — NEVER commit code directly to main. Code changes (src/, __tests__/, config, etc.) MUST go through a feature branch. Only `content/` changes may be committed directly to main.
 
 ## Git Workflow
 
-- Feature branches for code: `feat/`, `fix/`
-- Direct to main for `content/` only
+- Branch prefixes: `feat/`, `fix/`, `test/`, `refactor/`, `chore/`, `docs/`
 - Commit prefixes: `feat:`, `fix:`, `docs:`, `test:`, `refactor:`, `chore:`
+- Pre-merge validation → `/deploying-app`

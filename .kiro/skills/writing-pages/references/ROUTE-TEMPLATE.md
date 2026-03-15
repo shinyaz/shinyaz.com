@@ -70,3 +70,4 @@ export default async function YourPage({ params }: PageProps) {
 |-------|----------|------------|-------------------------|
 | about | About    | 自己紹介   | Profile image + author  |
 | uses  | Uses     | 使用ツール | Standard prose           |
+| now   | Now      | Now        | lastUpdated display     |

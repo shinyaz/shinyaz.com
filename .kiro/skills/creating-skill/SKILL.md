@@ -8,10 +8,9 @@ Create a new skill: $ARGUMENTS
 ## Skill Creation Workflow
 
 1. **Determine skill details**
-   - Name: gerund form (verb + -ing), kebab-case, 1-64 chars, lowercase alphanumeric + hyphens only
+   - Name: gerund form (verb + -ing), kebab-case, 1-64 chars
    - Examples: `writing-posts`, `fixing-lint`, `debugging-build`
-   - No leading/trailing hyphens, no consecutive hyphens (`--`)
-   - Purpose: Clear, single responsibility
+   - See [naming conventions](references/QUALITY-STANDARDS.md#naming-conventions) for full rules
 
 2. **Create skill in both agent directories**
    ```bash
@@ -27,25 +26,20 @@ Create a new skill: $ARGUMENTS
      What it does + when to use it + keywords for agent discovery.
    ---
    ```
-   Description rules (Claude tends to undertrigger, so be pushy):
-   - Third person only (not "I help" or "You can use")
-   - Must include explicit "Use when ..." clause with specific trigger conditions
-   - Add edge-case triggers: casual phrasing, adjacent keywords, common user expressions
-   - Max 1024 chars
+   See [description standards](references/QUALITY-STANDARDS.md#description-standards) — Claude undertriggers, so be pushy with "Use when ..." clauses.
 
-4. **Write the body content** — step-by-step instructions, examples, edge cases
-   - Do NOT include `git add -A` or auto-commit steps (let the user decide when to commit)
-   - Explain *why* behind instructions rather than heavy-handed MUSTs
+4. **Write the body content**
+   See [body content standards](references/QUALITY-STANDARDS.md#body-content-standards) and [templates](references/TEMPLATES.md) for patterns (workflow, knowledge, conditional, examples).
 
-5. **Keep SKILL.md under 500 lines**
+5. **Apply progressive disclosure** if SKILL.md approaches 500 lines
    - Move detailed reference material to `references/` directory
-   - Reference with relative paths: `See [details](references/REFERENCE.md)`
+   - See [progressive disclosure rules](references/QUALITY-STANDARDS.md#progressive-disclosure)
 
 6. **Copy to both agent directories**
    ```bash
-   cp .claude/skills/{skill-name}/SKILL.md .kiro/skills/{skill-name}/SKILL.md
+   cp -r .claude/skills/{skill-name}/ .kiro/skills/{skill-name}/
    ```
-   - Claude Code specific skills (not shared) go only in `.claude/skills/`
+   Claude Code specific skills (not shared) go only in `.claude/skills/`.
 
 7. **Update CLAUDE.md skills list** (Claude Code only)
    ```markdown
@@ -53,20 +47,27 @@ Create a new skill: $ARGUMENTS
    ```
    Kiro auto-discovers skills from `.kiro/skills/`, no listing needed.
 
-8. **Add context hints to CLAUDE.md** — Link the skill from relevant Critical Rules or workflow sections so Claude reaches for it in context. Example:
+8. **Add context hints to CLAUDE.md** — Link the skill from relevant Critical Rules or workflow sections so Claude reaches for it in context:
    ```markdown
    - **Build must pass** — No warnings allowed. Build fails → `/debugging-build`
    ```
 
+9. **Test the skill** — Try 2-3 realistic prompts to verify:
+   - Does the skill trigger when expected?
+   - Are the instructions clear enough for Claude to follow?
+   - Does the output match expectations?
+   - Adjust description or body based on observed behavior
+
 ## Validation Checklist
 
 - [ ] `name` uses gerund form and matches directory name
-- [ ] `name` is lowercase, alphanumeric + hyphens, no leading/trailing/consecutive hyphens
-- [ ] `description` includes what + when + keywords for agent auto-selection
 - [ ] `description` has explicit "Use when ..." clause (pushy, not passive)
-- [ ] SKILL.md under 500 lines — detailed docs in `references/`
+- [ ] Body is concise — no explanations Claude already knows
+- [ ] SKILL.md under 500 lines — references 1 level deep
+- [ ] Workflow skills have feedback loops and/or checklists
 - [ ] No `git add -A` or auto-commit in workflow steps
 - [ ] Exists in both `.claude/skills/` and `.kiro/skills/` (if shared)
 - [ ] CLAUDE.md skills list updated with context hints
+- [ ] Tested with 2-3 realistic prompts
 
-See [templates, skill types, and naming conventions](references/TEMPLATES.md).
+See [quality standards](references/QUALITY-STANDARDS.md) for the full criteria used to audit skills.

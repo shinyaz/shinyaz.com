@@ -32,7 +32,7 @@ description: "120-200 chars: what it does + unique insight"
 date: "YYYY-MM-DD"
 published: true
 featured: false # Reserve for major milestones only
-categories: [ai-tools] # Available: ai-tools, programming, writing
+categories: [ai-tools] # Available: ai-tools, infrastructure, programming, writing
 tags: ["nextjs", "typescript", "tailwindcss"] # lowercase, hyphenated
 ---
 ```
