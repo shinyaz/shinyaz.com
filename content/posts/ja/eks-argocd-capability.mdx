@@ -1,0 +1,383 @@
+---
+title: "EKS Capabilities の ArgoCD でマネージド GitOps 環境を構築する"
+description: "EKS Capabilities として提供される ArgoCD Capability を AWS CLI で有効化し、サンプルアプリのデプロイまでを実施。Identity Center のリージョン指定やアクセスポリシーの関連付けなど、実際に踏んだ落とし穴も共有する。"
+date: "2026-03-21"
+published: true
+featured: false
+categories: [infrastructure]
+tags: ["aws", "eks", "kubernetes", "argocd", "gitops", "devops"]
+---
+
+## はじめに
+
+Kubernetes 上で GitOps を実現する場合、ArgoCD は事実上の標準ツールだ。しかし、ArgoCD 自体の運用——バージョンアップ、HA 構成、認証基盤との統合——はそれなりの負荷がかかる。「GitOps を導入したいが ArgoCD の運用まで抱えたくない」というチームは少なくない。
+
+2025年11月、AWS は [EKS Capabilities](https://aws.amazon.com/jp/about-aws/whats-new/2025/11/amazon-eks-capabilities/) を発表した。これは EKS クラスター上でワークロードのデプロイやリソース管理を行うマネージド機能群で、その1つとして **ArgoCD Capability** が提供されている。ArgoCD のインストール・パッチ適用・スケーリングを AWS 側が管理してくれる仕組みだ。
+
+この記事では、既存の EKS Auto Mode クラスターに ArgoCD Capability を追加し、サンプルアプリケーションのデプロイまでを一気通貫で実施する。
+
+## EKS Capabilities とは
+
+EKS Capabilities は、EKS クラスター上で動作するマネージドプラットフォーム機能だ。現時点で以下の3つが提供されている。
+
+| Capability | 用途 |
+|---|---|
+| **ArgoCD** | GitOps による継続的デプロイ |
+| **AWS Controllers for Kubernetes (ACK)** | Kubernetes から AWS リソースを管理 |
+| **Kubernetes Resource Orchestrator (KRO)** | 複数リソースの動的オーケストレーション |
+
+いずれも AWS 所有のインフラで実行され、自動スケーリング・パッチ適用・アップグレードが AWS 側で処理される。利用者は Capability を有効化するだけで、ツール自体の運用を気にする必要がない。詳細は [AWS ブログの発表記事](https://aws.amazon.com/jp/blogs/aws/announcing-amazon-eks-capabilities-for-workload-orchestration-and-cloud-resource-management/) を参照。
+
+## 前提条件
+
+- EKS クラスター（Auto Mode）が稼働中であること（[前回の記事](/ja/posts/eks-auto-mode-cluster-setup)で構築したクラスターを使用）
+- AWS CLI v2.12.3 以上
+- kubectl が設定済みであること
+- AWS IAM Identity Center が有効であること
+
+今回は `sandbox` クラスター（v1.32、ap-northeast-1）に対して作業する。
+
+## Step 1: IAM Capability ロールの作成
+
+ArgoCD Capability が EKS コントロールプレーン上で動作するために、[専用の IAM ロール](https://docs.aws.amazon.com/eks/latest/userguide/capability-role.html)が必要だ。
+
+まず信頼ポリシーを作成する。
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Principal": {
+        "Service": "capabilities.eks.amazonaws.com"
+      },
+      "Action": [
+        "sts:AssumeRole",
+        "sts:TagSession"
+      ]
+    }
+  ]
+}
+```
+
+このポリシーを使って IAM ロールを作成する。
+
+```bash
+aws iam create-role \
+  --role-name ArgoCDCapabilityRole \
+  --assume-role-policy-document file://argocd-trust-policy.json
+```
+
+ポイントは、信頼ポリシーのプリンシパルが `capabilities.eks.amazonaws.com` である点だ。通常の EKS ロール（`eks.amazonaws.com`）とは異なる、EKS Capabilities 専用のサービスプリンシパルになる。基本構成では追加の IAM ポリシーは不要で、[Secrets Manager や CodeConnections と連携する場合](https://docs.aws.amazon.com/eks/latest/userguide/capability-role.html)のみ権限を追加すればよい。
+
+## Step 2: Identity Center 情報の取得
+
+ArgoCD Capability は認証基盤として AWS IAM Identity Center を使用する。ローカルユーザーはサポートされていないため、Identity Center の事前設定が必須だ。
+
+```bash
+# Identity Center インスタンス ARN と Identity Store ID の取得
+aws sso-admin list-instances \
+  --query 'Instances[0].{InstanceArn:InstanceArn,IdentityStoreId:IdentityStoreId}' \
+  --output table
+```
+
+```text
+-----------------------------------------------------------------------
+|                           ListInstances                             |
++------------------+--------------------------------------------------+
+| IdentityStoreId  |                   InstanceArn                    |
++------------------+--------------------------------------------------+
+|  d-1234567890    |  arn:aws:sso:::instance/ssoins-1234567890abcdef  |
++------------------+--------------------------------------------------+
+```
+
+取得した `IdentityStoreId` を使ってユーザー ID を取得する。
+
+```bash
+# ユーザー ID の取得
+aws identitystore list-users \
+  --identity-store-id d-1234567890 \
+  --query 'Users[].{UserName:UserName,UserId:UserId}' \
+  --output table
+```
+
+```text
+--------------------------------------------------------
+|                       ListUsers                      |
++----------------------------------------+-------------+
+|                 UserId                 |  UserName   |
++----------------------------------------+-------------+
+|  a1b2c3d4-5678-90ab-cdef-EXAMPLE11111  |  your-username  |
++----------------------------------------+-------------+
+```
+
+ここで重要なのが **Identity Center のホームリージョン** の特定だ。Identity Center はグローバルに見えるが、実際には特定のリージョンにデプロイされている。EKS クラスターが `ap-northeast-1` にあっても、Identity Center のホームリージョンが異なる場合がある。
+
+```bash
+# 各リージョンで Identity Center の存在を確認
+for region in us-east-1 us-west-2 ap-northeast-1; do
+  result=$(aws sso-admin list-instances --region $region \
+    --query 'Instances[0].InstanceArn' --output text 2>&1)
+  echo "$region: $result"
+done
+```
+
+```text
+us-east-1: arn:aws:sso:::instance/ssoins-1234567890abcdef
+us-west-2: None
+ap-northeast-1: None
+```
+
+今回の環境では Identity Center は `us-east-1` にデプロイされていた。**この値を次のステップの `idcRegion` に正確に指定しないと `AccessDeniedException` になる**。実際に `ap-northeast-1` を指定して失敗した。EKS クラスターのリージョンと Identity Center のリージョンは独立している点を押さえておきたい。
+
+## Step 3: ArgoCD Capability の作成
+
+[`aws eks create-capability`](https://docs.aws.amazon.com/eks/latest/userguide/create-argocd-capability.html) コマンドで ArgoCD Capability を有効化する。
+
+```bash
+aws eks create-capability \
+  --region ap-northeast-1 \
+  --cluster-name sandbox \
+  --capability-name argocd \
+  --type ARGOCD \
+  --role-arn arn:aws:iam::111122223333:role/ArgoCDCapabilityRole \
+  --delete-propagation-policy RETAIN \
+  --configuration '{
+    "argoCd": {
+      "awsIdc": {
+        "idcInstanceArn": "arn:aws:sso:::instance/ssoins-1234567890abcdef",
+        "idcRegion": "us-east-1"
+      },
+      "rbacRoleMappings": [{
+        "role": "ADMIN",
+        "identities": [{
+          "id": "a1b2c3d4-5678-90ab-cdef-EXAMPLE11111",
+          "type": "SSO_USER"
+        }]
+      }]
+    }
+  }'
+```
+
+`--delete-propagation-policy` は必須パラメータだ（ドキュメント上はオプショナルに見えるが、CLI ではバリデーションされる）。`RETAIN` を指定すると、Capability を削除してもデプロイ済みのリソースは残る。
+
+コマンドは即座に返り、レスポンスには ArgoCD UI のマネージド URL が含まれている。
+
+```text
+"serverUrl": "https://xxxxxxxxxx.eks-capabilities.ap-northeast-1.amazonaws.com"
+```
+
+ステータスが `ACTIVE` になるまで待機する。今回の環境では約4分で完了した。
+
+```bash
+aws eks describe-capability \
+  --region ap-northeast-1 \
+  --cluster-name sandbox \
+  --capability-name argocd \
+  --query 'capability.{status:status,version:version}' \
+  --output table
+```
+
+```text
++----------+-----------------+
+|  status  |    version      |
++----------+-----------------+
+|  ACTIVE  |  3.1.8-eks-1    |
++----------+-----------------+
+```
+
+ArgoCD 3.1.8 の EKS マネージド版がデプロイされた。バージョン管理も AWS 側で行われるため、手動でのアップグレード作業は不要だ。
+
+## Step 4: インストール確認
+
+### CRD
+
+Capability がアクティブになると、ArgoCD の CRD がクラスターに自動インストールされる。
+
+```bash
+kubectl api-resources | grep argoproj.io
+```
+
+```text
+applications       app,apps       argoproj.io/v1alpha1   true   Application
+applicationsets    appset,appsets argoproj.io/v1alpha1   true   ApplicationSet
+appprojects        appproj        argoproj.io/v1alpha1   true   AppProject
+```
+
+`argocd` namespace も自動作成されている。
+
+```bash
+kubectl get ns argocd
+```
+
+```text
+NAME     STATUS   AGE
+argocd   Active   4m16s
+```
+
+セルフホスト版では Helm や kustomize で ArgoCD をインストールし、namespace の作成から CRD の適用まで手動で行う必要があった。Capability ではこれが完全に自動化されている。
+
+### ArgoCD UI
+
+Capability 作成時のレスポンスに含まれていた `serverUrl` をブラウザで開くと、IAM Identity Center のログイン画面にリダイレクトされる。Identity Center のユーザー名とパスワードで認証すると、ArgoCD のダッシュボードが表示された。
+
+セルフホスト版では Ingress Controller の設定、TLS 証明書の発行（cert-manager 等）、Dex や OIDC プロバイダーの構築が必要だったが、Capability 版ではこれらがすべて不要だ。マネージド URL にアクセスするだけで、Identity Center 経由の SSO ログインが即座に機能する。RBAC マッピングで `ADMIN` ロールを割り当てたユーザーには、ArgoCD の全操作権限が付与されている。
+
+## Step 5: ターゲットクラスターの登録
+
+ArgoCD Capability でアプリケーションをデプロイするには、[デプロイ先のクラスターを明示的に登録する](https://docs.aws.amazon.com/eks/latest/userguide/argocd-register-clusters.html)必要がある。**ローカルクラスター（ArgoCD が稼働しているクラスター自身）も自動登録されない**ため、手動での登録が必要だ。
+
+### アクセスポリシーの関連付け
+
+Capability 作成時に IAM ロールのアクセスエントリは自動で作成されるが、**デプロイに必要な権限は含まれていない**。明示的にアクセスポリシーを関連付ける必要がある。この手順を飛ばすと Application の同期が失敗するので注意。
+
+```bash
+aws eks associate-access-policy \
+  --region ap-northeast-1 \
+  --cluster-name sandbox \
+  --principal-arn arn:aws:iam::111122223333:role/ArgoCDCapabilityRole \
+  --policy-arn arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy \
+  --access-scope type=cluster
+```
+
+検証環境なので `AmazonEKSClusterAdminPolicy` を使っているが、本番環境では[セキュリティのベストプラクティス](https://docs.aws.amazon.com/eks/latest/userguide/capabilities-security.html)に従い、より制限的なカスタム RBAC を構成すべきだ。
+
+### クラスターの登録
+
+Kubernetes Secret としてクラスター情報を登録する。
+
+```yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: local-cluster
+  namespace: argocd
+  labels:
+    argocd.argoproj.io/secret-type: cluster
+stringData:
+  name: local-cluster
+  server: arn:aws:eks:ap-northeast-1:111122223333:cluster/sandbox
+  project: default
+```
+
+```bash
+kubectl apply -f local-cluster.yaml
+```
+
+注目すべきは `server` フィールドに Kubernetes API サーバーの URL ではなく **EKS クラスター ARN** を指定する点だ。これにより IAM ベースの認証が自動的に使われ、kubeconfig のトークン管理が不要になる。
+
+## Step 6: サンプルアプリケーションのデプロイ
+
+ArgoCD の公式サンプルである guestbook アプリをデプロイして動作を確認する。
+
+```yaml
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: guestbook
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/argoproj/argocd-example-apps
+    targetRevision: HEAD
+    path: guestbook
+  destination:
+    name: local-cluster
+    namespace: default
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+```
+
+```bash
+kubectl apply -f guestbook-app.yaml
+```
+
+Application のステータスを確認する。作成直後は `Progressing` だが、約45秒後に `Healthy` に遷移した。
+
+```bash
+kubectl get application guestbook -n argocd -o wide
+```
+
+```text
+NAME        SYNC STATUS   HEALTH STATUS   REVISION                                   PROJECT
+guestbook   Synced        Healthy         abc1234def5678901234567890abcdef12345678   default
+```
+
+Pod と Service も正常に起動している。
+
+```bash
+kubectl get pods,svc -n default
+```
+
+```text
+NAME                                READY   STATUS    RESTARTS   AGE
+pod/guestbook-ui-xxxxxxxxxx-xxxxx   1/1     Running   0          58s
+
+NAME                   TYPE        CLUSTER-IP     EXTERNAL-IP   PORT(S)   AGE
+service/guestbook-ui   ClusterIP   10.100.xx.xx   <none>        80/TCP    59s
+```
+
+ここまでで、**EKS Capability としての ArgoCD を有効化し、GitOps によるアプリケーションデプロイまでが完了した**。ArgoCD のインストール、Ingress の設定、TLS 証明書の管理、認証基盤の構築といった作業はすべて AWS 側で処理されている。
+
+## セルフホスト ArgoCD との比較
+
+| 項目 | セルフホスト | EKS Capability |
+|---|---|---|
+| インストール | Helm / kustomize で手動 | `create-capability` 一発 |
+| バージョンアップ | 手動（ダウンタイム計画が必要） | AWS が自動管理（今回は 3.1.8-eks-1） |
+| 高可用性 | 自前で HA 構成を設計 | AWS 側で管理 |
+| 認証 | Dex / OIDC を自前設定 | Identity Center と統合済み |
+| UI アクセス | Ingress + TLS を自前構築 | マネージド URL が自動発行 |
+| カスタマイズ | 自由度が高い | Capability の設定範囲内 |
+| コスト | EC2 + 運用人件費 | Capability 利用料 |
+
+## まとめ
+
+- **ArgoCD の運用を AWS に委譲できる** — インストール、パッチ適用、スケーリング、認証統合がすべてマネージドになる。プラットフォームチームは ArgoCD 自体の面倒を見る必要がなく、GitOps のワークフロー設計に集中できる。
+- **Identity Center のリージョン設定が最初の関門** — EKS クラスターのリージョンと Identity Center のホームリージョンは独立している。Organizations 環境では管理アカウント側のリージョンにデプロイされていることが多く、`idcRegion` の事前確認が必須だ。
+- **アクセスエントリ≠デプロイ権限** — Capability 作成で自動生成されるアクセスエントリにはデプロイ権限が含まれない。`associate-access-policy` による明示的な権限付与を忘れずに行う必要がある。
+- **Capability は「選択と集中」の設計判断** — カスタマイズの自由度はセルフホスト版に劣るが、運用負荷は大幅に下がる。チームのスキルセットと運用体制に応じた使い分けが重要だ。
+
+## クリーンアップ
+
+検証が終わったら、作成したリソースを逆順で削除する。
+
+```bash
+# 1. Application の削除
+kubectl delete application guestbook -n argocd
+
+# 2. Application が管理していたリソースの削除
+#    finalizer を設定していない場合、カスケード削除されないため手動で削除する
+kubectl delete deployment guestbook-ui -n default
+kubectl delete svc guestbook-ui -n default
+
+# 3. クラスター登録の削除
+kubectl delete secret local-cluster -n argocd
+
+# 4. アクセスポリシーの解除
+aws eks disassociate-access-policy \
+  --region ap-northeast-1 \
+  --cluster-name sandbox \
+  --principal-arn arn:aws:iam::111122223333:role/ArgoCDCapabilityRole \
+  --policy-arn arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy
+
+# 5. Capability の削除（約2分かかる）
+aws eks delete-capability \
+  --region ap-northeast-1 \
+  --cluster-name sandbox \
+  --capability-name argocd
+
+# 6. RETAIN ポリシーで残った namespace の削除
+kubectl delete ns argocd
+
+# 7. IAM ロールの削除
+aws iam delete-role --role-name ArgoCDCapabilityRole
+```
+
+Capability を `RETAIN` ポリシーで作成した場合、削除後も `argocd` namespace や CRD がクラスターに残る。完全にクリーンな状態に戻すには手順6のように手動で namespace を削除する必要がある。また、Application 削除時にデプロイ済みリソースをカスケード削除したい場合は、Application マニフェストに `metadata.finalizers: [resources-finalizer.argocd.argoproj.io]` を追加しておく。

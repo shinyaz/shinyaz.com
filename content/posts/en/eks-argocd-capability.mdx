@@ -1,0 +1,374 @@
+---
+title: "Build a Managed GitOps Environment with EKS Capabilities ArgoCD"
+description: "Enable ArgoCD Capability on EKS via AWS CLI and deploy a sample app end-to-end. Covers real gotchas like Identity Center region mismatch and access policy setup."
+date: "2026-03-21"
+published: true
+featured: false
+categories: [infrastructure]
+tags: ["aws", "eks", "kubernetes", "argocd", "gitops", "devops"]
+---
+
+## Introduction
+
+ArgoCD is the de facto standard for GitOps on Kubernetes. But operating ArgoCD itself—version upgrades, HA configuration, auth integration—carries a non-trivial operational burden. Many teams want GitOps without owning the ArgoCD lifecycle.
+
+In November 2025, AWS announced [EKS Capabilities](https://aws.amazon.com/about-aws/whats-new/2025/11/amazon-eks-capabilities/), a set of managed platform features for workload deployment and resource management. One of them is **ArgoCD Capability**, where AWS handles the installation, patching, and scaling of ArgoCD.
+
+This post walks through adding ArgoCD Capability to an existing EKS Auto Mode cluster and deploying a sample application end-to-end.
+
+## What Are EKS Capabilities?
+
+EKS Capabilities are managed platform features running on EKS clusters. Three are currently available:
+
+| Capability | Purpose |
+|---|---|
+| **ArgoCD** | Continuous deployment via GitOps |
+| **AWS Controllers for Kubernetes (ACK)** | Manage AWS resources from Kubernetes |
+| **Kubernetes Resource Orchestrator (KRO)** | Dynamic multi-resource orchestration |
+
+All run on AWS-owned infrastructure with automatic scaling, patching, and upgrades handled by AWS. See the [AWS blog announcement](https://aws.amazon.com/blogs/aws/announcing-amazon-eks-capabilities-for-workload-orchestration-and-cloud-resource-management/) for details.
+
+## Prerequisites
+
+- An EKS Auto Mode cluster up and running ([built in the previous post](/en/posts/eks-auto-mode-cluster-setup))
+- AWS CLI v2.12.3+
+- kubectl configured for the cluster
+- AWS IAM Identity Center enabled
+
+I'm working with the `sandbox` cluster (v1.32, ap-northeast-1).
+
+## Step 1: Create the IAM Capability Role
+
+ArgoCD Capability needs a [dedicated IAM role](https://docs.aws.amazon.com/eks/latest/userguide/capability-role.html) with a trust policy for the Capabilities service.
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Principal": {
+        "Service": "capabilities.eks.amazonaws.com"
+      },
+      "Action": [
+        "sts:AssumeRole",
+        "sts:TagSession"
+      ]
+    }
+  ]
+}
+```
+
+```bash
+aws iam create-role \
+  --role-name ArgoCDCapabilityRole \
+  --assume-role-policy-document file://argocd-trust-policy.json
+```
+
+The service principal `capabilities.eks.amazonaws.com` is specific to EKS Capabilities—different from the standard `eks.amazonaws.com`. No additional IAM policies are needed for basic setup; only add them when [integrating with Secrets Manager or CodeConnections](https://docs.aws.amazon.com/eks/latest/userguide/capability-role.html).
+
+## Step 2: Get Identity Center Information
+
+ArgoCD Capability uses IAM Identity Center for authentication. Local users are not supported.
+
+```bash
+aws sso-admin list-instances \
+  --query 'Instances[0].{InstanceArn:InstanceArn,IdentityStoreId:IdentityStoreId}' \
+  --output table
+```
+
+```text
+-----------------------------------------------------------------------
+|                           ListInstances                             |
++------------------+--------------------------------------------------+
+| IdentityStoreId  |                   InstanceArn                    |
++------------------+--------------------------------------------------+
+|  d-1234567890    |  arn:aws:sso:::instance/ssoins-1234567890abcdef  |
++------------------+--------------------------------------------------+
+```
+
+Use the `IdentityStoreId` to look up user IDs.
+
+```bash
+aws identitystore list-users \
+  --identity-store-id d-1234567890 \
+  --query 'Users[].{UserName:UserName,UserId:UserId}' \
+  --output table
+```
+
+```text
+--------------------------------------------------------
+|                       ListUsers                      |
++----------------------------------------+-------------+
+|                 UserId                 |  UserName   |
++----------------------------------------+-------------+
+|  a1b2c3d4-5678-90ab-cdef-EXAMPLE11111  |  your-username  |
++----------------------------------------+-------------+
+```
+
+Note the `UserId` for the RBAC mapping in the next step.
+
+The critical step here is **identifying the Identity Center home region**. It may differ from your EKS cluster region.
+
+```bash
+for region in us-east-1 us-west-2 ap-northeast-1; do
+  result=$(aws sso-admin list-instances --region $region \
+    --query 'Instances[0].InstanceArn' --output text 2>&1)
+  echo "$region: $result"
+done
+```
+
+```text
+us-east-1: arn:aws:sso:::instance/ssoins-1234567890abcdef
+us-west-2: None
+ap-northeast-1: None
+```
+
+In my environment, Identity Center lives in `us-east-1` while EKS runs in `ap-northeast-1`. **Specifying the wrong `idcRegion` results in `AccessDeniedException`**—I hit this exact error on my first attempt.
+
+## Step 3: Create the ArgoCD Capability
+
+Use [`aws eks create-capability`](https://docs.aws.amazon.com/eks/latest/userguide/create-argocd-capability.html) to enable the ArgoCD Capability.
+
+```bash
+aws eks create-capability \
+  --region ap-northeast-1 \
+  --cluster-name sandbox \
+  --capability-name argocd \
+  --type ARGOCD \
+  --role-arn arn:aws:iam::111122223333:role/ArgoCDCapabilityRole \
+  --delete-propagation-policy RETAIN \
+  --configuration '{
+    "argoCd": {
+      "awsIdc": {
+        "idcInstanceArn": "arn:aws:sso:::instance/ssoins-1234567890abcdef",
+        "idcRegion": "us-east-1"
+      },
+      "rbacRoleMappings": [{
+        "role": "ADMIN",
+        "identities": [{
+          "id": "a1b2c3d4-5678-90ab-cdef-EXAMPLE11111",
+          "type": "SSO_USER"
+        }]
+      }]
+    }
+  }'
+```
+
+`--delete-propagation-policy` is required (the docs make it look optional, but the CLI validates it). `RETAIN` keeps deployed resources even if the capability is deleted.
+
+The command returns immediately. The response includes a managed ArgoCD UI URL:
+
+```text
+"serverUrl": "https://xxxxxxxxxx.eks-capabilities.ap-northeast-1.amazonaws.com"
+```
+
+The capability took about 4 minutes to go from `CREATING` to `ACTIVE`.
+
+```bash
+aws eks describe-capability \
+  --region ap-northeast-1 \
+  --cluster-name sandbox \
+  --capability-name argocd \
+  --query 'capability.{status:status,version:version}' \
+  --output table
+```
+
+```text
++----------+-----------------+
+|  status  |    version      |
++----------+-----------------+
+|  ACTIVE  |  3.1.8-eks-1    |
++----------+-----------------+
+```
+
+ArgoCD 3.1.8 (EKS-managed) is deployed. Version management is fully handled by AWS.
+
+## Step 4: Verify Installation
+
+### CRDs
+
+Once active, ArgoCD CRDs are automatically installed in the cluster.
+
+```bash
+kubectl api-resources | grep argoproj.io
+```
+
+```text
+applications       app,apps       argoproj.io/v1alpha1   true   Application
+applicationsets    appset,appsets argoproj.io/v1alpha1   true   ApplicationSet
+appprojects        appproj        argoproj.io/v1alpha1   true   AppProject
+```
+
+The `argocd` namespace is also auto-created.
+
+```bash
+kubectl get ns argocd
+```
+
+```text
+NAME     STATUS   AGE
+argocd   Active   4m16s
+```
+
+No manual Helm install or kustomize apply needed—the Capability handles everything.
+
+### ArgoCD UI
+
+Opening the `serverUrl` from the capability response in a browser redirects to the IAM Identity Center login page. After authenticating with Identity Center credentials, the ArgoCD dashboard loaded successfully.
+
+With self-hosted ArgoCD, you'd need to set up an Ingress Controller, provision TLS certificates (e.g., cert-manager), and configure Dex or an OIDC provider. The Capability version eliminates all of that—just open the managed URL and SSO login via Identity Center works out of the box. The user mapped with the `ADMIN` RBAC role has full ArgoCD operational permissions.
+
+## Step 5: Register Target Cluster
+
+To deploy applications, you must explicitly [register target clusters](https://docs.aws.amazon.com/eks/latest/userguide/argocd-register-clusters.html). **The local cluster is not auto-registered.**
+
+### Associate Access Policy
+
+The capability auto-creates an access entry for the IAM role, but **it doesn't include deployment permissions**. You need to explicitly associate an access policy. Skip this step and Application sync will fail.
+
+```bash
+aws eks associate-access-policy \
+  --region ap-northeast-1 \
+  --cluster-name sandbox \
+  --principal-arn arn:aws:iam::111122223333:role/ArgoCDCapabilityRole \
+  --policy-arn arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy \
+  --access-scope type=cluster
+```
+
+Using `AmazonEKSClusterAdminPolicy` for testing—production environments should follow [security best practices](https://docs.aws.amazon.com/eks/latest/userguide/capabilities-security.html) with more restrictive custom RBAC.
+
+### Register the Cluster
+
+```yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: local-cluster
+  namespace: argocd
+  labels:
+    argocd.argoproj.io/secret-type: cluster
+stringData:
+  name: local-cluster
+  server: arn:aws:eks:ap-northeast-1:111122223333:cluster/sandbox
+  project: default
+```
+
+```bash
+kubectl apply -f local-cluster.yaml
+```
+
+The `server` field uses the **EKS cluster ARN** instead of the Kubernetes API server URL. This enables automatic IAM-based authentication without managing kubeconfig tokens.
+
+## Step 6: Deploy a Sample Application
+
+Deploying the official ArgoCD guestbook example to verify the full flow.
+
+```yaml
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: guestbook
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/argoproj/argocd-example-apps
+    targetRevision: HEAD
+    path: guestbook
+  destination:
+    name: local-cluster
+    namespace: default
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+```
+
+```bash
+kubectl apply -f guestbook-app.yaml
+```
+
+After about 45 seconds, the application transitioned from `Progressing` to `Healthy`.
+
+```bash
+kubectl get application guestbook -n argocd -o wide
+```
+
+```text
+NAME        SYNC STATUS   HEALTH STATUS   REVISION                                   PROJECT
+guestbook   Synced        Healthy         abc1234def5678901234567890abcdef12345678   default
+```
+
+```bash
+kubectl get pods,svc -n default
+```
+
+```text
+NAME                                READY   STATUS    RESTARTS   AGE
+pod/guestbook-ui-xxxxxxxxxx-xxxxx   1/1     Running   0          58s
+
+NAME                   TYPE        CLUSTER-IP     EXTERNAL-IP   PORT(S)   AGE
+service/guestbook-ui   ClusterIP   10.100.xx.xx   <none>        80/TCP    59s
+```
+
+End-to-end verified: **ArgoCD Capability enabled, Identity Center SSO working, and a GitOps-deployed application running.** All the infrastructure plumbing—ArgoCD installation, Ingress, TLS, auth—was handled by AWS.
+
+## Self-Hosted ArgoCD vs EKS Capability
+
+| Aspect | Self-hosted | EKS Capability |
+|---|---|---|
+| Installation | Manual via Helm / kustomize | Single `create-capability` call |
+| Upgrades | Manual with downtime planning | AWS-managed (3.1.8-eks-1) |
+| High availability | Design HA yourself | AWS-managed |
+| Authentication | Configure Dex / OIDC manually | Identity Center integrated |
+| UI access | Build Ingress + TLS yourself | Managed URL auto-provisioned |
+| Customization | Full flexibility | Limited to capability config |
+| Cost | EC2 + ops overhead | Capability pricing |
+
+## Takeaways
+
+- **Offload ArgoCD operations to AWS** — Installation, patching, scaling, and auth integration are all managed. Platform teams can focus on GitOps workflow design instead of ArgoCD lifecycle.
+- **Identity Center region is the first hurdle** — The EKS cluster region and Identity Center home region are independent. In Organizations setups, Identity Center often lives in the management account's region. Always verify the `idcRegion` beforehand.
+- **Access entry does not equal deploy permissions** — The auto-generated entry lacks deployment rights. Always follow up with `associate-access-policy`.
+- **Capability is a trade-off by design** — Less customization flexibility than self-hosted, but dramatically lower operational overhead. Choose based on your team's skill set and operational capacity.
+
+## Cleanup
+
+Once you're done testing, delete the resources in reverse order.
+
+```bash
+# 1. Delete the Application
+kubectl delete application guestbook -n argocd
+
+# 2. Delete the resources managed by the Application
+#    Without a finalizer, cascade deletion doesn't happen automatically
+kubectl delete deployment guestbook-ui -n default
+kubectl delete svc guestbook-ui -n default
+
+# 3. Remove cluster registration
+kubectl delete secret local-cluster -n argocd
+
+# 4. Disassociate the access policy
+aws eks disassociate-access-policy \
+  --region ap-northeast-1 \
+  --cluster-name sandbox \
+  --principal-arn arn:aws:iam::111122223333:role/ArgoCDCapabilityRole \
+  --policy-arn arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy
+
+# 5. Delete the Capability (~2 minutes)
+aws eks delete-capability \
+  --region ap-northeast-1 \
+  --cluster-name sandbox \
+  --capability-name argocd
+
+# 6. Delete the namespace left behind by RETAIN policy
+kubectl delete ns argocd
+
+# 7. Delete the IAM role
+aws iam delete-role --role-name ArgoCDCapabilityRole
+```
+
+With the `RETAIN` deletion policy, the `argocd` namespace and CRDs remain on the cluster after capability deletion. To fully clean up, manually delete the namespace as shown in step 6. If you want Application deletion to cascade-delete deployed resources automatically, add `metadata.finalizers: [resources-finalizer.argocd.argoproj.io]` to your Application manifest.
