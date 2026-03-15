@@ -1,0 +1,25 @@
+---
+title: "ArgoCD Application を削除してもデプロイ済みリソースは残る — finalizer が必要"
+description: "ArgoCD Application を kubectl delete しても Pod や Service は消えない。カスケード削除には resources-finalizer.argocd.argoproj.io の設定が必要。"
+date: "2026-03-21"
+published: true
+tags: ["argocd", "kubernetes", "gitops"]
+---
+
+EKS の ArgoCD Capability で検証後、`kubectl delete application guestbook -n argocd` で Application を消したら、デプロイされた Pod と Service がそのまま残っていた。
+
+ArgoCD の Application を削除したときにデプロイ済みリソースもカスケード削除するには、Application マニフェストに finalizer を設定する必要がある。
+
+```yaml
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: guestbook
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  # ...
+```
+
+この finalizer がないと、Application の CR だけが消えてデプロイ済みリソースは孤立する。`syncPolicy.automated.prune: true` はあくまで同期時の不要リソース削除であり、Application 自体の削除とは無関係だ。検証用途でも finalizer を入れておくとクリーンアップが楽になる。

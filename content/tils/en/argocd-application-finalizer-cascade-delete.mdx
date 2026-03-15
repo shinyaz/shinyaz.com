@@ -1,0 +1,25 @@
+---
+title: "Deleting an ArgoCD Application doesn't delete deployed resources — you need a finalizer"
+description: "kubectl delete application removes the CR but leaves Pods and Services running. Add resources-finalizer.argocd.argoproj.io for cascade deletion."
+date: "2026-03-21"
+published: true
+tags: ["argocd", "kubernetes", "gitops"]
+---
+
+After testing ArgoCD Capability on EKS, I ran `kubectl delete application guestbook -n argocd` expecting everything to clean up. The Application CR was gone, but the deployed Pod and Service were still running.
+
+To cascade-delete deployed resources when removing an Application, you need a finalizer:
+
+```yaml
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: guestbook
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  # ...
+```
+
+Without it, only the Application CR gets deleted and deployed resources become orphaned. Note that `syncPolicy.automated.prune: true` only removes stale resources during sync—it has nothing to do with Application deletion. Even for testing, adding the finalizer saves cleanup headaches.

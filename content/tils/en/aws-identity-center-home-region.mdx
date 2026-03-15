@@ -1,0 +1,29 @@
+---
+title: "Find Identity Center's home region by running sso-admin list-instances per region"
+description: "Identity Center looks global but lives in a specific region. Specifying the wrong idcRegion in EKS Capabilities triggers AccessDeniedException."
+date: "2026-03-21"
+published: true
+tags: ["aws", "identity-center", "eks"]
+---
+
+When creating an EKS ArgoCD Capability, I set `idcRegion` to `ap-northeast-1` (same as my EKS cluster) and got hit with:
+
+```text
+Failed to perform sso:DescribeInstance on the given idcInstanceArn.
+Either the caller does not have permissions to the Identity Center instance,
+or the instance is not available in the specified idcRegion
+```
+
+Identity Center appears global in the console, but it's actually deployed in a specific region. In Organizations setups, it lives in whatever region the management account enabled it in.
+
+To find it, run `sso-admin list-instances` across regions and look for the one that returns an ARN instead of `None`:
+
+```bash
+for region in us-east-1 us-west-2 ap-northeast-1; do
+  result=$(aws sso-admin list-instances --region $region \
+    --query 'Instances[0].InstanceArn' --output text 2>&1)
+  echo "$region: $result"
+done
+```
+
+Mine was `us-east-1`. The EKS cluster region and Identity Center region are completely independent—always verify this when integrating any AWS service with Identity Center.

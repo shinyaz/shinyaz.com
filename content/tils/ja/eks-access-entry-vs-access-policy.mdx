@@ -1,0 +1,27 @@
+---
+title: "EKS のアクセスエントリとアクセスポリシーは別物で、両方必要"
+description: "EKS Capabilities が自動作成するアクセスエントリにはデプロイ権限がない。associate-access-policy で別途ポリシーを関連付けないと ArgoCD の同期が失敗する。"
+date: "2026-03-21"
+published: true
+tags: ["aws", "eks", "kubernetes", "iam"]
+---
+
+EKS の ArgoCD Capability を作成すると、IAM ロールのアクセスエントリが自動で作られる。「これで権限は OK」と思って Application をデプロイしたら同期が失敗した。
+
+原因は **アクセスエントリ**（誰がクラスターにアクセスできるか）と**アクセスポリシー**（何ができるか）が独立していることだ。自動作成されるエントリはベースラインの Kubernetes 権限しか持たず、リソースのデプロイ権限は含まれない。
+
+```bash
+# アクセスエントリの確認（自動作成済み）
+aws eks describe-access-entry \
+  --cluster-name sandbox \
+  --principal-arn arn:aws:iam::111122223333:role/ArgoCDCapabilityRole
+
+# これだけでは不十分。ポリシーの関連付けが別途必要
+aws eks associate-access-policy \
+  --cluster-name sandbox \
+  --principal-arn arn:aws:iam::111122223333:role/ArgoCDCapabilityRole \
+  --policy-arn arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy \
+  --access-scope type=cluster
+```
+
+IAM でいう「ロール」と「ポリシー」の関係に近い。EKS のアクセス管理では、エントリの存在だけで安心せず、必ずポリシーの関連付けまで確認する必要がある。

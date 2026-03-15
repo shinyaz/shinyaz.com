@@ -1,0 +1,27 @@
+---
+title: "EKS access entries and access policies are separate — you need both"
+description: "The access entry auto-created by EKS Capabilities has no deploy permissions. Without associate-access-policy, ArgoCD Application sync silently fails."
+date: "2026-03-21"
+published: true
+tags: ["aws", "eks", "kubernetes", "iam"]
+---
+
+When creating an EKS ArgoCD Capability, an access entry for the IAM role gets auto-created. I assumed that meant permissions were good to go and tried deploying an Application. Sync failed.
+
+The issue: **access entries** (who can access the cluster) and **access policies** (what they can do) are independent. The auto-created entry only has baseline Kubernetes permissions—no resource deployment rights.
+
+```bash
+# Access entry exists (auto-created)
+aws eks describe-access-entry \
+  --cluster-name sandbox \
+  --principal-arn arn:aws:iam::111122223333:role/ArgoCDCapabilityRole
+
+# Not enough. Must associate a policy separately
+aws eks associate-access-policy \
+  --cluster-name sandbox \
+  --principal-arn arn:aws:iam::111122223333:role/ArgoCDCapabilityRole \
+  --policy-arn arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy \
+  --access-scope type=cluster
+```
+
+It's similar to IAM roles vs policies. In EKS access management, don't assume an entry existing means permissions are in place—always verify the associated policy.
