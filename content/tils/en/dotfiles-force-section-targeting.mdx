@@ -1,0 +1,35 @@
+---
+title: "Target specific sections with --force in dotfiles install.sh"
+description: "Solved the problem of --force overwriting all files by adding a section name argument to copy_file. Now --force zsh git only overwrites those sections."
+date: 2026-03-15
+published: true
+tags:
+  - bash
+  - dotfiles
+---
+
+My dotfiles `install.sh` had a `--force` flag, but it overwrote everything — including files like AWS config where the repo holds a template and real values only exist locally. One careless `--force` and the actual credentials config gets replaced with a blank template.
+
+The fix was adding a section name as a third argument to `copy_file`.
+
+```bash
+should_force() {
+  local section="$1"
+  [[ "$FORCE_ALL" == true ]] || [[ " ${FORCE_TARGETS[*]} " == *" $section "* ]]
+}
+
+copy_file() {
+  local src="$1" dest="$2" section="${3:-}"
+  if [[ -f "$dest" ]] && ! should_force "$section"; then
+    warn "Skipped (already exists): $dest"
+    return 1
+  fi
+  cp "$src" "$dest"
+}
+
+# Tag each call with its section name
+copy_file "$DOTFILES/zsh/zshrc"  "$ZDOTDIR/.zshrc"            zsh || true
+copy_file "$DOTFILES/aws/config" "$XDG_CONFIG_HOME/aws/config" aws || true
+```
+
+Now `./install.sh --force zsh git` only overwrites zsh and git sections, leaving aws untouched. A bare `--force` with no arguments still overwrites everything. It's just one extra argument to `copy_file`, so no breaking changes.

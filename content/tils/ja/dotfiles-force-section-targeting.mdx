@@ -1,0 +1,35 @@
+---
+title: "dotfiles の --force をセクション指定で安全にする"
+description: "install.sh の --force が全ファイルを上書きする問題を、copy_file にセクション名を渡す方式で解決した。--force zsh git のように対象を絞れる。"
+date: 2026-03-15
+published: true
+tags:
+  - bash
+  - dotfiles
+---
+
+dotfiles の `install.sh` に `--force` オプションがあるが、全ファイルを一括上書きしてしまうのが不便だった。AWS の config のように、リポジトリにはテンプレートを置いてローカルだけ実際の値を入れているファイルがあると、うっかり `--force` でテンプレートに戻ってしまう。
+
+解決策は `copy_file` に第3引数としてセクション名を渡す方式だ。
+
+```bash
+should_force() {
+  local section="$1"
+  [[ "$FORCE_ALL" == true ]] || [[ " ${FORCE_TARGETS[*]} " == *" $section "* ]]
+}
+
+copy_file() {
+  local src="$1" dest="$2" section="${3:-}"
+  if [[ -f "$dest" ]] && ! should_force "$section"; then
+    warn "Skipped (already exists): $dest"
+    return 1
+  fi
+  cp "$src" "$dest"
+}
+
+# 呼び出し側でセクション名をタグ付け
+copy_file "$DOTFILES/zsh/zshrc"  "$ZDOTDIR/.zshrc"            zsh || true
+copy_file "$DOTFILES/aws/config" "$XDG_CONFIG_HOME/aws/config" aws || true
+```
+
+これで `./install.sh --force zsh git` と打てば zsh と git だけ上書き、aws は触らない。引数なしの `--force` は従来通り全上書き。既存の `copy_file` に引数を1つ足すだけなので、破壊的変更もない。
