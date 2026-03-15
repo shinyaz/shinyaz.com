@@ -1,0 +1,229 @@
+---
+title: "EKS 1.34 → 1.35 アップグレード — ベストプラクティスに沿った検証記録"
+description: "EKS アップグレードを AWS ベストプラクティスに準拠して実施。Cluster Insights、非推奨 API スキャン、PDB による可用性保証まで、事前検証から事後確認までの全工程を記録する。"
+date: "2026-03-23"
+published: true
+featured: false
+categories: [infrastructure]
+tags: ["aws", "eks", "kubernetes", "eksctl", "devops"]
+---
+
+## はじめに
+
+EKS のバージョンアップグレードは `eksctl upgrade cluster` を叩けば完了する——技術的にはそうだ。しかし本番環境では「アップグレードできた」だけでは不十分で、「安全にアップグレードできた」ことを証明する必要がある。
+
+AWS が公開している [EKS アップグレードのベストプラクティス](https://docs.aws.amazon.com/eks/latest/best-practices/cluster-upgrades.html) には、Cluster Insights の確認、非推奨 API のスキャン、PodDisruptionBudget によるワークロード保護など、多数のチェック項目がある。この記事では、EKS Auto Mode クラスターを 1.34 から 1.35 へアップグレードする過程で、これらのベストプラクティスを一つずつ実践した記録をまとめる。
+
+## 前提環境
+
+| 項目 | 値 |
+|------|-----|
+| クラスター名 | eks-sandbox |
+| リージョン | ap-northeast-1 |
+| 初期バージョン | 1.34 |
+| モード | EKS Auto Mode |
+| ノード OS | Bottlerocket |
+| アドオン | aws-guardduty-agent (v1.12.1-eksbuild.2) |
+
+```bash
+eksctl create cluster \
+  --name eks-sandbox \
+  --region ap-northeast-1 \
+  --version 1.34 \
+  --enable-auto-mode
+```
+
+## EKS 1.35 の主な変更点
+
+アップグレード前に、ターゲットバージョンの変更点を把握しておく。
+
+- **cgroup v1 サポート削除** — kubelet がデフォルトで cgroup v1 ノード上での起動を拒否するようになった。Bottlerocket は `failCgroupV1: false` が設定済みのため影響なし
+- **containerd 1.x は 1.35 が最後のサポート** — 1.36 へのアップグレード前に containerd 2.0+ への移行が必要
+- **In-Place Pod Resource Updates が Stable に** — Pod を再起動せずに CPU/メモリのリソース変更が可能に
+- **IPVS モード非推奨** — kube-proxy の IPVS モードが 1.36 で削除予定
+- **Ingress NGINX リタイア予告** — 2026年3月に upstream で retire 予定。Gateway API への移行検討が必要
+
+## アップグレード前の検証
+
+### バックアップ
+
+AWS のベストプラクティスでは、アップグレード前に [Velero](https://velero.io/) でクラスターのバックアップを取得することを推奨している。Velero は Kubernetes リソースと永続ボリュームをバックアップでき、アップグレードで問題が発生した場合のロールバック手段になる。
+
+今回は検証用の新規クラスターのためバックアップは省略した。本番環境では、特にカスタムリソースや永続データを持つワークロードがある場合、この手順を省略すべきではない。なお、Velero は IAM ロールなどの AWS リソースはバックアップしないため、それらは別途管理が必要だ。
+
+### Cluster Insights
+
+EKS の Cluster Insights は、アップグレードをブロックする可能性のある問題を事前に検出する。
+
+```bash
+aws eks list-insights --region ap-northeast-1 --cluster-name eks-sandbox
+```
+
+結果は空——ブロッカーなし。新規クラスターなので当然だが、本番環境では Kubelet version skew や add-on 互換性の WARNING が出るケースがある。ここで問題が検出された場合は、アップグレード前に対処が必要だ。
+
+### 非推奨 API スキャン
+
+[kubent](https://github.com/doitintl/kube-no-trouble) と [pluto](https://github.com/FairwindsOps/pluto) の2ツールで非推奨 API を検出する。
+
+```bash
+kubent
+# Target K8s version is 1.34.4-eks-f69f56f
+# Retrieved 34 resources from collector — 検出なし
+
+pluto detect-all-in-cluster
+# There were no resources found with known deprecated apiVersions.
+```
+
+新規クラスターのため検出ゼロは想定通りだが、本番クラスターではカスタムリソースや Helm リリースに非推奨 API が含まれるケースがある。kubent は Helm v3 のリリースもスキャンするため、マニフェスト適用後のリソースだけでなくテンプレートレベルの問題も検出できる。
+
+### インフラ前提条件の確認
+
+アップグレードの前提となるインフラの状態を3つの観点で確認した。
+
+**サブネット空き IP** — アップグレード時のノード置換では一時的にノード数が増えるため、IP の余裕が必要だ。全6サブネットで 8,000 以上の空きがあり十分だった。
+
+**IAM ロール** — クラスターロールに `eks.amazonaws.com` への `sts:AssumeRole` と `sts:TagSession` が付与されていることを確認。ロールが欠損しているとコントロールプレーンのアップグレード自体が失敗する。
+
+**コントロールプレーンログ** — 全タイプ（api, audit, authenticator, controllerManager, scheduler）が無効だった。検証環境のため有効化は省略したが、本番環境では少なくとも `api` と `audit` を有効化しておくべきだ。アップグレード中の問題切り分けに不可欠になる。
+
+### アドオン互換性
+
+```bash
+aws eks list-addons --cluster-name eks-sandbox
+# ["aws-guardduty-agent"]
+
+aws eks describe-addon-versions --kubernetes-version 1.35 \
+  --addon-name aws-guardduty-agent \
+  --query 'addons[0].addonVersions[0].addonVersion'
+# "v1.12.1-eksbuild.2"
+```
+
+現行バージョンがそのまま 1.35 互換。更新不要。CoreDNS や kube-proxy などのコアアドオンを使用している環境では、ここで互換バージョンの確認と更新計画が必要になる。
+
+## ワークロードの準備 — PDB と topologySpreadConstraints
+
+アップグレード中の可用性を検証するため、以下の設計でサンプルアプリをデプロイした。
+
+- **3レプリカ + topologySpreadConstraints** — Pod をノード間・AZ 間に均等分散。AWS のベストプラクティスでは `kubernetes.io/hostname`（ノード分散）と `topology.kubernetes.io/zone`（AZ 分散）の両方を設定することを推奨している
+- **PodDisruptionBudget (minAvailable: 66%)** — 3 Pod 中最低 2 Pod の Running を保証
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nginx
+  namespace: upgrade-test
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: nginx
+  template:
+    metadata:
+      labels:
+        app: nginx
+    spec:
+      containers:
+      - name: nginx
+        image: nginx:latest
+        resources:
+          requests:
+            cpu: "100m"
+            memory: "128Mi"
+      topologySpreadConstraints:
+      - maxSkew: 1
+        topologyKey: kubernetes.io/hostname
+        whenUnsatisfiable: DoNotSchedule
+        labelSelector:
+          matchLabels:
+            app: nginx
+      - maxSkew: 1
+        topologyKey: topology.kubernetes.io/zone
+        whenUnsatisfiable: DoNotSchedule
+        labelSelector:
+          matchLabels:
+            app: nginx
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: nginx-pdb
+  namespace: upgrade-test
+spec:
+  minAvailable: "66%"
+  selector:
+    matchLabels:
+      app: nginx
+```
+
+デプロイ後、3 Pod が 3 つの異なるノードに分散配置されたことを確認した。PDB の `ALLOWED DISRUPTIONS` は 1（3 Pod 中 1 Pod まで同時停止可）。
+
+## アップグレード実行と監視結果
+
+30秒間隔で Pod とノードの状態を記録しながら、コントロールプレーンのアップグレードを実行した。
+
+```bash
+eksctl upgrade cluster --name eks-sandbox --version 1.35 --approve
+```
+
+**コントロールプレーンアップグレード所要時間: 約8分20秒**（22:09:20 → 22:17:41）
+
+### タイムライン
+
+| 時刻 | イベント | Pod 状態 | ノード構成 |
+|------|---------|---------|----------|
+| 22:09:17 | CP アップグレード開始 | 3/3 Running | v1.34 x 4（うち1台は空ノード） |
+| 22:10:51 | 空ノード自動削除 | 3/3 Running | v1.34 x 3 |
+| 22:10:51〜22:17:41 | CP アップグレード中 | 3/3 Running 維持 | v1.34 x 3（変化なし） |
+| 22:17:41 | CP アップグレード完了 | 3/3 Running | v1.34 x 3 |
+| 22:18:57 | 1.35 ノード起動、Pod 移行開始 | 3/3 Running（1 Pod が新ノードへ） | v1.34 x 3 + v1.35 x 2 |
+| 22:19:28 | Pod 移行進行中 | 3/3 Running（2 Pod が新ノードへ） | v1.34 x 2 + v1.35 x 3 |
+| 22:21:33 | 旧ノード drain 完了、全 Pod 新ノード | 3/3 Running | v1.35 x 4 |
+
+### 監視ログの詳細
+
+CP アップグレード中（約9分間）、Pod は一切影響を受けなかった。ノード置換はアップグレード完了後に開始される。
+
+```text
+---22:09:17--- (CP アップグレード開始直前)
+nginx-67686f8c5-j6865   Running   i-0a797512240b8a78d  (v1.34)
+nginx-67686f8c5-qzpqd   Running   i-0f1976563dcc3e932  (v1.34)
+nginx-67686f8c5-vmqc6   Running   i-0c1a5101ad5cdfaac  (v1.34)
+
+---22:18:57--- (1.35 ノード起動、Pod 移行開始)
+nginx-67686f8c5-bzv7w   Running   i-0e128843e7cdf31fa  (v1.35) ← 新ノード
+nginx-67686f8c5-qzpqd   Running   i-0f1976563dcc3e932  (v1.34)
+nginx-67686f8c5-vmqc6   Running   i-0c1a5101ad5cdfaac  (v1.34)
+
+---22:21:33--- (全 Pod が 1.35 ノードへ移行完了)
+nginx-67686f8c5-2ql5p   Running   i-01dc0d84f5885a052  (v1.35)
+nginx-67686f8c5-5vd62   Running   i-092c024550f1a62d5  (v1.35)
+nginx-67686f8c5-bzv7w   Running   i-0e128843e7cdf31fa  (v1.35)
+```
+
+**重要な発見: アップグレード開始（22:09:17）から全 Pod の 1.35 ノード移行完了（22:21:33）まで約12分間、Pod が Pending や CrashLoopBackOff になった瞬間は一度もなかった。** PDB の minAvailable: 66% が常に守られ、ノード drain 時も最低 2 Pod が Running を維持し続けた。なお、1.35 ノードは最終的に4台で安定し、その後 Auto Mode の集約により適正台数に収束する。
+
+## アップグレード後の検証
+
+アップグレード完了後、以下の4項目を確認した。
+
+**クラスターバージョン** — `kubectl version` で Server Version が `v1.35.2-eks-f69f56f` であることを確認。ノードも全台 `v1.35.0-eks-ac2d5a0` に更新済み。なお、Client Version は `v1.34.1` のままだった。AWS のベストプラクティスでは、アップグレード後に kubectl も対応バージョンに更新することを推奨している。サーバーとクライアントの1マイナーバージョン差は [Kubernetes のバージョンスキューポリシー](https://kubernetes.io/releases/version-skew-policy/#kubectl) の範囲内だが、新しい API 機能を利用する場合は更新が必要だ。
+
+**全 Pod の状態** — `kubectl get pods -A` で全 namespace の Pod がすべて Running。再起動カウントの増加もなし。
+
+**非推奨 API メトリクス** — `kubectl get --raw /metrics | grep apiserver_requested_deprecated_apis` で検出されたのは `endpoints v1` のみ。Kubernetes 1.33 以降で `discovery.k8s.io/v1 EndpointSlice` への移行が推奨されている既知の Warning で、即座の対応は不要だ。
+
+**Cluster Insights** — アップグレード後に再確認すると、以下の5項目がすべて PASSING になっていた。
+
+- Kubelet version skew — ノードの kubelet バージョンが CP と一致
+- Amazon Linux 2 compatibility — AL2 ノードなし
+- Cluster health issues — クラスターヘルスの問題なし
+- EKS add-on version compatibility — 全アドオンが互換
+- kube-proxy version skew — kube-proxy バージョンが CP と一致
+
+## まとめ
+
+- **事前検証は「安心」のためにある** — 今回の検証では Insights もクリーン、非推奨 API もゼロだった。しかし本番環境ではそうはいかない。kubent や pluto で問題を事前に検出できれば、アップグレード当日の判断が格段に楽になる
+- **PDB は「お守り」ではなく「保証」** — PDB を設定していたことで、ノード置換中も常に 2/3 Pod が Running を維持した。設定しなければ、ノード drain 時に全 Pod が同時に evict されるリスクがある
+- **Auto Mode のノード置換はシームレス** — コントロールプレーンアップグレード後、自動的に 1.35 ノードが起動し、Pod を移行してから旧ノードを削除する。手動でのノードグループ更新が不要なのは大きなメリットだ
+- **アップグレードは「実行」より「準備」が重要** — eksctl コマンド自体は1行だが、その前後の検証項目は十数項目ある。ベストプラクティスをチェックリスト化して毎回実行する運用が望ましい

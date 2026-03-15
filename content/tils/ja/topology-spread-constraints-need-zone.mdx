@@ -1,0 +1,30 @@
+---
+title: "topologySpreadConstraints は hostname だけでなく zone も設定すべき"
+date: "2026-03-23"
+tags:
+  - kubernetes
+  - aws
+  - eks
+---
+
+EKS アップグレードの検証中、AWS の[ベストプラクティス](https://docs.aws.amazon.com/eks/latest/best-practices/cluster-upgrades.html)を読んでいて気づいた。`topologySpreadConstraints` に `kubernetes.io/hostname` だけ設定して満足していたが、`topology.kubernetes.io/zone` も併用しないと AZ 障害時に全 Pod が落ちるリスクがある。
+
+hostname だけの場合、3 Pod が別ノードに分散していても、全ノードが同じ AZ に集中する可能性がある。zone も追加すると AZ 間にも分散される。
+
+```yaml
+topologySpreadConstraints:
+- maxSkew: 1
+  topologyKey: kubernetes.io/hostname
+  whenUnsatisfiable: DoNotSchedule
+  labelSelector:
+    matchLabels:
+      app: myapp
+- maxSkew: 1
+  topologyKey: topology.kubernetes.io/zone
+  whenUnsatisfiable: DoNotSchedule
+  labelSelector:
+    matchLabels:
+      app: myapp
+```
+
+実際に EKS Auto Mode クラスターで試したところ、3 Pod が ap-northeast-1a, 1c, 1d の3つの AZ に1つずつ配置された。hostname 単体だと同一 AZ 内の別ノードに散らばるだけで終わることがあるので、本番ワークロードでは両方設定しておくのが安全だ。

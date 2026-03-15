@@ -1,0 +1,229 @@
+---
+title: "EKS 1.34 to 1.35 Upgrade — A Best-Practices-Driven Verification"
+description: "Upgrading EKS following AWS best practices end-to-end: Cluster Insights, deprecated API scanning, PDB-backed availability guarantees, and post-upgrade validation."
+date: "2026-03-23"
+published: true
+featured: false
+categories: [infrastructure]
+tags: ["aws", "eks", "kubernetes", "eksctl", "devops"]
+---
+
+## Introduction
+
+Upgrading EKS is technically simple — run `eksctl upgrade cluster` and you're done. But in production, "it upgraded" isn't enough. You need to prove it upgraded *safely*.
+
+AWS publishes [EKS upgrade best practices](https://docs.aws.amazon.com/eks/latest/best-practices/cluster-upgrades.html) covering Cluster Insights checks, deprecated API scanning, PodDisruptionBudget-backed workload protection, and more. This post documents upgrading an EKS Auto Mode cluster from 1.34 to 1.35 while methodically following each of these practices.
+
+## Starting Environment
+
+| Item | Value |
+|------|-------|
+| Cluster name | eks-sandbox |
+| Region | ap-northeast-1 |
+| Initial version | 1.34 |
+| Mode | EKS Auto Mode |
+| Node OS | Bottlerocket |
+| Add-ons | aws-guardduty-agent (v1.12.1-eksbuild.2) |
+
+```bash
+eksctl create cluster \
+  --name eks-sandbox \
+  --region ap-northeast-1 \
+  --version 1.34 \
+  --enable-auto-mode
+```
+
+## Key Changes in EKS 1.35
+
+Before upgrading, understand what's changing in the target version.
+
+- **cgroup v1 support removed** — Kubelet now refuses to start on cgroup v1 nodes by default. Bottlerocket ships with `failCgroupV1: false`, so no impact here
+- **containerd 1.x support ends after 1.35** — Must migrate to containerd 2.0+ before upgrading to 1.36
+- **In-Place Pod Resource Updates graduated to Stable** — CPU/memory changes without pod restarts
+- **IPVS mode deprecated** — kube-proxy IPVS mode will be removed in 1.36
+- **Ingress NGINX retirement notice** — Upstream retirement planned for March 2026. Start planning Gateway API migration
+
+## Pre-Upgrade Verification
+
+### Backup
+
+AWS best practices recommend taking a cluster backup with [Velero](https://velero.io/) before upgrading. Velero backs up Kubernetes resources and persistent volumes, providing a rollback path if the upgrade goes wrong.
+
+I skipped this step since this was a fresh test cluster. In production — especially with custom resources or stateful workloads — this step should not be omitted. Note that Velero doesn't back up AWS resources like IAM roles; those must be managed separately.
+
+### Cluster Insights
+
+EKS Cluster Insights proactively detect issues that could block an upgrade.
+
+```bash
+aws eks list-insights --region ap-northeast-1 --cluster-name eks-sandbox
+```
+
+Result: empty — no blockers. This is expected for a fresh cluster, but production clusters can surface warnings around kubelet version skew or add-on incompatibility here. Any issues found must be resolved before proceeding.
+
+### Deprecated API Scanning
+
+Two tools for thorough coverage: [kubent](https://github.com/doitintl/kube-no-trouble) and [pluto](https://github.com/FairwindsOps/pluto).
+
+```bash
+kubent
+# Target K8s version is 1.34.4-eks-f69f56f
+# Retrieved 34 resources from collector — no deprecations found
+
+pluto detect-all-in-cluster
+# There were no resources found with known deprecated apiVersions.
+```
+
+Zero findings are expected on a fresh cluster, but production clusters often have deprecated APIs lurking in custom resources or Helm releases. kubent scans Helm v3 releases too, catching template-level issues beyond just applied resources.
+
+### Infrastructure Prerequisites
+
+Three aspects of the underlying infrastructure to verify before upgrading.
+
+**Subnet available IPs** — Node replacement temporarily increases node count, so IP headroom is needed. All 6 subnets had 8,000+ available IPs — plenty of room.
+
+**IAM role** — Confirmed the cluster role has `sts:AssumeRole` and `sts:TagSession` for `eks.amazonaws.com`. A missing or misconfigured role would cause the control plane upgrade itself to fail.
+
+**Control plane logging** — All log types (api, audit, authenticator, controllerManager, scheduler) were disabled. Skipped for this test environment, but production clusters should enable at least `api` and `audit` — they're essential for troubleshooting issues during upgrades.
+
+### Add-on Compatibility
+
+```bash
+aws eks list-addons --cluster-name eks-sandbox
+# ["aws-guardduty-agent"]
+
+aws eks describe-addon-versions --kubernetes-version 1.35 \
+  --addon-name aws-guardduty-agent \
+  --query 'addons[0].addonVersions[0].addonVersion'
+# "v1.12.1-eksbuild.2"
+```
+
+Current version is already 1.35-compatible. No update needed. For clusters running core add-ons like CoreDNS or kube-proxy, this is where you'd identify compatible versions and plan the update sequence.
+
+## Workload Preparation — PDB and topologySpreadConstraints
+
+To verify availability during the upgrade, I deployed a sample app with deliberate resilience design:
+
+- **3 replicas + topologySpreadConstraints** — Spread pods evenly across nodes and AZs. AWS best practices recommend configuring both `kubernetes.io/hostname` (node spread) and `topology.kubernetes.io/zone` (AZ spread)
+- **PodDisruptionBudget (minAvailable: 66%)** — Guarantee at least 2 of 3 pods stay Running
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nginx
+  namespace: upgrade-test
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: nginx
+  template:
+    metadata:
+      labels:
+        app: nginx
+    spec:
+      containers:
+      - name: nginx
+        image: nginx:latest
+        resources:
+          requests:
+            cpu: "100m"
+            memory: "128Mi"
+      topologySpreadConstraints:
+      - maxSkew: 1
+        topologyKey: kubernetes.io/hostname
+        whenUnsatisfiable: DoNotSchedule
+        labelSelector:
+          matchLabels:
+            app: nginx
+      - maxSkew: 1
+        topologyKey: topology.kubernetes.io/zone
+        whenUnsatisfiable: DoNotSchedule
+        labelSelector:
+          matchLabels:
+            app: nginx
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: nginx-pdb
+  namespace: upgrade-test
+spec:
+  minAvailable: "66%"
+  selector:
+    matchLabels:
+      app: nginx
+```
+
+After deployment, all 3 pods landed on 3 different nodes. PDB showed `ALLOWED DISRUPTIONS: 1` (only 1 of 3 pods may be disrupted simultaneously).
+
+## Upgrade Execution and Monitoring
+
+I recorded pod and node status every 30 seconds while running the control plane upgrade.
+
+```bash
+eksctl upgrade cluster --name eks-sandbox --version 1.35 --approve
+```
+
+**Control plane upgrade duration: ~8 minutes 20 seconds** (22:09:20 → 22:17:41)
+
+### Timeline
+
+| Time | Event | Pod Status | Node Composition |
+|------|-------|-----------|-----------------|
+| 22:09:17 | CP upgrade started | 3/3 Running | v1.34 x 4 (1 empty node) |
+| 22:10:51 | Empty node auto-removed | 3/3 Running | v1.34 x 3 |
+| 22:10:51–22:17:41 | CP upgrading | 3/3 Running (no change) | v1.34 x 3 |
+| 22:17:41 | CP upgrade completed | 3/3 Running | v1.34 x 3 |
+| 22:18:57 | 1.35 nodes launched, pod migration began | 3/3 Running (1 pod on new node) | v1.34 x 3 + v1.35 x 2 |
+| 22:19:28 | Pod migration in progress | 3/3 Running (2 pods on new nodes) | v1.34 x 2 + v1.35 x 3 |
+| 22:21:33 | Old nodes drained, all pods on new nodes | 3/3 Running | v1.35 x 4 |
+
+### Monitoring Log Details
+
+During the CP upgrade (~9 minutes), pods were completely unaffected. Node replacement only began after the upgrade completed.
+
+```text
+---22:09:17--- (just before CP upgrade)
+nginx-67686f8c5-j6865   Running   i-0a797512240b8a78d  (v1.34)
+nginx-67686f8c5-qzpqd   Running   i-0f1976563dcc3e932  (v1.34)
+nginx-67686f8c5-vmqc6   Running   i-0c1a5101ad5cdfaac  (v1.34)
+
+---22:18:57--- (1.35 nodes up, pod migration starting)
+nginx-67686f8c5-bzv7w   Running   i-0e128843e7cdf31fa  (v1.35) ← new node
+nginx-67686f8c5-qzpqd   Running   i-0f1976563dcc3e932  (v1.34)
+nginx-67686f8c5-vmqc6   Running   i-0c1a5101ad5cdfaac  (v1.34)
+
+---22:21:33--- (all pods migrated to 1.35 nodes)
+nginx-67686f8c5-2ql5p   Running   i-01dc0d84f5885a052  (v1.35)
+nginx-67686f8c5-5vd62   Running   i-092c024550f1a62d5  (v1.35)
+nginx-67686f8c5-bzv7w   Running   i-0e128843e7cdf31fa  (v1.35)
+```
+
+**Key finding: from upgrade start (22:09:17) through full pod migration to 1.35 nodes (22:21:33) — roughly 12 minutes — no pod ever entered Pending or CrashLoopBackOff.** The PDB's minAvailable: 66% was respected throughout, keeping at least 2 pods Running even during node drains. The cluster settled at 4 v1.35 nodes, with Auto Mode eventually consolidating to the optimal count.
+
+## Post-Upgrade Validation
+
+Four checks after the upgrade completed.
+
+**Cluster version** — `kubectl version` confirmed Server Version `v1.35.2-eks-f69f56f`. All nodes updated to `v1.35.0-eks-ac2d5a0`. Note that the Client Version was still `v1.34.1`. AWS best practices recommend updating kubectl to a matching version after the upgrade. A one-minor-version gap is within the [Kubernetes version skew policy](https://kubernetes.io/releases/version-skew-policy/#kubectl), but updating is needed to use new API features.
+
+**All pod status** — `kubectl get pods -A` showed every pod across all namespaces Running. No restart count increases.
+
+**Deprecated API metrics** — `kubectl get --raw /metrics | grep apiserver_requested_deprecated_apis` found only `endpoints v1`. This is a known warning since Kubernetes 1.33 recommends migrating to `discovery.k8s.io/v1 EndpointSlice` — no immediate action required.
+
+**Cluster Insights** — Re-checked post-upgrade. All five checks returned PASSING:
+
+- Kubelet version skew — node kubelet versions match the control plane
+- Amazon Linux 2 compatibility — no AL2 nodes detected
+- Cluster health issues — no health problems
+- EKS add-on version compatibility — all add-ons compatible
+- kube-proxy version skew — kube-proxy versions match the control plane
+
+## Takeaways
+
+- **Pre-upgrade checks buy confidence, not just compliance** — Everything came back clean this time, but in production that's rarely the case. kubent and pluto catching issues *before* upgrade day makes the go/no-go decision straightforward
+- **PDB is a guarantee, not a suggestion** — With PDB in place, at least 2 of 3 pods stayed Running throughout node replacement. Without it, all pods on a draining node could be evicted simultaneously
+- **Auto Mode node replacement is seamless** — After the control plane upgrade, new 1.35 nodes launched automatically, pods migrated, then old nodes terminated. No manual node group update commands needed
+- **Preparation matters more than execution** — The eksctl command itself is one line, but the verification checklist spans over a dozen items. Turn best practices into a repeatable checklist you run every time
