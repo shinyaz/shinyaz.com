@@ -21,7 +21,7 @@ const dictionaries = {
       allTils: "すべての TIL",
       aboutRole: "ソリューションアーキテクト @ AWS",
       aboutBio:
-        "AWS ソリューションアーキテクトとして金融業界のお客様を中心に技術支援を行っています。クラウドアーキテクチャや AI/ML に関する学びをこのブログで発信しています。",
+        "AWS ソリューションアーキテクトとして金融業界のお客様を中心に技術支援を行っています。クラウドアーキテクチャや AI/ML に関する学びをこのサイトで発信しています。このサイトの内容は個人の見解であり、所属企業の公式な意見や見解を代表するものではありません。",
       aboutReadMore: "もっと見る",
     },
     blog: {
@@ -121,7 +121,7 @@ const dictionaries = {
       allTils: "All TILs",
       aboutRole: "Solutions Architect @ AWS",
       aboutBio:
-        "I'm a Solutions Architect at AWS, providing technical guidance primarily to financial industry customers. I share learnings about cloud architecture and AI/ML on this blog.",
+        "I'm a Solutions Architect at AWS, providing technical guidance primarily to financial industry customers. I share learnings about cloud architecture and AI/ML on this site.The views and opinions expressed on this site are my own and do not represent the official positions of my employer.",
       aboutReadMore: "Read more",
     },
     blog: {
