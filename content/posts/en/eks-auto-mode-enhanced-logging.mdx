@@ -1,0 +1,160 @@
+---
+title: "Visualizing Karpenter Internals with EKS Auto Mode Enhanced Logging"
+description: "Set up CloudWatch Vended Logs for EKS Auto Mode's 4 components (Compute/Block Storage/Load Balancing/IPAM) and analyze scale-up to scale-down behavior with Logs Insights queries."
+date: "2026-03-19"
+published: true
+featured: false
+categories: [infrastructure]
+tags: ["aws", "eks", "kubernetes", "cloudwatch", "devops"]
+---
+
+## Introduction
+
+In the [previous post](/en/post/eks-auto-mode-cluster-setup), I covered building an EKS cluster with Auto Mode. While Auto Mode conveniently delegates node management to EKS, the "what's happening under the hood" question remains.
+
+A [February 2026 update](https://aws.amazon.com/about-aws/whats-new/2026/02/amazon-eks-auto-mode-enhanced-logging/) added CloudWatch Logs delivery for Auto Mode's managed components. This means you can now track Karpenter's scheduling decisions, VPC CNI IP allocations, and more in real-time. In this post, I set up log delivery, deploy a workload, and use Logs Insights to trace the full scale-up to scale-down cycle.
+
+## Four Log Types
+
+Auto Mode exposes logs from four managed components:
+
+| Log Type | Component | What It Records |
+|---|---|---|
+| `AUTO_MODE_COMPUTE_LOGS` | Karpenter | Node provisioning, disruption, consolidation |
+| `AUTO_MODE_BLOCK_STORAGE_LOGS` | EBS CSI | Volume attach, snapshot management |
+| `AUTO_MODE_LOAD_BALANCING_LOGS` | AWS Load Balancer Controller | ALB/NLB event handling |
+| `AUTO_MODE_IPAM_LOGS` | VPC CNI IP Address Management | Subnet management, IP allocation |
+
+Logs are delivered as CloudWatch Vended Logs — AWS-native log delivery that's cheaper than standard CloudWatch Logs. You can also send them to S3 or Kinesis Data Firehose.
+
+## Setting Up Log Delivery
+
+Configuration takes three steps. Here I'll use CloudWatch Logs as the destination.
+
+### Step 1: Create Delivery Source
+
+Register the EKS cluster as a log source. This must be done for each of the four log types.
+
+```bash
+# Create delivery source for Compute logs
+aws logs put-delivery-source \
+  --name "sandbox-AUTO_MODE_COMPUTE_LOGS" \
+  --log-type "AUTO_MODE_COMPUTE_LOGS" \
+  --resource-arn "arn:aws:eks:ap-northeast-1:123456789012:cluster/sandbox"
+```
+
+Important: each log type triggers a cluster update. You must wait for completion before configuring the next one, or you'll hit a `ConflictException`.
+
+### Step 2: Create Delivery Destination
+
+Register a CloudWatch Logs log group as the destination.
+
+```bash
+# Create log group
+aws logs create-log-group \
+  --log-group-name "/aws/eks/sandbox/auto-mode/compute"
+
+# Register destination
+aws logs put-delivery-destination \
+  --name "sandbox-dest-compute" \
+  --delivery-destination-configuration \
+    "destinationResourceArn=arn:aws:logs:ap-northeast-1:123456789012:log-group:/aws/eks/sandbox/auto-mode/compute"
+```
+
+### Step 3: Connect Delivery
+
+Link source to destination. At this point, log-type-specific `recordFields` are automatically configured.
+
+```bash
+aws logs create-delivery \
+  --delivery-source-name "sandbox-AUTO_MODE_COMPUTE_LOGS" \
+  --delivery-destination-arn \
+    "arn:aws:logs:ap-northeast-1:123456789012:delivery-destination:sandbox-dest-compute"
+```
+
+For Compute logs, fields include `controller`, `reconcileID`, `instance-type-count`, and more — all usable for filtering and grouping in Logs Insights.
+
+## Log Analysis with Logs Insights
+
+With logs flowing, let's put Logs Insights to work. This is where it gets interesting.
+
+### Tracing Scale-Up Through Scale-Down
+
+I deployed nginx with 3 replicas, then deleted it, and traced the Compute logs chronologically.
+
+```text
+04:29:36 [INFO]  provisioner           | found provisionable pod(s)
+04:29:36 [INFO]  provisioner           | computed new nodeclaim(s) to fit pod(s)
+04:29:36 [INFO]  provisioner           | created nodeclaim
+04:30:18 [INFO]  disruption            | disrupting node(s)
+04:30:19 [INFO]  node.termination      | tainted node
+04:30:49 [DEBUG] nodeclaim.disruption  | marking consolidatable
+```
+
+The internal flow of Auto Mode (Karpenter) becomes crystal clear:
+
+1. **provisioner** detects unschedulable Pods and creates a new NodeClaim
+2. After Pod deletion, **disruption** controller identifies the unneeded node
+3. **node.termination** taints the node to evict Pods
+4. **nodeclaim.disruption** marks consolidation complete
+
+Previously, this entire sequence was a black box. Now you can even measure time between phases.
+
+### Practical Insights Queries
+
+#### Event Count by Controller
+
+Get the big picture of cluster activity:
+
+```text
+stats count(*) as event_count by controller
+| sort event_count desc
+```
+
+Results:
+
+| Controller | Events | Role |
+|---|---|---|
+| `nodeclaim.lifecycle` | 12 | Node startup/readiness |
+| `provisioner` | 5 | Pod scheduling |
+| `nodeclaim.disruption` | 2 | Consolidation decisions |
+| `node.termination` | 1 | Node deletion |
+| `disruption` | 1 | Disruption initiation |
+
+#### Cross-Component Error Detection
+
+Detect errors across all four log groups:
+
+```text
+fields @timestamp, message
+| filter level = "ERROR" or level = "error" or stream = "stderr"
+| sort @timestamp desc
+```
+
+In my testing, this caught 4 errors in block-storage — the EBS CSI trying to reference VolumeSnapshot CRDs that weren't installed. Harmless, but being able to detect this noise is exactly the value of having these logs.
+
+#### IPAM IP Allocation Lifecycle
+
+Track IP address management during node additions:
+
+```text
+fields @timestamp, level, message, controller, controllerKind
+| filter message like /created|allocat|subnet|CNINode|finalized/
+| sort @timestamp asc
+```
+
+```text
+04:29:54 [info] nodeclaim/NodeClaim  | created CNINode
+04:29:55 [info] cninode/CNINode      | allocated ips
+04:29:55 [info] cninode/CNINode      | updated CNINode Status
+04:31:14 [info] cninode/CNINode      | finalized CNINode        # on node deletion
+```
+
+The full CNINode lifecycle — creation, IP allocation, status update, finalization — is traceable. Invaluable for network troubleshooting.
+
+## Takeaways
+
+- **Three steps open the black box** — `put-delivery-source` → `put-delivery-destination` → `create-delivery` is all it takes. No agents or sidecars required.
+- **Karpenter's decision process is now traceable** — provisioner → disruption → taint → consolidation phases are recorded chronologically, making scaling issues much easier to diagnose.
+- **Logs Insights enables cross-component analysis** — Controller-level aggregation and error detection across all 4 components give you a quick operational overview.
+- **Watch for ordering constraints** — Each delivery source creation triggers a cluster update, so configure them one at a time to avoid `ConflictException`.

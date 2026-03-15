@@ -1,0 +1,160 @@
+---
+title: "EKS Auto Mode の強化ログで Karpenter の内部動作を可視化する"
+description: "CloudWatch Vended Logs で Auto Mode の4コンポーネント（Compute/Block Storage/Load Balancing/IPAM）のログを収集・分析する手順を検証。Logs Insights クエリでスケールアップからスケールダウンまでの内部動作を時系列で追跡する。"
+date: "2026-03-19"
+published: true
+featured: false
+categories: [infrastructure]
+tags: ["aws", "eks", "kubernetes", "cloudwatch", "devops"]
+---
+
+## はじめに
+
+[前回の記事](/ja/post/eks-auto-mode-cluster-setup)で、EKS Auto Mode を使ったクラスター構築を紹介した。Auto Mode はノード管理を EKS に委譲できる便利な機能だが、「裏側で何が起きているかわからない」という不安もある。
+
+[2026年2月のアップデート](https://aws.amazon.com/jp/about-aws/whats-new/2026/02/amazon-eks-auto-mode-enhanced-logging/)で、Auto Mode のマネージドコンポーネントから CloudWatch Logs へのログ配信が可能になった。これにより、Karpenter のスケジューリング判断や VPC CNI の IP 割当など、Auto Mode の内部動作をリアルタイムで追跡できる。この記事では、実際にログ配信を設定し、Logs Insights でスケールアップ・スケールダウンの挙動を分析した結果を共有する。
+
+## 4つのログタイプ
+
+Auto Mode では以下の4つのマネージドコンポーネントからログを収集できる。
+
+| ログタイプ | 対象コンポーネント | 記録内容 |
+|---|---|---|
+| `AUTO_MODE_COMPUTE_LOGS` | Karpenter | ノードのプロビジョニング・disruption・consolidation |
+| `AUTO_MODE_BLOCK_STORAGE_LOGS` | EBS CSI | ボリュームのアタッチ・スナップショット管理 |
+| `AUTO_MODE_LOAD_BALANCING_LOGS` | AWS Load Balancer Controller | ALB/NLB のイベントハンドリング |
+| `AUTO_MODE_IPAM_LOGS` | VPC CNI IP Address Management | サブネット管理・IP アドレス割当 |
+
+ログは CloudWatch Vended Logs として配信される。Vended Logs は AWS サービスが直接発行するログで、標準の CloudWatch Logs より低価格で利用できる。配信先は CloudWatch Logs のほか、S3 や Kinesis Data Firehose も選択可能だ。
+
+## ログ配信の設定手順
+
+設定は3ステップで完了する。ここでは CloudWatch Logs への配信を例に説明する。
+
+### ステップ1: 配信ソースの作成
+
+EKS クラスターをログソースとして登録する。4つのログタイプそれぞれに対して実行が必要だ。
+
+```bash
+# Compute ログの配信ソースを作成
+aws logs put-delivery-source \
+  --name "sandbox-AUTO_MODE_COMPUTE_LOGS" \
+  --log-type "AUTO_MODE_COMPUTE_LOGS" \
+  --resource-arn "arn:aws:eks:ap-northeast-1:123456789012:cluster/sandbox"
+```
+
+注意点として、各ログタイプの設定ごとにクラスターの更新が走る。1つ目の設定が完了してから次を実行する必要がある。4つすべてを連続実行すると `ConflictException` が発生する。
+
+### ステップ2: 配信先の作成
+
+CloudWatch Logs のロググループを配信先として登録する。
+
+```bash
+# ロググループの作成
+aws logs create-log-group \
+  --log-group-name "/aws/eks/sandbox/auto-mode/compute"
+
+# 配信先の登録
+aws logs put-delivery-destination \
+  --name "sandbox-dest-compute" \
+  --delivery-destination-configuration \
+    "destinationResourceArn=arn:aws:logs:ap-northeast-1:123456789012:log-group:/aws/eks/sandbox/auto-mode/compute"
+```
+
+### ステップ3: 配信の接続
+
+ソースと配信先を紐付ける。このタイミングで、各ログタイプ固有の `recordFields` が自動設定される。
+
+```bash
+aws logs create-delivery \
+  --delivery-source-name "sandbox-AUTO_MODE_COMPUTE_LOGS" \
+  --delivery-destination-arn \
+    "arn:aws:logs:ap-northeast-1:123456789012:delivery-destination:sandbox-dest-compute"
+```
+
+Compute ログの場合、`controller`、`reconcileID`、`instance-type-count` などのフィールドが含まれる。これらは後述する Logs Insights クエリでフィルタやグルーピングに活用できる。
+
+## Logs Insights によるログ分析
+
+ログが収集できたら、CloudWatch Logs Insights で分析する。ここからが本題だ。
+
+### スケールアップからスケールダウンまでの追跡
+
+nginx を3レプリカでデプロイし、その後削除した際の Compute ログを時系列で追跡した。
+
+```text
+04:29:36 [INFO]  provisioner           | found provisionable pod(s)
+04:29:36 [INFO]  provisioner           | computed new nodeclaim(s) to fit pod(s)
+04:29:36 [INFO]  provisioner           | created nodeclaim
+04:30:18 [INFO]  disruption            | disrupting node(s)
+04:30:19 [INFO]  node.termination      | tainted node
+04:30:49 [DEBUG] nodeclaim.disruption  | marking consolidatable
+```
+
+ここから Auto Mode（Karpenter）の内部動作が明確に読み取れる。
+
+1. **provisioner** が未スケジュールの Pod を検知し、新しい NodeClaim を作成
+2. Pod 削除後、**disruption** コントローラーが不要ノードを検出
+3. **node.termination** がノードに taint を付与し、Pod を退避
+4. **nodeclaim.disruption** が consolidation 完了をマーク
+
+従来はこの一連の流れがブラックボックスだったが、ログにより各フェーズの所要時間まで把握できるようになった。
+
+### 実用的な Insights クエリ
+
+#### コントローラー別イベント集計
+
+クラスター内で何が起きているかの全体像を把握するクエリだ。
+
+```text
+stats count(*) as event_count by controller
+| sort event_count desc
+```
+
+実行結果:
+
+| Controller | イベント数 | 役割 |
+|---|---|---|
+| `nodeclaim.lifecycle` | 12 | ノードの起動・準備 |
+| `provisioner` | 5 | Pod スケジューリング |
+| `nodeclaim.disruption` | 2 | consolidation 判定 |
+| `node.termination` | 1 | ノード削除 |
+| `disruption` | 1 | disruption 開始 |
+
+#### 全コンポーネントのエラー検出
+
+4つのロググループを横断してエラーを検出するクエリだ。
+
+```text
+fields @timestamp, message
+| filter level = "ERROR" or level = "error" or stream = "stderr"
+| sort @timestamp desc
+```
+
+今回の検証では block-storage に4件のエラーが検出された。VolumeSnapshot CRD が未インストールの環境で EBS CSI が CRD を参照しようとしたことが原因で、実害はないが、こうしたノイズを検知できること自体がログ機能の価値だ。
+
+#### IPAM の IP 割当ライフサイクル
+
+ノード追加時の IP アドレス管理の流れを追跡するクエリだ。
+
+```text
+fields @timestamp, level, message, controller, controllerKind
+| filter message like /created|allocat|subnet|CNINode|finalized/
+| sort @timestamp asc
+```
+
+```text
+04:29:54 [info] nodeclaim/NodeClaim  | created CNINode
+04:29:55 [info] cninode/CNINode      | allocated ips
+04:29:55 [info] cninode/CNINode      | updated CNINode Status
+04:31:14 [info] cninode/CNINode      | finalized CNINode        # ノード削除時
+```
+
+CNINode 作成 → IP 割当 → ステータス更新 → finalize（削除時）の完全なライフサイクルが追跡できる。ネットワーク関連のトラブルシュート時に有用だ。
+
+## まとめ
+
+- **3ステップでブラックボックスが開く** — `put-delivery-source` → `put-delivery-destination` → `create-delivery` の設定だけで、Auto Mode の内部動作が CloudWatch Logs に記録される。追加のエージェントやサイドカーは不要だ。
+- **Karpenter の判断過程が追跡可能に** — provisioner → disruption → taint → consolidation の各フェーズが時系列で記録されるため、スケーリングの問題を切り分けやすくなった。
+- **Logs Insights で横断的な分析ができる** — コントローラー別の集計やエラー検出など、4コンポーネントを横断したクエリで運用の全体像を素早く把握できる。
+- **設定時の順序制約に注意** — 各ログタイプの配信ソース作成はクラスター更新を伴うため、1つずつ完了を待ってから次を実行する必要がある。
