@@ -1,0 +1,36 @@
+---
+title: "Kaniko + S3 ビルドコンテキストで EKS 上から Docker 不要のコンテナビルドができる"
+description: "ソースを tar.gz にして S3 にアップロードし、Kaniko Job の --context=s3:// で指定すれば EKS 上で Docker デーモンなしにイメージビルド・ECR push が完結する。"
+date: "2026-03-24"
+published: true
+tags:
+  - kaniko
+  - eks
+  - kubernetes
+  - ecr
+---
+
+EKS 上でコンテナイメージをビルドする必要があったが、Docker デーモンを動かせない環境だった。Kaniko の S3 ビルドコンテキスト機能を使ったらあっさり解決した。
+
+手順はシンプル。ソースを tar.gz にして S3 にアップロードし、Kaniko Job で `--context=s3://` を指定するだけだ。
+
+```yaml
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: kaniko-build
+  namespace: build
+spec:
+  template:
+    spec:
+      serviceAccountName: kaniko
+      containers:
+      - name: kaniko
+        image: gcr.io/kaniko-project/executor:latest
+        args:
+        - "--context=s3://my-bucket/build/context.tar.gz"
+        - "--destination=123456789.dkr.ecr.ap-northeast-1.amazonaws.com/my-app:latest"
+      restartPolicy: Never
+```
+
+ポイントは Pod Identity で `kaniko` サービスアカウントに ECR push 権限（`ecr:PutImage`, `ecr:CompleteLayerUpload` 等）と S3 read 権限を付与すること。認証情報のマウントは不要で、Pod Identity が自動で処理する。ビルド時間は Python アプリで 70〜130 秒程度だった。

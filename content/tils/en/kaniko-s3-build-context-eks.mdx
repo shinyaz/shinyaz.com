@@ -1,0 +1,36 @@
+---
+title: "Kaniko with S3 build context builds containers on EKS without Docker"
+description: "Upload source as tar.gz to S3, use --context=s3:// in a Kaniko Job, and it builds and pushes to ECR directly on EKS without a Docker daemon."
+date: "2026-03-24"
+published: true
+tags:
+  - kaniko
+  - eks
+  - kubernetes
+  - ecr
+---
+
+Needed to build container images on EKS but couldn't run a Docker daemon. Kaniko's S3 build context feature solved it cleanly.
+
+Upload source as tar.gz to S3, then point the Kaniko Job at it with `--context=s3://`.
+
+```yaml
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: kaniko-build
+  namespace: build
+spec:
+  template:
+    spec:
+      serviceAccountName: kaniko
+      containers:
+      - name: kaniko
+        image: gcr.io/kaniko-project/executor:latest
+        args:
+        - "--context=s3://my-bucket/build/context.tar.gz"
+        - "--destination=123456789.dkr.ecr.ap-northeast-1.amazonaws.com/my-app:latest"
+      restartPolicy: Never
+```
+
+The key is granting ECR push permissions (`ecr:PutImage`, `ecr:CompleteLayerUpload`, etc.) and S3 read permissions to the `kaniko` service account via Pod Identity. No credential mounts needed — Pod Identity handles it automatically. Build times were 70-130 seconds for a Python app.

@@ -1,0 +1,158 @@
+---
+title: "Cognito Auth UI and HPA to Complete the Agent Platform — Agentic AI on EKS Part 3"
+description: "Deploying Gradio + Cognito OAuth Web UI and HPA autoscaling to complete the full workshop architecture. Includes measured resource consumption across all 4 components."
+date: "2026-03-26"
+published: true
+featured: false
+categories: [ai-agents]
+tags:
+  [
+    "eks",
+    "kubernetes",
+    "ai-agents",
+    "cognito",
+    "hpa",
+    "gradio",
+  ]
+---
+
+## Introduction
+
+[Part 1](/en/blog/2026/03/24/agentic-ai-on-eks-workshop) covered Weather Agent + MCP Server, and [Part 2](/en/blog/2026/03/25/a2a-multi-agent-on-eks) validated Travel Agent's A2A coordination.
+
+This final post fills in the remaining pieces: a Cognito OAuth-authenticated Web UI and HPA autoscaling. With these in place, all four workshop components are deployed and the agent platform is fully operational.
+
+## Architecture Overview
+
+With the **Agent UI** and **HPA** added in this post, all four workshop components are in place.
+
+```mermaid
+graph TD
+    User(("User"))
+    User --> UI
+
+    subgraph EKS["EKS Cluster"]
+        UI["🖥️ Agent UI\nGradio + OAuth"]
+        TA["🤖 Travel Agent\nOrchestrator"]
+
+        UI -- "REST :3000" --> WA
+        UI -- "REST :3000" --> TA
+        TA -- "A2A :9000" --> WA
+
+        WA["⚡ Weather Agent\nStrands SDK + Bedrock"]
+        WA -- "MCP :8080" --> MCP
+
+        MCP["🔧 Weather MCP Server\nget_forecast / get_alerts"]
+    end
+
+    UI -. "OAuth" .-> AWS
+    WA -. "Pod Identity" .-> AWS
+
+    AWS["☁️ AWS Services\nBedrock / S3 / Cognito"]
+```
+
+## Agent UI Architecture
+
+The Agent UI combines Gradio (a Python-based web UI framework) with FastAPI. Authentication uses Cognito OAuth2's Authorization Code flow.
+
+A notable design feature is **agent mode switching**. Users select between "Single Agent (Weather)" and "Multi-Agent (Travel)" via radio buttons, connecting to different agents from the same chat interface.
+
+```python
+# app.py - Agent selection logic
+if agent_mode == "Single Agent(Weather)":
+    endpoint_url = "http://weather-agent.agents/prompt"
+else:  # Multi-Agent(Travel)
+    endpoint_url = "http://travel-agent.agents/prompt"
+```
+
+Requests from the UI include Cognito JWT tokens in the `Authorization` header. Agents can run in test mode with `DISABLE_AUTH=1`, but production deployments validate JWT tokens.
+
+## Deployment Steps
+
+UI deployment completes in three steps.
+
+**1. Set Cognito user passwords**
+
+Set passwords for Alice/Bob users created by Terraform.
+
+```bash
+aws cognito-idp admin-set-user-password \
+  --user-pool-id $COGNITO_POOL_ID \
+  --username Alice --password "Passw0rd@" --permanent
+```
+
+**2. Create OAuth secret**
+
+Register Cognito Client ID/Secret as a Kubernetes Secret. The UI Pod loads it via `envFrom`.
+
+```bash
+kubectl create secret generic agent-ui \
+  --namespace ui \
+  --from-env-file ui/.env
+```
+
+**3. Helm deploy**
+
+```bash
+helm upgrade agent-ui manifests/helm/ui \
+  --install -n ui --create-namespace \
+  -f workshop-ui-values.yaml
+```
+
+After deployment, `kubectl port-forward svc/agent-ui -n ui 8000:80` makes the UI available at `http://localhost:8000`. Users are redirected to Cognito login, and after authentication, the Gradio chat interface appears.
+
+## HPA Autoscaling
+
+The Helm chart includes an HPA template, enabled with `autoscaling.enabled=true`.
+
+```bash
+helm upgrade weather-agent manifests/helm/agent \
+  --namespace agents \
+  -f workshop-agent-weather-values.yaml \
+  --set autoscaling.enabled=true \
+  --set autoscaling.minReplicas=1 \
+  --set autoscaling.maxReplicas=3 \
+  --set autoscaling.targetCPUUtilizationPercentage=50 \
+  --set resources.requests.cpu=100m \
+  --set resources.requests.memory=256Mi
+```
+
+HPA is working correctly:
+
+```text
+NAME            TARGETS       MINPODS   MAXPODS   REPLICAS
+weather-agent   cpu: 3%/50%   1         3         1
+travel-agent    cpu: 1%/50%   1         3         1
+```
+
+At idle, both run with 1 replica. When CPU exceeds 50%, they scale up to 3 replicas. Since EKS Auto Mode handles node provisioning automatically, configuring Pod-level HPA is all it takes for end-to-end cluster scaling.
+
+## Resource Consumption Across All Components
+
+Measured values for all four components at idle:
+
+| Component | CPU | Memory | Role |
+|---|---|---|---|
+| Weather Agent | 3m | 405Mi | LLM calls + MCP tools |
+| Travel Agent | 1m | 143Mi | A2A orchestration |
+| Weather MCP Server | 1m | 56Mi | NWS API wrapper |
+| Agent UI | 3m | 119Mi | Gradio + OAuth |
+| **Total** | **8m** | **723Mi** | |
+
+The idle footprint is lightweight at 8m CPU / 723Mi memory total. However, Weather Agent CPU spikes during LLM calls, making CPU-based HPA thresholds important. The MCP Server is the lightest component as a pure API proxy.
+
+## Takeaways
+
+- **Manage OAuth secrets via Kubernetes Secret + envFrom** — Keep Cognito Client Secrets out of Helm values by separating them into Secrets. The distinction between ConfigMaps (public config) and Secrets (credentials) is key to agent platform operations.
+- **HPA + EKS Auto Mode for complete scaling** — Pod-level HPA is all you need; Auto Mode handles node provisioning. Agents have bursty load characteristics from LLM calls, making CPU-based HPA a natural fit.
+- **723Mi total for 4 components** — The idle footprint is light. In production, session management (S3) and model invocation (Bedrock) costs dominate rather than compute.
+
+Looking back across the series, the key takeaway is that production AI agents introduce three design axes absent from traditional microservices: **protocol design (MCP / A2A), configuration externalization (ConfigMap / Secret), and session state management**. The workshop covers all three through its four-component architecture — a well-crafted learning experience.
+
+---
+
+This is Part 3 (final) of the Agentic AI on EKS workshop validation series.
+
+- [Part 1: Deploying AI Agents on EKS](/en/blog/2026/03/24/agentic-ai-on-eks-workshop)
+- [Part 2: Multi-Agent Coordination with A2A Protocol](/en/blog/2026/03/25/a2a-multi-agent-on-eks)
+- Part 3: Cognito Auth UI and HPA to Complete the Agent Platform (this article)
