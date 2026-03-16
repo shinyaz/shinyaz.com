@@ -1,0 +1,22 @@
+---
+title: "agentcore CLIのDirect Code Deployにはuvが必要"
+description: "agentcore configureでDirect Code Deployを選択すると「Direct Code Deploy deployment unavailable (uv not found)」エラーが出る。pip install uvで解決するが公式ドキュメントに記載がない。"
+date: "2026-03-16"
+published: true
+tags: ["agentcore", "bedrock", "uv"]
+---
+
+`agentcore configure -dt direct_code_deploy` を実行したら、こんなエラーで止まった。
+
+```text
+❌ Error: Direct Code Deploy deployment unavailable (uv not found (install from: https://docs.astral.sh/uv/))
+```
+
+Direct Code Deployは依存関係をLinux ARM64向けにクロスコンパイルする際に `uv` を使っている。`pip install uv` で入れたら通った。
+
+```bash
+pip install uv
+agentcore configure -e my_server.py --protocol AGUI -dt direct_code_deploy -ni
+```
+
+エラーメッセージにはインストール先のURLが出るので気づけるが、[AgentCore Runtime AG-UIのドキュメント](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/runtime-agui.html)の前提条件には `uv` の記載がない。`bedrock-agentcore-starter-toolkit` 0.3.3 時点の話である。

@@ -1,0 +1,242 @@
+---
+title: "Stream Agent Responses to UIs with Bedrock AgentCore Runtime AG-UI Protocol"
+description: "Deploy an AG-UI protocol server to Bedrock AgentCore Runtime and stream real-time agent responses via SSE events. Hands-on walkthrough with agentcore CLI Direct Code Deploy."
+date: "2026-03-16"
+published: true
+featured: false
+categories: [ai-agents]
+tags:
+  [
+    "bedrock",
+    "agentcore",
+    "ag-ui",
+    "strands-agents",
+    "sse",
+  ]
+---
+
+## Introduction
+
+On March 13, 2026, AWS [added AG-UI (Agent-User Interaction) protocol support to Bedrock AgentCore Runtime](https://aws.amazon.com/about-aws/whats-new/2026/03/amazon-bedrock-agentcore-runtime-ag-ui-protocol/). AgentCore Runtime already supported HTTP, MCP, and A2A — AG-UI completes the picture by standardizing real-time streaming from agents to user-facing UIs.
+
+[AG-UI](https://docs.ag-ui.com/introduction) is an open protocol created by CopilotKit that standardizes how AI agents communicate with user interfaces through event-based messaging. It delivers text chunks, reasoning steps, and tool call results to frontends in real time via SSE (Server-Sent Events) or WebSocket transport.
+
+This post walks through building an AG-UI server with [Strands Agents](https://github.com/strands-agents/sdk-python), deploying it to AgentCore Runtime, and invoking it remotely — all verified hands-on. See the [official AgentCore Runtime AG-UI docs](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/runtime-agui.html) for the full reference.
+
+## Where AG-UI Fits in the Protocol Stack
+
+AgentCore Runtime now supports four protocols:
+
+| Protocol | Port | Purpose |
+|----------|------|---------|
+| HTTP | 8080 | General-purpose API |
+| MCP | 8000 | Tool & context integration |
+| A2A | 9000 | Agent-to-agent communication |
+| AG-UI | 8080 | Agent-to-UI streaming |
+
+AG-UI shares port 8080 with HTTP. It exposes two endpoints: `/invocations` (SSE) and `/ws` (WebSocket). Authentication supports both SigV4 and OAuth 2.0. See [AG-UI Events](https://docs.ag-ui.com/concepts/events) for the full event specification.
+
+## Setup and Implementation
+
+### Prerequisites
+
+- Python 3.12+
+- Authenticated AWS CLI
+- Access to Bedrock Claude models
+- `uv` (needed for Direct Code Deploy dependency builds; included in the install step below)
+
+### Project Structure
+
+Prepare these two files:
+
+```text
+my_agui_project/
+├── my_agui_server.py
+└── requirements.txt
+```
+
+`requirements.txt`:
+
+```text
+fastapi
+uvicorn
+ag-ui-strands
+```
+
+### Install Dependencies
+
+```bash
+python -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt bedrock-agentcore-starter-toolkit uv
+```
+
+[`ag-ui-strands`](https://github.com/strands-agents/ag-ui-strands) bridges Strands Agents with the AG-UI protocol. [`bedrock-agentcore-starter-toolkit`](https://pypi.org/project/bedrock-agentcore-starter-toolkit/) provides the `agentcore` CLI. `uv` is used by Direct Code Deploy for dependency builds.
+
+### Server Implementation
+
+```python
+# my_agui_server.py
+import uvicorn
+from fastapi import FastAPI, Request
+from fastapi.responses import StreamingResponse, JSONResponse
+from ag_ui_strands import StrandsAgent
+from ag_ui.core import RunAgentInput
+from ag_ui.encoder import EventEncoder
+from strands import Agent
+from strands.models.bedrock import BedrockModel
+
+model = BedrockModel(
+    model_id="us.anthropic.claude-sonnet-4-20250514-v1:0",
+    region_name="us-west-2",
+)
+
+strands_agent = Agent(
+    model=model,
+    system_prompt="You are a helpful assistant.",
+)
+
+agui_agent = StrandsAgent(
+    agent=strands_agent,
+    name="my_agent",
+    description="A helpful assistant powered by Claude on Bedrock",
+)
+
+app = FastAPI()
+
+@app.post("/invocations")
+async def invocations(input_data: dict, request: Request):
+    accept_header = request.headers.get("accept")
+    encoder = EventEncoder(accept=accept_header)
+
+    async def event_generator():
+        run_input = RunAgentInput(**input_data)
+        async for event in agui_agent.run(run_input):
+            yield encoder.encode(event)
+
+    return StreamingResponse(
+        event_generator(),
+        media_type=encoder.get_content_type(),
+    )
+
+@app.get("/ping")
+async def ping():
+    return JSONResponse({"status": "Healthy"})
+
+if __name__ == "__main__":
+    uvicorn.run(app, host="0.0.0.0", port=8080)
+```
+
+The code has three layers: `Agent` from the `strands` package communicates with the LLM on Bedrock, `StrandsAgent` from `ag_ui_strands` wraps it as an AG-UI protocol adapter, and FastAPI's `StreamingResponse` delivers the SSE stream to clients. The only line a developer needs to add is the `StrandsAgent` wrapper — `EventEncoder` handles AG-UI event encoding automatically. I only tested SSE in this walkthrough, but the docs indicate WebSocket transport is also supported via the `/ws` endpoint.
+
+## Local Testing
+
+Start the server and send an SSE request with curl:
+
+```bash
+python my_agui_server.py
+```
+
+The AG-UI request body includes `threadId` (conversation thread identifier), `runId` (execution unit identifier), and `messages` (array of user messages) as its key fields. The remaining fields — `state`, `tools`, `context`, `forwardedProps` — are passed empty here.
+
+```bash
+curl -N -X POST http://localhost:8080/invocations \
+  -H "Content-Type: application/json" \
+  -H "Accept: text/event-stream" \
+  -d '{
+    "threadId": "test-123",
+    "runId": "run-456",
+    "state": {},
+    "messages": [{"role": "user", "content": "What is AG-UI protocol? Answer in 2 sentences.", "id": "msg-1"}],
+    "tools": [],
+    "context": [],
+    "forwardedProps": {}
+  }'
+```
+
+The response arrives as an AG-UI event stream:
+
+```text
+data: {"type":"RUN_STARTED","threadId":"test-123","runId":"run-456"}
+data: {"type":"STATE_SNAPSHOT","snapshot":{}}
+data: {"type":"TEXT_MESSAGE_START","messageId":"7c405aa9-...","role":"assistant"}
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"7c405aa9-...","delta":"AG-UI ("}
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"7c405aa9-...","delta":"Agent-GUI) protocol is a communication"}
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"7c405aa9-...","delta":" standard that enables AI agents..."}
+...
+data: {"type":"TEXT_MESSAGE_END","messageId":"7c405aa9-..."}
+data: {"type":"RUN_FINISHED","threadId":"test-123","runId":"run-456"}
+```
+
+The event lifecycle flows as: `RUN_STARTED` → `STATE_SNAPSHOT` → `TEXT_MESSAGE_START` → `TEXT_MESSAGE_CONTENT` × N → `TEXT_MESSAGE_END` → `RUN_FINISHED`.
+
+Each `TEXT_MESSAGE_CONTENT` carries a text delta that frontends can render incrementally for ChatGPT-style streaming. For building the frontend, you can use [CopilotKit](https://docs.copilotkit.ai/) or the [AG-UI TypeScript Client SDK](https://docs.ag-ui.com/sdk/js/client/overview).
+
+## Deploying to AgentCore Runtime
+
+With the AG-UI event stream verified locally, the next step is deploying to AgentCore Runtime and invoking the same agent from the cloud.
+
+### Configuration
+
+Use `agentcore configure` with the AGUI protocol flag:
+
+```bash
+agentcore configure -e my_agui_server.py --protocol AGUI --region us-west-2 \
+  -ni -dt direct_code_deploy --runtime PYTHON_3_13
+```
+
+The `-ni` flag skips interactive prompts and `-dt direct_code_deploy` selects Docker-free deployment. Set `--runtime` to match your local Python version (`PYTHON_3_10`, `PYTHON_3_11`, `PYTHON_3_13`, etc.). This approach deploys Python code and requirements.txt directly via S3 — no Dockerfile needed.
+
+### Deploy
+
+```bash
+agentcore deploy
+```
+
+The deploy process automatically handles:
+
+1. **Memory provisioning** — Creates STM (Short-Term Memory) resource (~160 seconds)
+2. **IAM role creation** — Auto-generates execution role `AmazonBedrockAgentCoreSDKRuntime-*`
+3. **Dependency build** — Cross-compiles for Linux ARM64 using `uv`
+4. **S3 upload** — Uploads the ~25MB deployment package
+5. **Runtime creation** — Provisions the AgentCore Runtime instance
+
+After completion, you get an Agent ARN:
+
+```text
+arn:aws:bedrock-agentcore:us-west-2:123456789012:runtime/my_agui_server-BEJqTI9q7w
+```
+
+### Remote Invocation
+
+Invoke the deployed agent with `agentcore invoke`:
+
+```bash
+agentcore invoke '{"threadId": "test-remote-1", "runId": "run-remote-1",
+  "state": {}, "messages": [{"role": "user",
+  "content": "What is Amazon Bedrock AgentCore?", "id": "msg-1"}],
+  "tools": [], "context": [], "forwardedProps": {}}'
+```
+
+The same AG-UI event stream came back. AgentCore Runtime transparently handles authentication, session isolation, and scaling — the server code requires zero changes between local and cloud.
+
+## Gotchas
+
+Two issues I hit during testing:
+
+**`uv` must be pre-installed** — Direct Code Deploy uses `uv` for cross-compiling dependencies to Linux ARM64. If `uv` is missing, `agentcore configure` fails with `Direct Code Deploy deployment unavailable (uv not found)`. I've included it in the install steps above, but the AWS docs don't mention this prerequisite, so watch out if you're following the official guide alone.
+
+**X-Ray trace segment configuration** — During the memory resource creation phase, a `ValidationException` fires because X-Ray Delivery Destination requires CloudWatch Logs as a trace segment destination, which isn't set up yet. The subsequent runtime creation phase auto-configures the trace destination, so runtime observability works fine. The agent itself is unaffected either way.
+
+## Cleanup
+
+Once you're done testing, run `agentcore destroy` to tear down the deployed resources and avoid ongoing costs:
+
+```bash
+agentcore destroy
+```
+
+## Takeaways
+
+- **StrandsAgent wrapper is all you need for AG-UI** — Wrap an existing Strands Agent with `StrandsAgent` and the AG-UI event streaming protocol is handled automatically. Almost zero protocol awareness required.
+- **Direct Code Deploy enables containerless deployment** — No Dockerfile, no Docker build. Python code goes straight to the cloud with identical behavior locally and remotely. Great developer experience.
+- **AG-UI complements MCP and A2A** — MCP handles tool integration, A2A handles agent-to-agent communication, AG-UI handles real-time UI delivery. Together they form a full-stack agent protocol suite. AG-UI also works with [LangGraph and CrewAI](https://docs.ag-ui.com/quickstart/introduction), and you can try it interactively at the [AG-UI Dojo](https://dojo.ag-ui.com/).

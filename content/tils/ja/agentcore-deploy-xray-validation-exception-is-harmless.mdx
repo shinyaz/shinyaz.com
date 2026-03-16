@@ -1,0 +1,17 @@
+---
+title: "agentcore deployのX-Ray ValidationExceptionはメモリリソース限定で無害"
+description: "agentcore deploy中に「X-Ray Delivery Destination is supported with CloudWatch Logs as a Trace Segment Destination」が出るが、メモリリソース作成時のみの問題でランタイムには影響しない。"
+date: "2026-03-16"
+published: true
+tags: ["agentcore", "bedrock", "x-ray", "observability"]
+---
+
+`agentcore deploy` の途中でこのエラーが出て一瞬焦った。
+
+```text
+⚠️ Failed to enable observability: ValidationException: X-Ray Delivery Destination is supported with CloudWatch Logs as a Trace Segment Destination. Please enable the CloudWatch Logs destination for your traces using the UpdateTraceSegmentDestination API
+```
+
+結論から言うと無視して問題ない。これはメモリリソース（STM）の作成フェーズでObservabilityを有効化しようとした際に、X-Rayのトレースセグメント先がまだCloudWatch Logsに設定されていないために発生する。
+
+後続のランタイム作成フェーズで `Configured X-Ray trace segment destination to CloudWatch Logs` と出力され、トレースセグメント先が自動設定される。ランタイム本体のObservabilityは正常に有効化されるので、エージェントの動作にもモニタリングにも影響はなかった。
