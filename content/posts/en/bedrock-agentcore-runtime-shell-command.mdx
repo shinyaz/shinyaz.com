@@ -1,0 +1,326 @@
+---
+title: "Execute Shell Commands in Bedrock AgentCore Runtime Sessions with InvokeAgentRuntimeCommand"
+description: "Hands-on verification of AgentCore Runtime's new shell command API. Covers HTTP/2 streaming, in-session file persistence, cross-session microVM isolation, and concurrent execution behavior."
+date: "2026-03-17"
+published: true
+featured: false
+categories: [ai-agents]
+tags: ["bedrock", "agentcore", "shell", "ai-agents"]
+---
+
+## Introduction
+
+On March 17, 2026, AWS [added the InvokeAgentRuntimeCommand API to Amazon Bedrock AgentCore Runtime](https://aws.amazon.com/about-aws/whats-new/2026/03/bedrock-agentcore-runtime-shell-command/). Until now, running shell commands inside an agent session required custom process management logic baked into your container. The new API solves this at the platform level, letting you run deterministic operations like test execution, git commands, and dependency installation separately from LLM reasoning.
+
+This post shares the results of testing the API across seven dimensions using a minimal Python runtime deployed with code configuration (S3 ZIP). See the [official documentation](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/runtime-execute-command.html) for the full API reference.
+
+## Why Separate Shell Commands from Agent Reasoning
+
+A typical AI coding agent workflow alternates between LLM-driven code generation and deterministic operations like tests, builds, and git. Previously, `InvokeAgentRuntime` had to handle all of this, creating three problems: mixed concerns in the reasoning loop, long builds blocking the entire agent, and no built-in streaming for command output.
+
+`InvokeAgentRuntimeCommand` solves all three at once.
+
+## API Design
+
+The API accepts a command string and timeout, returning an HTTP/2 EventStream response with three event types:
+
+| Parameter | Type | Description |
+|---|---|---|
+| `agentRuntimeArn` | string | Deployed runtime ARN |
+| `runtimeSessionId` | string | Session ID (minimum 33 characters) |
+| `body.command` | string | Shell command to execute (1B–64KB) |
+| `body.timeout` | integer | Timeout in seconds (1–3600) |
+
+Response events: **`contentStart`** (execution confirmed), **`contentDelta`** (streaming stdout/stderr), and **`contentStop`** (exitCode + status: `COMPLETED` or `TIMED_OUT`).
+
+Each command runs as a one-shot bash process — no shell history or environment variable persistence between calls. However, as verified below, the filesystem is shared within a session, so you only need `&&` chaining when shell state carryover is required.
+
+## Setting Up the Test Environment
+
+I deployed a minimal Python agent using code configuration (S3 ZIP). Here are the full steps to reproduce.
+
+Prerequisites:
+
+- AWS CLI configured with `bedrock-agentcore:*`, `iam:*`, and `s3:*` permissions
+- boto3 1.42.70 (version used in this verification; supports `invoke_agent_runtime_command`)
+- `bedrock-agentcore:InvokeAgentRuntimeCommand` permission on the calling IAM principal
+
+### Agent Code
+
+The agent code itself is minimal — `InvokeAgentRuntimeCommand` operates independently of the agent logic.
+
+```python
+# main.py
+import json
+import sys
+
+def handle_invoke(event):
+    user_input = event.get("input", {}).get("text", "")
+    return {
+        "output": {
+            "text": f"Received: {user_input}. This is a minimal test agent."
+        }
+    }
+
+def main():
+    for line in sys.stdin:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            request = json.loads(line)
+            response = handle_invoke(request)
+            print(json.dumps(response), flush=True)
+        except json.JSONDecodeError:
+            print(json.dumps({"error": "Invalid JSON"}), flush=True)
+
+if __name__ == "__main__":
+    main()
+```
+
+### Deployment
+
+IAM role creation, S3 upload, and runtime + endpoint creation in a single sequence. If you just want the results, skip ahead to [Verification Results](#verification-results).
+
+```bash
+# Variables
+ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+BUCKET_NAME="agentcore-test-shell-cmd-${ACCOUNT_ID}"
+REGION="us-west-2"
+
+# S3 bucket and code upload
+zip agent.zip main.py
+aws s3 mb "s3://${BUCKET_NAME}" --region "$REGION"
+aws s3 cp agent.zip "s3://${BUCKET_NAME}/agent.zip"
+
+# IAM role with trust policy for AgentCore
+aws iam create-role \
+  --role-name AgentCoreRuntimeTestRole \
+  --assume-role-policy-document '{
+    "Version": "2012-10-17",
+    "Statement": [{
+      "Effect": "Allow",
+      "Principal": {"Service": "bedrock-agentcore.amazonaws.com"},
+      "Action": "sts:AssumeRole"
+    }]
+  }'
+
+# Attach required policies
+aws iam attach-role-policy \
+  --role-name AgentCoreRuntimeTestRole \
+  --policy-arn arn:aws:iam::aws:policy/AmazonBedrockFullAccess
+
+aws iam put-role-policy \
+  --role-name AgentCoreRuntimeTestRole \
+  --policy-name S3Access \
+  --policy-document "{
+    \"Version\": \"2012-10-17\",
+    \"Statement\": [{
+      \"Effect\": \"Allow\",
+      \"Action\": [\"s3:GetObject\", \"s3:ListBucket\"],
+      \"Resource\": [
+        \"arn:aws:s3:::${BUCKET_NAME}\",
+        \"arn:aws:s3:::${BUCKET_NAME}/*\"
+      ]
+    }]
+  }"
+
+# Create runtime
+aws bedrock-agentcore-control create-agent-runtime \
+  --region "$REGION" \
+  --agent-runtime-name shell_cmd_test_agent \
+  --role-arn "arn:aws:iam::${ACCOUNT_ID}:role/AgentCoreRuntimeTestRole" \
+  --agent-runtime-artifact "{
+    \"codeConfiguration\": {
+      \"code\": {\"s3\": {\"bucket\": \"${BUCKET_NAME}\", \"prefix\": \"agent.zip\"}},
+      \"runtime\": \"PYTHON_3_13\",
+      \"entryPoint\": [\"main.py\"]
+    }
+  }" \
+  --network-configuration '{"networkMode": "PUBLIC"}'
+# → Note the agentRuntimeId from the response
+
+RUNTIME_ID="shell_cmd_test_agent-XXXXXXXXXX"  # Replace with actual ID
+
+# Create endpoint and poll until READY
+aws bedrock-agentcore-control create-agent-runtime-endpoint \
+  --region "$REGION" \
+  --agent-runtime-id "$RUNTIME_ID" \
+  --name shell_cmd_test_endpoint
+
+while true; do
+  STATUS=$(aws bedrock-agentcore-control get-agent-runtime-endpoint \
+    --region "$REGION" \
+    --agent-runtime-id "$RUNTIME_ID" \
+    --endpoint-name shell_cmd_test_endpoint \
+    --query 'status' --output text)
+  echo "Endpoint status: $STATUS"
+  [ "$STATUS" = "READY" ] && break
+  sleep 10
+done
+```
+
+The runtime and endpoint reached READY status within the first polling interval (under 10 seconds). Code configuration does not require a container image build.
+
+## Verification Results
+
+I tested the API across seven dimensions:
+
+1. **Basic execution** — Three-phase EventStream events
+2. **Container environment** — Pre-installed tools
+3. **In-session file persistence** — File visibility across API calls
+4. **Cross-session isolation** — File invisibility with different session IDs
+5. **Error handling** — Non-zero exit code behavior
+6. **Timeout** — TIMED_OUT status and partial output
+7. **Concurrent execution** — Non-blocking parallel commands
+
+All tests below use this Python base. Session IDs must be at least 33 characters, so I concatenate two UUIDs.
+
+```python
+import boto3, sys, uuid
+
+client = boto3.client('bedrock-agentcore', region_name='us-west-2')
+RUNTIME_ARN = "arn:aws:bedrock-agentcore:us-west-2:ACCOUNT_ID:runtime/RUNTIME_ID"
+SESSION_ID = str(uuid.uuid4()) + "-" + str(uuid.uuid4())[:8]  # 45 chars
+
+def run_command(command, timeout=30, session_id=None):
+    """Execute a command and process the EventStream."""
+    response = client.invoke_agent_runtime_command(
+        agentRuntimeArn=RUNTIME_ARN,
+        runtimeSessionId=session_id or SESSION_ID,
+        qualifier='DEFAULT',
+        contentType='application/json',
+        accept='application/vnd.amazon.eventstream',
+        body={'command': command, 'timeout': timeout}
+    )
+    for event in response.get('stream', []):
+        if 'chunk' in event:
+            chunk = event['chunk']
+            if 'contentStart' in chunk:
+                print("[contentStart] Command execution started")
+            if 'contentDelta' in chunk:
+                delta = chunk['contentDelta']
+                if delta.get('stdout'):
+                    print(f"[stdout] {delta['stdout']}", end='')
+                if delta.get('stderr'):
+                    print(f"[stderr] {delta['stderr']}", end='', file=sys.stderr)
+            if 'contentStop' in chunk:
+                stop = chunk['contentStop']
+                print(f"[contentStop] Exit code: {stop.get('exitCode')}, "
+                      f"Status: {stop.get('status')}")
+```
+
+### 1. Basic Execution and Streaming
+
+```python
+run_command('/bin/bash -c "echo Hello from AgentCore Runtime"')
+```
+
+```text
+[contentStart] Command execution started
+[stdout] Hello from AgentCore Runtime
+[contentStop] Exit code: 0, Status: COMPLETED
+```
+
+The three-phase event model works exactly as documented, with real-time streaming for long-running commands.
+
+### 2. Container Environment
+
+I ran `uname -a`, `python3 --version`, `whoami`, and `--version` checks for common tools. The container runs Amazon Linux 2023 (`6.1.158-15.288.amzn2023.aarch64`) as root:
+
+| Tool | Available? |
+|---|---|
+| git | 2.50.1 (pre-installed) |
+| curl | 8.17.0 (pre-installed) |
+| python3 | 3.13.9 (matches runtime config) |
+| node | Not installed |
+| pip | Not installed |
+| aws CLI | Not installed |
+
+**Code configuration includes git and curl but not node, pip, or AWS CLI.** Use container configuration with a custom Dockerfile for production agents that need additional tools.
+
+### 3. In-Session File Persistence
+
+I tested whether files created in one API call are visible to subsequent calls in the same session:
+
+```python
+# API call 1: Create file
+run_command('/bin/bash -c "mkdir -p /tmp/test_dir && echo \'file content\' > /tmp/test_dir/test.txt"')
+
+# API call 2 (same session): Read file
+run_command('/bin/bash -c "cat /tmp/test_dir/test.txt"')
+# → [stdout] file content
+```
+
+Despite the "new bash process per command" model, **the filesystem is shared within a session** because the session maps to a single microVM. You can pass intermediate artifacts through files without `&&` chaining.
+
+### 4. Cross-Session microVM Isolation
+
+A different session ID cannot access files from another session:
+
+```python
+new_session = str(uuid.uuid4()) + "-" + str(uuid.uuid4())[:8]
+run_command(
+    '/bin/bash -c "cat /tmp/test_dir/test.txt 2>&1 || echo File NOT found"',
+    session_id=new_session
+)
+# → [stdout] File NOT found
+```
+
+Each session gets its own microVM with separate kernel, memory, and filesystem.
+
+### 5. Error Handling
+
+Failed commands return non-zero exit codes through `contentStop`, not as API errors:
+
+```text
+[stderr] ls: cannot access '/nonexistent_path': No such file or directory
+[contentStop] Exit code: 2, Status: COMPLETED
+```
+
+This makes it natural to handle test failures and build errors in normal application flow.
+
+### 6. Timeout Behavior
+
+A 5-second sleep with a 1-second timeout:
+
+```python
+run_command('/bin/bash -c "echo start && sleep 5 && echo end"', timeout=1)
+```
+
+```text
+[stdout] start
+[contentStop] Exit code: -1, Status: TIMED_OUT
+```
+
+Output produced before the timeout is still streamed. Timeouts are clearly distinguished: `exitCode: -1` with `status: TIMED_OUT`. The `end` output is never produced.
+
+### 7. Concurrent Execution
+
+Three 2-second commands running concurrently in the same session via `concurrent.futures`:
+
+```text
+cmd_A: exit=0, time=3.51s, output=A_done
+cmd_B: exit=0, time=3.51s, output=B_done
+cmd_C: exit=0, time=3.51s, output=C_done
+Total wall time: 3.51s
+```
+
+Each command took about 3.5 seconds (2s sleep + API overhead), but all three completed in 3.5 seconds total — versus roughly 10.5 seconds if run sequentially. **Commands actually run in parallel** within the same session, enabling patterns like running tests, builds, and linting simultaneously.
+
+## Use Cases
+
+**Separating tool execution from reasoning** — Use `InvokeAgentRuntime` for LLM reasoning and `InvokeAgentRuntimeCommand` for deterministic ops. Test execution, builds, and git commits can be managed independently from the agent's reasoning loop.
+
+**File-based step chaining** — Leverage in-session filesystem sharing: agent generates code → writes to file → runs tests → reads results → feeds back to reasoning. The shared filesystem makes this flow natural.
+
+**Parallel execution for faster feedback** — Fire off tests, linting, and type checks in parallel to cut per-turn latency. Note that code configuration doesn't include node or pip, so production agents should use container configuration with a custom Dockerfile.
+
+## Takeaways
+
+The verification revealed runtime behaviors not obvious from the documentation alone.
+
+- **"Stateless" only applies to shell process state** — The docs say "Stateless between commands," but the filesystem actually persists within a session. Only shell history and environment variables are reset between commands.
+- **Timeout is explicitly signaled with exit code -1** — Command failure (non-zero exit code + COMPLETED) and timeout (exit code -1 + TIMED_OUT) are cleanly separated on two axes, and partial output is still streamed before timeout.
+- **Concurrent execution is verified** — The docs state that command execution doesn't block agent invocations, but testing confirmed that multiple commands in the same session also run in parallel. Three commands completed in the wall time of one.
+- **Code configuration containers lack node, pip, and AWS CLI** — git (2.50.1) and curl (8.17.0) are pre-installed, but node, pip, and AWS CLI were not available. Choose container configuration when your agent needs a full toolchain.

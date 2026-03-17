@@ -1,0 +1,346 @@
+---
+title: "Bedrock AgentCore RuntimeのInvokeAgentRuntimeCommand APIでエージェントセッション内からシェルコマンドを実行する"
+description: "AgentCore Runtimeに追加されたシェルコマンド実行APIを検証。HTTP/2ストリーミング、セッション内ファイル永続化、セッション間microVM隔離、並行実行の実挙動を実際のテスト結果とともに共有する。"
+date: "2026-03-17"
+published: true
+featured: false
+categories: [ai-agents]
+tags: ["bedrock", "agentcore", "shell", "ai-agents"]
+---
+
+## はじめに
+
+2026年3月17日、AWSは[Amazon Bedrock AgentCore RuntimeにInvokeAgentRuntimeCommand APIを追加した](https://aws.amazon.com/about-aws/whats-new/2026/03/bedrock-agentcore-runtime-shell-command/)。これまでエージェントセッション内でシェルコマンドを実行するには、コンテナ内に独自のプロセス管理ロジックを組み込む必要があった。新APIはこの課題をプラットフォームレベルで解決し、テスト実行、git操作、依存インストールといった決定論的な操作をエージェントのLLM推論から分離して実行できる。
+
+本記事では、コード構成（S3 ZIP）で最小限のランタイムを構築し、7つの観点からAPIの挙動を検証した結果を共有する。公式ドキュメントは[Execute shell commands in AgentCore Runtime](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/runtime-execute-command.html)を参照。
+
+## なぜシェルコマンド分離が必要か
+
+AIコーディングエージェントの典型的なワークフローでは、LLMによるコード生成と、テスト・ビルド・lint・git操作といった決定論的な処理が交互に発生する。従来のAgentCore Runtimeでは、これらすべてを`InvokeAgentRuntime`の中でエージェントコードが管理する必要があった。
+
+この設計には3つの問題がある。
+
+1. **関心の混在** — LLM推論ループの中にプロセス管理、タイムアウト制御、出力キャプチャのロジックが入り込む
+2. **ブロッキング** — 長時間のビルドがエージェント全体をブロックする
+3. **出力のリアルタイム性** — コマンド出力をストリーミングするには独自のHTTPハンドリングが必要
+
+`InvokeAgentRuntimeCommand`はこれらの課題を一発で解決する。
+
+## APIの設計
+
+APIは以下のパラメータを受け取り、HTTP/2上のEventStreamでレスポンスを返す。
+
+| パラメータ | 型 | 説明 |
+|---|---|---|
+| `agentRuntimeArn` | string | デプロイ済みランタイムのARN |
+| `runtimeSessionId` | string | セッションID（最小33文字） |
+| `qualifier` | string | 通常は`"DEFAULT"` |
+| `body.command` | string | 実行するシェルコマンド（1B〜64KB） |
+| `body.timeout` | integer | タイムアウト秒数（1〜3600） |
+
+レスポンスは3種類のイベントで構成される。
+
+- **`contentStart`** — コマンド実行開始の確認
+- **`contentDelta`** — `stdout`と`stderr`のストリーミング出力
+- **`contentStop`** — `exitCode`と`status`（`COMPLETED`または`TIMED_OUT`）
+
+各コマンドは新しいbashプロセスとして実行される「ワンショット実行」モデルだ。シェルヒストリーや環境変数はコマンド間で引き継がれない。ただし、後述の検証で確認した通り、ファイルシステムは同一セッション内で共有されるため、シェル状態の引き継ぎが必要な場合のみ`&&`チェーンを使えばよい。
+
+## 検証環境の構築
+
+検証にはコード構成（S3 ZIP）を使い、最小限のPythonエージェントをデプロイした。以下の手順で再現できる。
+
+前提条件:
+
+- AWS CLIセットアップ済み（`bedrock-agentcore:*`、`iam:*`、`s3:*`の操作権限）
+- boto3 1.42.70（検証時使用バージョン。`invoke_agent_runtime_command`をサポート）
+- 呼び出し元IAMプリンシパルに`bedrock-agentcore:InvokeAgentRuntimeCommand`権限
+
+### エージェントコードの準備
+
+最小限のエージェントコード`main.py`を作成してZIP化し、S3にアップロードする。`InvokeAgentRuntimeCommand`はエージェントのコードとは独立して動作するため、エージェント自体は最小実装で十分だ。
+
+```python
+# main.py
+import json
+import sys
+
+def handle_invoke(event):
+    user_input = event.get("input", {}).get("text", "")
+    return {
+        "output": {
+            "text": f"Received: {user_input}. This is a minimal test agent."
+        }
+    }
+
+def main():
+    for line in sys.stdin:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            request = json.loads(line)
+            response = handle_invoke(request)
+            print(json.dumps(response), flush=True)
+        except json.JSONDecodeError:
+            print(json.dumps({"error": "Invalid JSON"}), flush=True)
+
+if __name__ == "__main__":
+    main()
+```
+
+### デプロイ
+
+IAMロール作成、S3アップロード、ランタイム＋エンドポイント作成までを一連のコマンドで実行する。検証結果だけ読みたい場合は[検証結果](#検証結果)まで飛ばしてよい。
+
+```bash
+# 変数設定
+ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+BUCKET_NAME="agentcore-test-shell-cmd-${ACCOUNT_ID}"
+REGION="us-west-2"
+
+# S3バケット作成とコードアップロード
+zip agent.zip main.py
+aws s3 mb "s3://${BUCKET_NAME}" --region "$REGION"
+aws s3 cp agent.zip "s3://${BUCKET_NAME}/agent.zip"
+
+# IAMロール作成（AgentCoreサービスへの信頼ポリシー）
+aws iam create-role \
+  --role-name AgentCoreRuntimeTestRole \
+  --assume-role-policy-document '{
+    "Version": "2012-10-17",
+    "Statement": [{
+      "Effect": "Allow",
+      "Principal": {"Service": "bedrock-agentcore.amazonaws.com"},
+      "Action": "sts:AssumeRole"
+    }]
+  }'
+
+# 必要なポリシーをアタッチ
+aws iam attach-role-policy \
+  --role-name AgentCoreRuntimeTestRole \
+  --policy-arn arn:aws:iam::aws:policy/AmazonBedrockFullAccess
+
+aws iam put-role-policy \
+  --role-name AgentCoreRuntimeTestRole \
+  --policy-name S3Access \
+  --policy-document "{
+    \"Version\": \"2012-10-17\",
+    \"Statement\": [{
+      \"Effect\": \"Allow\",
+      \"Action\": [\"s3:GetObject\", \"s3:ListBucket\"],
+      \"Resource\": [
+        \"arn:aws:s3:::${BUCKET_NAME}\",
+        \"arn:aws:s3:::${BUCKET_NAME}/*\"
+      ]
+    }]
+  }"
+
+# ランタイム作成
+aws bedrock-agentcore-control create-agent-runtime \
+  --region "$REGION" \
+  --agent-runtime-name shell_cmd_test_agent \
+  --role-arn "arn:aws:iam::${ACCOUNT_ID}:role/AgentCoreRuntimeTestRole" \
+  --agent-runtime-artifact "{
+    \"codeConfiguration\": {
+      \"code\": {\"s3\": {\"bucket\": \"${BUCKET_NAME}\", \"prefix\": \"agent.zip\"}},
+      \"runtime\": \"PYTHON_3_13\",
+      \"entryPoint\": [\"main.py\"]
+    }
+  }" \
+  --network-configuration '{"networkMode": "PUBLIC"}'
+# → レスポンスの agentRuntimeId を控える
+
+RUNTIME_ID="shell_cmd_test_agent-XXXXXXXXXX"  # 実際のIDに置き換え
+
+# エンドポイント作成＋READYまでポーリング
+aws bedrock-agentcore-control create-agent-runtime-endpoint \
+  --region "$REGION" \
+  --agent-runtime-id "$RUNTIME_ID" \
+  --name shell_cmd_test_endpoint
+
+while true; do
+  STATUS=$(aws bedrock-agentcore-control get-agent-runtime-endpoint \
+    --region "$REGION" \
+    --agent-runtime-id "$RUNTIME_ID" \
+    --endpoint-name shell_cmd_test_endpoint \
+    --query 'status' --output text)
+  echo "Endpoint status: $STATUS"
+  [ "$STATUS" = "READY" ] && break
+  sleep 10
+done
+```
+
+ランタイム作成からエンドポイントのREADYまで、最初のポーリング（10秒以内）で完了した。コード構成の場合、コンテナイメージのビルドが不要だ。
+
+## 検証結果
+
+以下の7つの観点からAPIの挙動を検証した。
+
+1. **基本的なコマンド実行** — EventStreamの3段階イベント
+2. **コンテナ環境** — プリインストール済みツールの確認
+3. **セッション内ファイル永続化** — 別APIコールからのファイル参照
+4. **セッション間隔離** — 異なるセッションIDでのファイル不可視
+5. **エラーハンドリング** — 非ゼロexit codeの返却
+6. **タイムアウト** — TIMED_OUTステータスと部分出力
+7. **並行実行** — 同一セッション内の非ブロッキング実行
+
+以降のテストはすべて以下のPythonコードをベースにしている。セッションIDは33文字以上が必要なため、UUIDを結合して生成する。
+
+```python
+import boto3, sys, uuid
+
+client = boto3.client('bedrock-agentcore', region_name='us-west-2')
+RUNTIME_ARN = "arn:aws:bedrock-agentcore:us-west-2:ACCOUNT_ID:runtime/RUNTIME_ID"
+SESSION_ID = str(uuid.uuid4()) + "-" + str(uuid.uuid4())[:8]  # 45文字
+
+def run_command(command, timeout=30, session_id=None):
+    """コマンドを実行し、EventStreamを処理するヘルパー関数。"""
+    response = client.invoke_agent_runtime_command(
+        agentRuntimeArn=RUNTIME_ARN,
+        runtimeSessionId=session_id or SESSION_ID,
+        qualifier='DEFAULT',
+        contentType='application/json',
+        accept='application/vnd.amazon.eventstream',
+        body={'command': command, 'timeout': timeout}
+    )
+    for event in response.get('stream', []):
+        if 'chunk' in event:
+            chunk = event['chunk']
+            if 'contentStart' in chunk:
+                print("[contentStart] Command execution started")
+            if 'contentDelta' in chunk:
+                delta = chunk['contentDelta']
+                if delta.get('stdout'):
+                    print(f"[stdout] {delta['stdout']}", end='')
+                if delta.get('stderr'):
+                    print(f"[stderr] {delta['stderr']}", end='', file=sys.stderr)
+            if 'contentStop' in chunk:
+                stop = chunk['contentStop']
+                print(f"[contentStop] Exit code: {stop.get('exitCode')}, "
+                      f"Status: {stop.get('status')}")
+```
+
+### 1. 基本的なコマンド実行とストリーミング
+
+```python
+run_command('/bin/bash -c "echo Hello from AgentCore Runtime"')
+```
+
+```text
+[contentStart] Command execution started
+[stdout] Hello from AgentCore Runtime
+[contentStop] Exit code: 0, Status: COMPLETED
+```
+
+`contentStart` → `contentDelta`（stdout/stderr） → `contentStop`の3段階イベントが順序通り返される。ストリーミングなので長時間コマンドでも途中経過をリアルタイムに取得できる。
+
+### 2. コンテナ環境の実態
+
+`uname -a`、`python3 --version`、`whoami`、各ツールの`--version`を実行して環境を調査した。
+
+```text
+Linux localhost 6.1.158-15.288.amzn2023.aarch64 (Amazon Linux 2023ベース)
+Python 3.13.9
+User: root
+Working directory: /
+```
+
+| ツール | 利用可否 |
+|---|---|
+| git | 2.50.1（プリインストール済み） |
+| curl | 8.17.0（プリインストール済み） |
+| python3 | 3.13.9（ランタイム指定に依存） |
+| node | 未インストール |
+| pip | 未インストール |
+| aws CLI | 未インストール |
+
+**コード構成の場合、git/curlは最初から使えるが、nodeやpip、AWS CLIは含まれない。** コンテナ構成を使えばDockerfileで自由にツールを追加できるが、コード構成では利用可能なツールが限定される点は設計時に考慮が必要だ。
+
+### 3. セッション内のファイルシステム永続化
+
+同一セッション内で作成したファイルが後続コマンドから参照できるかを検証した。以下は2回の別々のAPIコール（同一セッションID）で送信したコマンドだ。
+
+```python
+# APIコール1: ファイル作成
+run_command('/bin/bash -c "mkdir -p /tmp/test_dir && echo \'file content\' > /tmp/test_dir/test.txt"')
+
+# APIコール2（同一セッション）: ファイル確認
+run_command('/bin/bash -c "cat /tmp/test_dir/test.txt"')
+# → [stdout] file content
+```
+
+ドキュメントでは「各コマンドは新しいbashプロセス」と記載されているが、**ファイルシステムは同一セッション内で共有される。** これはmicroVM単位でセッションが管理されているためで、`&&`チェーンを使わなくても中間成果物をファイル経由で受け渡せる。
+
+### 4. セッション間のmicroVM隔離
+
+一方、異なるセッションIDでは完全にファイルシステムが隔離されることを確認した。
+
+```python
+new_session = str(uuid.uuid4()) + "-" + str(uuid.uuid4())[:8]
+run_command(
+    '/bin/bash -c "cat /tmp/test_dir/test.txt 2>&1 || echo File NOT found"',
+    session_id=new_session
+)
+# → [stdout] File NOT found
+```
+
+セッションごとに独立したmicroVMが割り当てられるため、他のセッション（他の利用者含む）のデータには一切アクセスできない。
+
+### 5. エラーハンドリングとexit code
+
+存在しないパスへの`ls`を実行した結果：
+
+```text
+[stderr] ls: cannot access '/nonexistent_path': No such file or directory
+[contentStop] Exit code: 2, Status: COMPLETED
+```
+
+コマンド失敗はAPIエラーではなく、`contentStop`イベントの`exitCode`で非ゼロ値として返される。statusは`COMPLETED`のままだ。これにより、テスト失敗やビルドエラーを通常のフローの中で処理できる。
+
+### 6. タイムアウト挙動
+
+1秒のタイムアウトで5秒の`sleep`を実行した結果：
+
+```python
+run_command('/bin/bash -c "echo start && sleep 5 && echo end"', timeout=1)
+```
+
+```text
+[stdout] start
+[contentStop] Exit code: -1, Status: TIMED_OUT
+```
+
+タイムアウト時の挙動が明確だ。`exitCode`は`-1`、`status`は`TIMED_OUT`になる。タイムアウト前に出力された`start`は正しくストリーミングされた上で、タイムアウトが発生する。`end`は出力されない。
+
+### 7. 並行実行の実証
+
+同一セッション内で3つの2秒コマンドを`concurrent.futures`で並行実行した結果：
+
+```text
+cmd_A: exit=0, time=3.51s, output=A_done
+cmd_B: exit=0, time=3.51s, output=B_done
+cmd_C: exit=0, time=3.51s, output=C_done
+Total wall time: 3.51s
+```
+
+各コマンドの実行時間は約3.5秒（sleep 2秒 + APIオーバーヘッド）だが、3つのコマンドの合計wall timeも3.5秒で完了した。直列実行なら約10.5秒かかるところだ。APIの呼び出し自体は非ブロッキングで、同一セッションへの複数コマンドが実際に並行実行される。テストスイートの並列実行や、ビルドとlintの同時実行といったパターンが自然に実現できる。
+
+## ユースケースと設計パターン
+
+検証結果から見えてきた実践的なパターンは以下の通りだ。
+
+**コーディングエージェントのツール実行分離** — LLM推論の`InvokeAgentRuntime`と決定論的操作の`InvokeAgentRuntimeCommand`を分離する。テスト実行、ビルド、gitコミットをエージェントの推論ループから独立して管理できる。
+
+**ファイルベースのステップ間連携** — セッション内のファイルシステム共有を活かし、エージェントがコードを生成→ファイルに書き出し→テスト実行→結果を読み取り→次の推論ステップにフィードバック、という流れを自然に構築できる。
+
+**並行実行によるフィードバック高速化** — テスト、lint、型チェックを並行に投げることで、エージェントの1ターンあたりの待ち時間を短縮できる。ただしコード構成ではnodeやpipがプリインストールされないため、本格的な開発エージェントにはコンテナ構成でDockerfileをカスタマイズすることを推奨する。
+
+## まとめ
+
+検証を通じて、ドキュメントだけでは読み取れない実挙動が明らかになった。
+
+- **「ステートレス」の実態はシェル状態のみ** — ドキュメントには「Stateless between commands」とあるが、実際にはファイルシステムは同一セッション内で永続化される。引き継がれないのはシェルヒストリーや環境変数などのシェルプロセス状態だ。
+- **タイムアウトはexit code -1で明示的に区別される** — コマンド失敗（非ゼロexit code + COMPLETED）とタイムアウト（exit code -1 + TIMED_OUT）が二軸で分離されており、部分出力も正しくストリーミングされる。
+- **並行実行は実測で確認済み** — ドキュメントには「コマンド実行がエージェント呼び出しをブロックしない」とあるが、検証では同一セッションへの複数コマンドも並行実行されることを確認した。3コマンドで合計wall timeが1コマンド分に収まった。
+- **コード構成のコンテナではnode・pip・AWS CLIが使えない** — git（2.50.1）とcurl（8.17.0）はプリインストールされているが、node、pip、AWS CLIは含まれなかった。ツールチェーンが必要な場合はコンテナ構成を選択すべきだ。

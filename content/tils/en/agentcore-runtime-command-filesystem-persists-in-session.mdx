@@ -1,0 +1,24 @@
+---
+title: "AgentCore Runtime InvokeAgentRuntimeCommand says Stateless but the filesystem persists within a session"
+description: "The docs say 'Stateless between commands' but the filesystem is actually shared within a session. Only shell history and environment variables are reset."
+date: "2026-03-17"
+published: true
+tags: ["agentcore", "bedrock"]
+---
+
+The AgentCore Runtime docs for `InvokeAgentRuntimeCommand` say "Stateless between commands: No shell history or environment persistence." I assumed each command was fully isolated and file passing would need `&&` chaining.
+
+Turns out, files created in one API call are visible to subsequent calls in the same session.
+
+```python
+# API call 1
+run_command('/bin/bash -c "echo hello > /tmp/test.txt"')
+
+# API call 2 (same session ID, separate request)
+run_command('/bin/bash -c "cat /tmp/test.txt"')
+# → hello (file persists)
+```
+
+Sessions map to microVMs — each command gets a new bash process but sees the same filesystem. A different session ID sees nothing: completely isolated.
+
+"Stateless" refers only to shell process state (history, env vars). The filesystem is stateful within a session.

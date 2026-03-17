@@ -1,0 +1,15 @@
+---
+title: "AgentCore Runtime code configuration requires ZIP format on S3"
+description: "Uploading a raw Python file to S3 for create-agent-runtime gives 'S3 object must be in .zip format' ValidationException. You must zip the code first."
+date: "2026-03-17"
+published: true
+tags: ["agentcore", "bedrock"]
+---
+
+Tried creating an AgentCore Runtime with code configuration by uploading `main.py` directly to S3. Got this:
+
+```text
+An error occurred (ValidationException) when calling the CreateAgentRuntime operation: S3 object must be in .zip format. ZIP your code and try again.
+```
+
+Fix: `zip agent.zip main.py` before uploading. Even with code configuration (not container), the S3 object must be a ZIP archive.

@@ -1,0 +1,21 @@
+---
+title: "AgentCore Runtimeのコード構成でentryPointに「python3 main.py」を指定するとバリデーションエラーになる"
+description: "codeConfigurationのentryPointにスペースを含む値やドットで始まる値を指定すると「Invalid entrypoint value」エラーが出る。Pythonランタイムなら[\"main.py\"]のようにファイル名だけを指定する。"
+date: "2026-03-17"
+published: true
+tags: ["agentcore", "bedrock"]
+---
+
+AgentCore Runtimeのコード構成で`entryPoint`を`["python3", "main.py"]`にしたらエラーになった。
+
+```text
+An error occurred (ValidationException) when calling the CreateAgentRuntime operation: Invalid entrypoint value. Your entrypoint is either empty, contains spaces, starts with /, ~, ., .., or has multiple dots. Update the entrypoint name and try again.
+```
+
+次に`["main"]`（拡張子なし）を試したら別のエラー。
+
+```text
+Entrypoint file type does not match your selected runtime. For Python runtime, your file should end with .py extension.
+```
+
+正解は`["main.py"]`だった。ランタイムに`PYTHON_3_13`を指定しているので、`python3`コマンドは不要で、`.py`拡張子付きのファイル名だけを渡す。

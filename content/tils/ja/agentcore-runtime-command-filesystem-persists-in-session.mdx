@@ -1,0 +1,24 @@
+---
+title: "AgentCore RuntimeのInvokeAgentRuntimeCommandはStatelessと書いてあるがファイルシステムは同一セッション内で永続化する"
+description: "ドキュメントには「Stateless between commands」とあるが、実際にはファイルシステムは同一セッション内で共有される。引き継がれないのはシェルヒストリーや環境変数だけだった。"
+date: "2026-03-17"
+published: true
+tags: ["agentcore", "bedrock"]
+---
+
+AgentCore Runtimeの`InvokeAgentRuntimeCommand`のドキュメントには "Stateless between commands: No shell history or environment persistence" と書かれている。これを見て各コマンドが完全に独立していると思い、ファイル受け渡しも`&&`チェーンが必要だと思っていた。
+
+実際に試してみると、同一セッション内の別APIコールで作成したファイルが普通に読めた。
+
+```python
+# APIコール1
+run_command('/bin/bash -c "echo hello > /tmp/test.txt"')
+
+# APIコール2（同一セッションID、別リクエスト）
+run_command('/bin/bash -c "cat /tmp/test.txt"')
+# → hello（ファイルが残っている）
+```
+
+セッションがmicroVM単位で管理されているため、bashプロセスは毎回新しくてもファイルシステムは同じものを見ている。逆に異なるセッションIDでは完全に隔離されており、前のセッションのファイルは一切見えなかった。
+
+「Stateless」はシェルプロセス状態（ヒストリー、環境変数）に限った話で、ファイルシステムはstatefulだった。

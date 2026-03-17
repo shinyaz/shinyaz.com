@@ -1,0 +1,21 @@
+---
+title: "AgentCore Runtime code config entryPoint rejects 'python3 main.py' — just use ['main.py']"
+description: "Setting entryPoint to ['python3', 'main.py'] in codeConfiguration gives 'Invalid entrypoint value' error. For Python runtimes, pass only the filename with .py extension like ['main.py']."
+date: "2026-03-17"
+published: true
+tags: ["agentcore", "bedrock"]
+---
+
+Tried setting `entryPoint` to `["python3", "main.py"]` in an AgentCore Runtime code configuration. Got:
+
+```text
+An error occurred (ValidationException) when calling the CreateAgentRuntime operation: Invalid entrypoint value. Your entrypoint is either empty, contains spaces, starts with /, ~, ., .., or has multiple dots. Update the entrypoint name and try again.
+```
+
+Then tried `["main"]` (no extension):
+
+```text
+Entrypoint file type does not match your selected runtime. For Python runtime, your file should end with .py extension.
+```
+
+The answer is `["main.py"]`. When using a Python runtime like `PYTHON_3_13`, you don't need the `python3` command — just the filename with `.py` extension.
