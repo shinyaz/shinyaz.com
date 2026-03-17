@@ -33,7 +33,7 @@ The API accepts a command string and timeout, returning an HTTP/2 EventStream re
 
 Response events: **`contentStart`** (execution confirmed), **`contentDelta`** (streaming stdout/stderr), and **`contentStop`** (exitCode + status: `COMPLETED` or `TIMED_OUT`).
 
-Each command runs as a one-shot bash process — no shell history or environment variable persistence between calls. However, as verified below, the filesystem is shared within a session, so you only need `&&` chaining when shell state carryover is required.
+Each command runs as a one-shot bash process. The docs say "Stateless between commands" with no shell history or environment variable persistence, but also state that "Commands execute within the same container, filesystem." As verified below, the filesystem is indeed shared within a session, so you only need `&&` chaining when shell state carryover is required.
 
 ## Setting Up the Test Environment
 
@@ -252,7 +252,7 @@ run_command('/bin/bash -c "cat /tmp/test_dir/test.txt"')
 # → [stdout] file content
 ```
 
-Despite the "new bash process per command" model, **the filesystem is shared within a session** because the session maps to a single microVM. You can pass intermediate artifacts through files without `&&` chaining.
+The docs say "Stateless between commands" but also "Commands execute within the same container, filesystem." In this test, **the filesystem was shared within the session** — the `/tmp/` file persisted across separate API calls. You can pass intermediate artifacts through files without `&&` chaining.
 
 ### 4. Cross-Session microVM Isolation
 
@@ -320,7 +320,7 @@ Each command took about 3.5 seconds (2s sleep + API overhead), but all three com
 
 The verification revealed runtime behaviors not obvious from the documentation alone.
 
-- **"Stateless" only applies to shell process state** — The docs say "Stateless between commands," but the filesystem actually persists within a session. Only shell history and environment variables are reset between commands.
+- **"Stateless" only applies to shell process state** — The docs say "Stateless between commands" but also "same container, filesystem." Testing confirmed that `/tmp/` files persisted across API calls within a session. Only shell history and environment variables are reset.
 - **Timeout is explicitly signaled with exit code -1** — Command failure (non-zero exit code + COMPLETED) and timeout (exit code -1 + TIMED_OUT) are cleanly separated on two axes, and partial output is still streamed before timeout.
 - **Concurrent execution is verified** — The docs state that command execution doesn't block agent invocations, but testing confirmed that multiple commands in the same session also run in parallel. Three commands completed in the wall time of one.
 - **Code configuration containers lack node, pip, and AWS CLI** — git (2.50.1) and curl (8.17.0) are pre-installed, but node, pip, and AWS CLI were not available. Choose container configuration when your agent needs a full toolchain.

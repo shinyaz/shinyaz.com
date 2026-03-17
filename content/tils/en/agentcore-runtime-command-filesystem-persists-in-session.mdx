@@ -6,9 +6,9 @@ published: true
 tags: ["agentcore", "bedrock"]
 ---
 
-The AgentCore Runtime docs for `InvokeAgentRuntimeCommand` say "Stateless between commands: No shell history or environment persistence." I assumed each command was fully isolated and file passing would need `&&` chaining.
+The AgentCore Runtime docs for `InvokeAgentRuntimeCommand` say "Stateless between commands: No shell history or environment persistence." I assumed each command was fully isolated and file passing would need `&&` chaining. Though the docs also state "Commands execute within the same container, filesystem."
 
-Turns out, files created in one API call are visible to subsequent calls in the same session.
+Testing with `/tmp/`, files created in one API call were visible to subsequent calls in the same session.
 
 ```python
 # API call 1
