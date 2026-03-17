@@ -3,7 +3,7 @@ import Image from "next/image";
 import { notFound } from "next/navigation";
 import { getPageBySlug } from "@/lib/posts";
 import { MdxContent } from "@/components/mdx/mdx-content";
-import { SITE_URL, AUTHOR } from "@/lib/constants";
+import { SITE_URL, AUTHOR, SOCIAL_LINKS } from "@/lib/constants";
 import { locales, isValidLocale, getDictionary } from "@/lib/i18n";
 import { buildAlternateLanguages } from "@/lib/seo";
 
@@ -44,8 +44,27 @@ export default async function AboutPage({ params }: AboutPageProps) {
   if (!page) notFound();
   const t = getDictionary(locale);
 
+  const personJsonLd = {
+    "@context": "https://schema.org",
+    "@type": "Person",
+    name: t.about.authorName,
+    alternateName: AUTHOR,
+    url: `${SITE_URL}/${locale}/about`,
+    image: `${SITE_URL}/images/profile.jpeg`,
+    jobTitle: locale === "ja" ? "ソリューションアーキテクト" : "Solutions Architect",
+    sameAs: [
+      SOCIAL_LINKS.github,
+      SOCIAL_LINKS.x,
+      SOCIAL_LINKS.linkedin,
+    ],
+  };
+
   return (
     <div className="mx-auto max-w-3xl px-4 py-6 md:py-12">
+      <script
+        type="application/ld+json"
+        dangerouslySetInnerHTML={{ __html: JSON.stringify(personJsonLd) }}
+      />
       <article>
         <header className="mb-8">
           <h1 className="text-2xl font-bold tracking-tight md:text-3xl">

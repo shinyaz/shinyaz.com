@@ -38,8 +38,10 @@ export async function generateMetadata({ params }: TilPageProps): Promise<Metada
       description: til.description,
       type: "article",
       publishedTime: til.date,
+      modifiedTime: til.date,
       url: `${SITE_URL}${til.permalink}`,
       authors: [AUTHOR],
+      tags: til.tags,
     },
     alternates: {
       canonical: `${SITE_URL}${til.permalink}`,
@@ -54,6 +56,30 @@ export default async function TilDetailPage({ params }: TilPageProps) {
   const t = getDictionary(locale);
   const til = getTilBySlug(year, month, day, slug, locale);
   if (!til) notFound();
+
+  const blogPostingJsonLd = {
+    "@context": "https://schema.org",
+    "@type": "BlogPosting",
+    headline: til.title,
+    description: til.description,
+    datePublished: til.date,
+    dateModified: til.date,
+    inLanguage: locale,
+    author: {
+      "@type": "Person",
+      name: AUTHOR,
+    },
+    publisher: {
+      "@type": "Organization",
+      name: t.site.name,
+    },
+    url: `${SITE_URL}${til.permalink}`,
+    mainEntityOfPage: {
+      "@type": "WebPage",
+      "@id": `${SITE_URL}${til.permalink}`,
+    },
+    ...(til.tags.length > 0 ? { keywords: til.tags.join(", ") } : {}),
+  };
 
   const breadcrumbJsonLd = {
     "@context": "https://schema.org",
@@ -82,6 +108,10 @@ export default async function TilDetailPage({ params }: TilPageProps) {
 
   return (
     <div className="mx-auto max-w-3xl px-4 py-6 md:py-12">
+      <script
+        type="application/ld+json"
+        dangerouslySetInnerHTML={{ __html: JSON.stringify(blogPostingJsonLd) }}
+      />
       <script
         type="application/ld+json"
         dangerouslySetInnerHTML={{ __html: JSON.stringify(breadcrumbJsonLd) }}

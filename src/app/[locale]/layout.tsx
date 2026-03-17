@@ -7,7 +7,7 @@ import { Header } from "@/components/layout/header";
 import { Footer } from "@/components/layout/footer";
 import { GTM, GTMNoScript } from "@/components/common/gtm";
 import { SITE_URL, AUTHOR, OG_IMAGE_PATH, TWITTER_SITE } from "@/lib/constants";
-import { locales, isValidLocale, getDictionary } from "@/lib/i18n";
+import { locales, defaultLocale, isValidLocale, getDictionary } from "@/lib/i18n";
 import { Analytics } from "@vercel/analytics/next";
 import { SpeedInsights } from "@vercel/speed-insights/next";
 
@@ -42,6 +42,7 @@ export async function generateMetadata({
   if (!isValidLocale(locale)) return {};
   const t = getDictionary(locale);
 
+  const homeUrl = locale === defaultLocale ? SITE_URL : `${SITE_URL}/${locale}`;
   const alternateLanguages: Record<string, string> = {};
   for (const l of locales) {
     alternateLanguages[l] = `${SITE_URL}/${l}`;
@@ -57,7 +58,7 @@ export async function generateMetadata({
     openGraph: {
       title: t.site.name,
       description: t.site.description,
-      url: `${SITE_URL}/${locale}`,
+      url: homeUrl,
       siteName: t.site.name,
       locale: locale === "ja" ? "ja_JP" : "en_US",
       type: "website",
@@ -76,8 +77,11 @@ export async function generateMetadata({
       creator: TWITTER_SITE,
     },
     alternates: {
-      canonical: `${SITE_URL}/${locale}`,
-      languages: alternateLanguages,
+      canonical: homeUrl,
+      languages: {
+        ...alternateLanguages,
+        "x-default": SITE_URL,
+      },
     },
   };
 }
@@ -107,6 +111,8 @@ export default async function LocaleLayout({ children, params }: LocaleLayoutPro
   return (
     <html lang={locale} suppressHydrationWarning>
       <head>
+        <link rel="dns-prefetch" href="https://www.googletagmanager.com" />
+        <link rel="preconnect" href="https://www.googletagmanager.com" crossOrigin="anonymous" />
         <GTM />
         <link
           rel="alternate"

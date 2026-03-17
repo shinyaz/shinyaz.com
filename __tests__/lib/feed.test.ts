@@ -59,6 +59,25 @@ describe("generateRss", () => {
     const secondIdx = xml.indexOf("First Post");
     expect(firstIdx).toBeLessThan(secondIdx);
   });
+
+  it("includes published TILs", () => {
+    const xml = generateRss("en");
+    expect(xml).toContain("TIL: Next.js use cache directive");
+    expect(xml).toContain("/en/til/2026/03/07/nextjs-use-cache-directive");
+  });
+
+  it("excludes draft TILs", () => {
+    const xml = generateRss("en");
+    expect(xml).not.toContain("TIL: Draft TIL");
+  });
+
+  it("merges posts and TILs sorted by date descending", () => {
+    const xml = generateRss("en");
+    // TIL (2026-03-07) should come before Second Post (2026-02-10)
+    const tilIdx = xml.indexOf("TIL: Next.js use cache directive");
+    const postIdx = xml.indexOf("Second Post");
+    expect(tilIdx).toBeLessThan(postIdx);
+  });
 });
 
 describe("generateAtom", () => {
@@ -113,6 +132,25 @@ describe("generateAtom", () => {
     const xml = generateAtom("en");
     // Should contain an ISO date in the feed-level <updated>
     expect(xml).toMatch(/<updated>\d{4}-\d{2}-\d{2}T/);
+  });
+
+  it("includes published TILs", () => {
+    const xml = generateAtom("en");
+    expect(xml).toContain("TIL: Next.js use cache directive");
+    expect(xml).toContain("/en/til/2026/03/07/nextjs-use-cache-directive");
+  });
+
+  it("excludes draft TILs", () => {
+    const xml = generateAtom("en");
+    expect(xml).not.toContain("TIL: Draft TIL");
+  });
+
+  it("merges posts and TILs sorted by date descending", () => {
+    const xml = generateAtom("en");
+    // TIL (2026-03-07) should come before Second Post (2026-02-10)
+    const tilIdx = xml.indexOf("TIL: Next.js use cache directive");
+    const postIdx = xml.indexOf("Second Post");
+    expect(tilIdx).toBeLessThan(postIdx);
   });
 });
 

@@ -1,19 +1,22 @@
 import type { MetadataRoute } from "next";
 import { getPublishedPosts, getAllCategories, getAllTags } from "@/lib/posts";
+import { getPublishedTils } from "@/lib/tils";
 import { SITE_URL } from "@/lib/constants";
-import { locales } from "@/lib/i18n";
+import { locales, defaultLocale } from "@/lib/i18n";
 
 export default function sitemap(): MetadataRoute.Sitemap {
   const entries: MetadataRoute.Sitemap = [];
 
   // Home and blog pages for each locale
   for (const locale of locales) {
+    const homeUrl = locale === defaultLocale ? SITE_URL : `${SITE_URL}/${locale}`;
     const alternateLanguages: Record<string, string> = {};
     for (const l of locales) {
-      alternateLanguages[l] = `${SITE_URL}/${l}`;
+      alternateLanguages[l] = l === defaultLocale ? SITE_URL : `${SITE_URL}/${l}`;
     }
+    alternateLanguages["x-default"] = SITE_URL;
     entries.push({
-      url: `${SITE_URL}/${locale}`,
+      url: homeUrl,
       changeFrequency: "daily",
       priority: 1.0,
       alternates: { languages: alternateLanguages },
@@ -115,6 +118,56 @@ export default function sitemap(): MetadataRoute.Sitemap {
         changeFrequency: "weekly",
         priority: 0.5,
         alternates: { languages: tagAlternates },
+      });
+    }
+  }
+
+  // TIL index page for each locale
+  for (const locale of locales) {
+    const tilIndexAlternates: Record<string, string> = {};
+    for (const l of locales) {
+      tilIndexAlternates[l] = `${SITE_URL}/${l}/til`;
+    }
+    entries.push({
+      url: `${SITE_URL}/${locale}/til`,
+      changeFrequency: "daily",
+      priority: 0.8,
+      alternates: { languages: tilIndexAlternates },
+    });
+  }
+
+  // TIL entries for each locale, with hreflang alternates
+  const tilsByKey = new Map<string, Map<string, string>>();
+  for (const locale of locales) {
+    const tilItems = getPublishedTils(locale);
+    for (const til of tilItems) {
+      const key = `${til.year}-${til.month}-${til.day}-${til.slugName}`;
+      if (!tilsByKey.has(key)) {
+        tilsByKey.set(key, new Map());
+      }
+      tilsByKey.get(key)!.set(locale, `${SITE_URL}${til.permalink}`);
+    }
+  }
+
+  for (const locale of locales) {
+    const tilItems = getPublishedTils(locale);
+    for (const til of tilItems) {
+      const key = `${til.year}-${til.month}-${til.day}-${til.slugName}`;
+      const translations = tilsByKey.get(key);
+      const alternates: Record<string, string> = {};
+      if (translations) {
+        for (const [l, url] of translations) {
+          alternates[l] = url;
+        }
+      }
+      entries.push({
+        url: `${SITE_URL}${til.permalink}`,
+        lastModified: new Date(til.date),
+        changeFrequency: "monthly",
+        priority: 0.6,
+        ...(Object.keys(alternates).length > 1
+          ? { alternates: { languages: alternates } }
+          : {}),
       });
     }
   }
