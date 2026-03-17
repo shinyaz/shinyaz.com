@@ -1,0 +1,144 @@
+---
+title: "SEO Improvements for a Next.js App Router Multilingual Site"
+description: "A canonical duplication error triggered a full SEO audit. Missing sitemaps, absent structured data, no OG images for TILs — a record of pitfalls found and fixed on a Next.js App Router site with locale routing."
+date: "2026-03-17"
+published: true
+featured: false
+categories: [programming]
+tags:
+  - nextjs
+  - seo
+  - i18n
+  - og-image
+  - blog
+---
+
+## The trigger
+
+Google Search Console flagged `/en` as not indexed: "Duplicate without user-selected canonical. Google chose a different canonical than the user." The canonical Google picked was `https://shinyaz.com/` (the root).
+
+This site runs Next.js App Router + Velite MDX + Tailwind CSS with `/ja` and `/en` locale prefixes. While investigating the canonical issue, I audited SEO across the board and found several more items to fix.
+
+## Canonical URL duplication
+
+First, the problem that started it all.
+
+The site uses middleware to redirect `https://shinyaz.com/` to `https://shinyaz.com/en`. The `/en` page declared its canonical as `https://shinyaz.com/en`. But Google decided the redirect source `/` was the true canonical, and excluded `/en` from the index.
+
+The declared canonical and Google's decision were out of sync. The fix: for the default locale (`en`) home page only, set the canonical to the root URL.
+
+```typescript
+// src/app/[locale]/page.tsx
+const canonicalUrl =
+  locale === defaultLocale ? SITE_URL : `${SITE_URL}/${locale}`;
+
+return {
+  alternates: {
+    canonical: canonicalUrl,
+    languages: {
+      ...buildAlternateLanguages((l) => `/${l}`),
+      "x-default": SITE_URL,
+    },
+  },
+};
+```
+
+Two key points:
+
+1. **Don't fight Google's canonical decision** — When middleware redirects `/` to `/en`, Google may treat the redirect source as canonical. Declare the same URL so the signals agree.
+2. **Add `x-default` hreflang** — This explicitly tells search engines which version to show when no locale is specified.
+
+This change isn't limited to `page.tsx` (page-specific metadata). It must also be applied to `layout.tsx` (layout-level `og:url` and canonical) and `sitemap.ts`. Canonical, `og:url`, hreflang, and sitemap all need to agree — otherwise Google will continue making its own call.
+
+## TILs were missing from the sitemap and feeds
+
+While reviewing the sitemap during the canonical investigation, I noticed blog posts were registered but TILs (Today I Learned) were completely absent. The same was true for RSS/Atom feeds. This content was invisible to search engines and feed readers alike.
+
+I added both the TIL index page (`/til`) and individual TIL entries to the sitemap, with hreflang alternates following the same pattern as blog posts.
+
+```typescript
+// src/app/sitemap.ts — individual TILs with hreflang
+for (const locale of locales) {
+  const tilItems = getPublishedTils(locale);
+  for (const til of tilItems) {
+    const key = `${til.year}-${til.month}-${til.day}-${til.slugName}`;
+    const translations = tilsByKey.get(key);
+    entries.push({
+      url: `${SITE_URL}${til.permalink}`,
+      lastModified: new Date(til.date),
+      changeFrequency: "monthly",
+      priority: 0.6,
+      ...(translations && translations.size > 1
+        ? { alternates: { languages: Object.fromEntries(translations) } }
+        : {}),
+    });
+  }
+}
+```
+
+For feeds, I merged posts and TILs into a single feed sorted by date. Separate feeds would also work, but from a subscriber's perspective, one feed covering all content is more convenient.
+
+```typescript
+// src/lib/feed.ts
+function getMergedFeedItems(locale: Locale): FeedItem[] {
+  const posts = getPublishedPosts(locale).map((post) => ({ ... }));
+  const tilItems = getPublishedTils(locale).map((til) => ({ ... }));
+  return [...posts, ...tilItems]
+    .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime())
+    .slice(0, FEED_MAX_ITEMS);
+}
+```
+
+## Adding structured data and OG images for TILs
+
+Blog posts had BlogPosting JSON-LD, dynamic OG image generation, and OpenGraph tags like `modifiedTime` and `article:tag`. TILs only had a BreadcrumbList schema. I brought TILs up to parity with blog posts.
+
+Specifically, three additions:
+
+- **BlogPosting schema** — outputs `headline`, `datePublished`, `dateModified`, `author`, `keywords`
+- **OpenGraph enrichment** — `modifiedTime` and `tags` (`article:tag`)
+- **Dynamic OG images** — reusing the same `OgImageLayout` component from blog posts, with "TIL" displayed as the category
+
+For OG images, placing an `opengraph-image.tsx` file in the TIL route is all it takes — Next.js auto-generates the meta tags.
+
+```typescript
+// src/app/[locale]/til/[year]/[month]/[day]/[slug]/opengraph-image.tsx
+return new ImageResponse(
+  <OgImageLayout
+    title={til.title}
+    date={formattedDate}
+    category="TIL"
+    author={AUTHOR}
+    siteName="@shinyaz"
+    locale={locale}
+  />,
+  { ...size, fonts: [...] }
+);
+```
+
+## Other improvements
+
+The remaining items are small additions, but together they strengthen signals to search engines and browsers.
+
+**`theme-color` meta tag** — Without it, the mobile browser address bar used a default color. Setting separate values for light and dark mode makes the UI consistent with the site theme.
+
+```typescript
+// src/app/layout.tsx
+export const viewport: Viewport = {
+  themeColor: [
+    { media: "(prefers-color-scheme: light)", color: "#ffffff" },
+    { media: "(prefers-color-scheme: dark)", color: "#111111" },
+  ],
+};
+```
+
+**Person schema on the About page** — Added JSON-LD with `name`, `jobTitle`, `image`, and `sameAs` (GitHub / X / LinkedIn). This gives Google a structured signal for author identity in knowledge panels.
+
+**`dns-prefetch` / `preconnect` for GTM** — Starts DNS resolution and TLS handshake for the Google Tag Manager domain early in the page load. This speeds up GTM script execution and improves analytics measurement accuracy.
+
+## Takeaways
+
+- **Align canonicals with search engine decisions** — When middleware redirects, Google may choose the redirect source as the canonical URL. Check the "Page indexing" report in Search Console to see what Google actually decided.
+- **Cover all content types in your sitemap and feeds** — It's easy to register blog posts but forget TILs. This gap tends to appear whenever a new content type is added.
+- **Build structured data as reusable components** — A shared `OgImageLayout` means adding OG images for a new content type takes minimal code.
+- **Make SEO a checklist for every new page type** — Sitemap, feeds, JSON-LD, canonical, and OG images — check these five every time a new page is added, so you don't need a full audit later.

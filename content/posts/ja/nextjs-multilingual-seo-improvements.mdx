@@ -1,0 +1,144 @@
+---
+title: "Next.js App Router 多言語サイトの SEO を改善した記録"
+description: "canonical の重複エラーをきっかけに SEO を棚卸し。サイトマップの漏れ、構造化データの不足、OG 画像の欠落など、Next.js App Router + 多言語構成で踏んだ落とし穴と修正を記録した。"
+date: "2026-03-17"
+published: true
+featured: false
+categories: [programming]
+tags:
+  - nextjs
+  - seo
+  - i18n
+  - og-image
+  - blog
+---
+
+## きっかけ
+
+Google Search Console で `/en` のホームページがインデックスされていないことに気づいた。理由は「重複しています。Google により、ユーザーがマークしたページとは異なるページが正規ページとして選択されました」。Google が正規と判断した URL は `https://shinyaz.com/`（ルート）だった。
+
+このサイトは Next.js App Router + Velite MDX + Tailwind CSS で構築しており、`/ja` と `/en` の多言語構成を取っている。canonical 問題を調べるついでに SEO 全体を棚卸ししたところ、他にも改善すべき点が複数見つかった。
+
+## canonical URL の重複問題
+
+まず、きっかけとなった問題から解決する。
+
+このサイトは middleware で `https://shinyaz.com/` へのアクセスを `https://shinyaz.com/en` にリダイレクトしている。`/en` の canonical は `https://shinyaz.com/en` と宣言していた。しかし Google は「リダイレクト元の `/` こそが正規 URL」と判断し、`/en` をインデックスから除外していた。
+
+サイト側の宣言と Google の判断がずれていたのが原因である。解決策は、defaultLocale（`en`）のホームページに限り canonical をルート URL に合わせること。
+
+```typescript
+// src/app/[locale]/page.tsx
+const canonicalUrl =
+  locale === defaultLocale ? SITE_URL : `${SITE_URL}/${locale}`;
+
+return {
+  alternates: {
+    canonical: canonicalUrl,
+    languages: {
+      ...buildAlternateLanguages((l) => `/${l}`),
+      "x-default": SITE_URL,
+    },
+  },
+};
+```
+
+ポイントは2つ。
+
+1. **Google の正規 URL 判断に逆らわない** — リダイレクト元を canonical にすることで、Google の判断と宣言が一致する
+2. **`x-default` hreflang を追加する** — ロケール未指定時のデフォルト先を明示し、検索エンジンがどのバージョンを表示すべきか判断できるようにする
+
+この修正は `page.tsx`（ページ固有の metadata）だけでは不十分で、`layout.tsx`（レイアウトレベルの `og:url` と canonical）、`sitemap.ts` にも同じ変更が必要になる。canonical、`og:url`、hreflang、サイトマップの4つが一致していないと、Google は引き続き独自判断を行う。
+
+## サイトマップとフィードから TIL が漏れていた
+
+canonical 問題を調べる過程でサイトマップを見直したところ、ブログ記事（Post）は登録されていたが TIL（Today I Learned）が完全に抜けていることに気づいた。RSS/Atom フィードも同様だった。コンテンツが検索エンジンにもフィードリーダーにも配信されていない状態だった。
+
+サイトマップへの追加は、既存のブログ記事と同じパターンで hreflang 付きのエントリを生成する。TIL インデックスページ（`/til`）と個別 TIL の両方を追加した。
+
+```typescript
+// src/app/sitemap.ts — 個別 TIL を hreflang 付きで追加
+for (const locale of locales) {
+  const tilItems = getPublishedTils(locale);
+  for (const til of tilItems) {
+    const key = `${til.year}-${til.month}-${til.day}-${til.slugName}`;
+    const translations = tilsByKey.get(key);
+    entries.push({
+      url: `${SITE_URL}${til.permalink}`,
+      lastModified: new Date(til.date),
+      changeFrequency: "monthly",
+      priority: 0.6,
+      ...(translations && translations.size > 1
+        ? { alternates: { languages: Object.fromEntries(translations) } }
+        : {}),
+    });
+  }
+}
+```
+
+フィードについては、ブログ記事と TIL を日付順にマージして1つのフィードで配信するようにした。別々のフィードに分ける選択肢もあるが、購読者の視点では1つのフィードで全コンテンツを追える方が便利だと判断した。
+
+```typescript
+// src/lib/feed.ts
+function getMergedFeedItems(locale: Locale): FeedItem[] {
+  const posts = getPublishedPosts(locale).map((post) => ({ ... }));
+  const tilItems = getPublishedTils(locale).map((til) => ({ ... }));
+  return [...posts, ...tilItems]
+    .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime())
+    .slice(0, FEED_MAX_ITEMS);
+}
+```
+
+## TIL に構造化データと OG 画像を追加
+
+ブログ記事には BlogPosting の JSON-LD、動的 OG 画像生成、OpenGraph の `modifiedTime` や `article:tag` があったが、TIL にはパンくずリスト（BreadcrumbList）しかなかった。ブログ記事と同等のメタデータを TIL にも追加した。
+
+具体的には以下の3点。
+
+- **BlogPosting スキーマ** — `headline`、`datePublished`、`dateModified`、`author`、`keywords` を出力
+- **OpenGraph の拡充** — `modifiedTime` と `tags`（`article:tag`）を追加
+- **動的 OG 画像** — ブログ記事と同じ `OgImageLayout` コンポーネントを再利用し、カテゴリ表示部分に「TIL」と表示
+
+OG 画像は `opengraph-image.tsx` を TIL のルートに配置するだけで、Next.js が自動的にメタタグを生成してくれる。
+
+```typescript
+// src/app/[locale]/til/[year]/[month]/[day]/[slug]/opengraph-image.tsx
+return new ImageResponse(
+  <OgImageLayout
+    title={til.title}
+    date={formattedDate}
+    category="TIL"
+    author={AUTHOR}
+    siteName="@shinyaz"
+    locale={locale}
+  />,
+  { ...size, fonts: [...] }
+);
+```
+
+## その他の改善
+
+残りはいずれも小さな追加だが、積み重ねで検索エンジンやブラウザへのシグナルが改善される。
+
+**`theme-color` メタタグ** — 未設定だったためモバイルブラウザのアドレスバーがデフォルト色になっていた。ライトモードとダークモードで分けて設定することで、サイトのテーマと一貫した表示になる。
+
+```typescript
+// src/app/layout.tsx
+export const viewport: Viewport = {
+  themeColor: [
+    { media: "(prefers-color-scheme: light)", color: "#ffffff" },
+    { media: "(prefers-color-scheme: dark)", color: "#111111" },
+  ],
+};
+```
+
+**About ページに Person スキーマ** — `name`、`jobTitle`、`image`、`sameAs`（GitHub / X / LinkedIn）を含む JSON-LD を追加した。Google がナレッジパネルで著者情報を表示する際の手がかりになる。
+
+**GTM への `dns-prefetch` / `preconnect`** — Google Tag Manager のドメインへの DNS 解決と TLS ハンドシェイクをページ読み込みの早い段階で開始させる。GTM スクリプトの実行開始が速くなり、Analytics の計測精度も上がる。
+
+## まとめ
+
+- **canonical は検索エンジンの判断と一致させる** — middleware でリダイレクトしている場合、リダイレクト先ではなくリダイレクト元が正規 URL として扱われることがある。Google Search Console の「インデックス登録」レポートで実際の判断を確認すべきである。
+- **サイトマップとフィードは全コンテンツタイプを網羅する** — ブログ記事だけ登録して TIL を忘れるといった抜け漏れは、新しいコンテンツタイプを追加した時に起きやすい。
+- **構造化データは共通コンポーネント化しておく** — `OgImageLayout` のように使い回しが効く設計にしておけば、新しいコンテンツタイプにも最小限のコードで対応できる。
+- **SEO は新規ページ追加時にチェックリストで確認する** — サイトマップ、フィード、JSON-LD、canonical、OG 画像の5点を毎回チェックすれば、後から棚卸しする手間を防げる。

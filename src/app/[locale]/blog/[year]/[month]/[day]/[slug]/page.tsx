@@ -45,6 +45,7 @@ export async function generateMetadata({ params }: PostPageProps): Promise<Metad
       modifiedTime: post.updated,
       url: `${SITE_URL}${post.permalink}`,
       authors: [AUTHOR],
+      tags: post.tags,
     },
     alternates: {
       canonical: `${SITE_URL}${post.permalink}`,
