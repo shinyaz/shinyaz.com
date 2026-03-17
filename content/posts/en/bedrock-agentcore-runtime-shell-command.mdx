@@ -316,6 +316,14 @@ Each command took about 3.5 seconds (2s sleep + API overhead), but all three com
 
 **Parallel execution for faster feedback** — Fire off tests, linting, and type checks in parallel to cut per-turn latency. Note that code configuration doesn't include node or pip, so production agents should use container configuration with a custom Dockerfile.
 
+### Notes on the Official Best Practices
+
+The [documentation's best practices](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/runtime-execute-command.html) recommend `&&` chaining for state encoding and incremental streaming output processing. Here are supplementary notes based on the verification results.
+
+- **`&&` chaining is only needed for shell state** — The best practices recommend patterns like `cd /workspace && export NODE_ENV=test && npm test`. This is correct when you need environment variable or working directory carryover. But for file-based data passing, separate API calls can reference files without `&&` chaining, as verified in this test.
+- **Short timeouts with streaming output work well** — The best practices suggest 5 minutes for test suites and 30 seconds for git push. Since partial output streams before timeout (verified), setting shorter timeouts and processing output incrementally to detect failures early is a viable strategy.
+- **`exitCode` checking is essential — pay attention to the values** — The best practices recommend checking `exitCode`. The specific values found in testing: command-specific exit codes on failure (e.g., `2` for `ls` not found), and `-1` for timeout. Build this distinction into your error handling.
+
 ## Takeaways
 
 The verification revealed runtime behaviors not obvious from the documentation alone.
