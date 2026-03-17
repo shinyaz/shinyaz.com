@@ -3,12 +3,7 @@ title: "Two environment variables are all you need to make AWS CLI follow XDG Ba
 description: "AWS CLI defaults to ~/.aws/, but setting AWS_CONFIG_FILE and AWS_SHARED_CREDENTIALS_FILE is enough to make it XDG-compliant."
 date: 2026-03-15
 published: true
-tags:
-  - aws
-  - cli
-  - xdg
-  - dotfiles
-  - zsh
+tags: ["aws", "cli", "xdg", "dotfiles", "zsh"]
 ---
 
 When adding AWS CLI to my dotfiles, I wanted the config files under XDG Base Directory instead of `~/.aws/`. Putting them in `~/.config/aws/config` keeps the home directory clean.

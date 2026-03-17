@@ -3,9 +3,7 @@ title: "dotfiles にテストスクリプトを書くとファイル差分まで
 description: "dotfiles の install.sh でデプロイした設定ファイルを、配置・パーミッション・内容差分の3段階で検証するテストスクリプトの書き方。Git config の [user] セクションなど個人設定の除外パターンも紹介。"
 date: 2026-03-10
 published: true
-tags:
-  - dotfiles
-  - cli
+tags: ["dotfiles", "cli"]
 ---
 
 dotfiles を複数マシンで使っていると、「リポジトリは更新したのにデプロイし忘れた」「手動で設定をいじって差分が出ている」という状況が頻発する。`install.sh` の横に `test.sh` を置いて、3段階で検証するようにした。

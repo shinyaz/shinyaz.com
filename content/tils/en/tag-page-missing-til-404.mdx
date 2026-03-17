@@ -3,9 +3,7 @@ title: "Tag pages only looked at blog posts, causing 404 for TIL-only tags"
 description: "Tag pages used getAllTags which only queried blog posts, so tags exclusive to TILs returned 404. Fixed by merging TIL tags into the tag aggregation function."
 date: "2026-03-14"
 published: true
-tags:
-  - nextjs
-  - velite
+tags: ["nextjs", "velite"]
 ---
 
 I noticed that visiting a tag page for a TIL-only tag (one not used by any blog post) returned a 404.

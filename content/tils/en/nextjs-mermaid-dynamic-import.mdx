@@ -3,9 +3,7 @@ title: "Rendering Mermaid diagrams in Next.js requires client-side dynamic impor
 description: "The mermaid library depends on DOM APIs like getBBox, so it can't run in Server Components. Use dynamic import in useEffect and next-themes resolvedTheme for dark mode support."
 date: 2026-03-09
 published: true
-tags:
-  - nextjs
-  - mermaid
+tags: ["nextjs", "mermaid"]
 ---
 
 I tried calling mermaid in a Server Component to generate SVG strings at build time. Predictably, mermaid uses DOM APIs like `getBBox` internally, so it fails on the server.

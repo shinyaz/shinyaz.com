@@ -3,9 +3,7 @@ title: "rehype-pretty-code replaces language-mermaid className with data-languag
 description: "When detecting mermaid code blocks in MDX components, className='language-mermaid' won't work because rehype-pretty-code transforms it to a data-language attribute and wraps content in span trees."
 date: 2026-03-09
 published: true
-tags:
-  - mdx
-  - rehype-pretty-code
+tags: ["mdx", "rehype-pretty-code"]
 ---
 
 I was adding Mermaid diagram rendering to an MDX blog. The plan was simple: override `pre` in `mdx-components` and check for `className="language-mermaid"`. It didn't match anything.

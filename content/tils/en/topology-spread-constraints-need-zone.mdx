@@ -3,10 +3,7 @@ title: "topologySpreadConstraints needs zone spread, not just hostname"
 description: "hostname spread alone can land all pods in the same AZ. Add topology.kubernetes.io/zone to guarantee cross-AZ distribution."
 date: "2026-03-23"
 published: true
-tags:
-  - kubernetes
-  - aws
-  - eks
+tags: ["kubernetes", "aws", "eks"]
 ---
 
 While reviewing AWS [EKS upgrade best practices](https://docs.aws.amazon.com/eks/latest/best-practices/cluster-upgrades.html), I realized I'd been setting `topologySpreadConstraints` with only `kubernetes.io/hostname` and calling it a day. Without `topology.kubernetes.io/zone`, all pods can land in the same AZ on different nodes — surviving node failure but not AZ failure.

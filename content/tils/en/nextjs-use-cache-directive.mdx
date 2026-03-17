@@ -3,9 +3,7 @@ title: "Next.js 'use cache' directive enables component-level caching"
 description: "The 'use cache' directive lets you cache the output of any async function — not just fetch — replacing the old fetch-level cache options with a more flexible approach."
 date: 2026-03-07
 published: true
-tags:
-  - nextjs
-  - caching
+tags: ["nextjs", "caching"]
 ---
 
 I was looking into caching strategies for Server Component data fetching in Next.js when I found the [`"use cache"` directive](https://nextjs.org/docs/app/api-reference/directives/use-cache) alongside the familiar `fetch(..., { next: { revalidate: 60 } })` pattern. The surprise: it works on **any async function or Server Component**, not just `fetch` calls:

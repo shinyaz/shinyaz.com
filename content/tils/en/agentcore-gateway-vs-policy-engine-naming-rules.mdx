@@ -1,0 +1,25 @@
+---
+title: "AgentCore Gateway and Policy Engine have opposite naming rules"
+description: "Bedrock AgentCore Gateways only allow hyphens while Policy Engines only allow underscores. Using the same prefix for both causes ValidationException."
+date: "2026-03-15"
+published: true
+tags: ["agentcore", "bedrock", "aws"]
+---
+
+I tried creating an AgentCore Gateway and Policy Engine with the same naming prefix and hit `ValidationException` on one or the other every time.
+
+Gateway names allow hyphens only — underscores are rejected:
+
+```text
+Value 'my_gateway' at 'name' failed to satisfy constraint:
+Member must satisfy regular expression pattern: ([0-9a-zA-Z][-]?){1,48}
+```
+
+Policy Engine names allow underscores only — hyphens are rejected:
+
+```text
+Value at '/name' failed to satisfy constraint:
+Member must satisfy regular expression pattern: ^[A-Za-z][A-Za-z0-9_]*$
+```
+
+Opposite naming conventions within the same service. Use `my-gateway` + `my_policy_engine`. Gateway Target names follow the Gateway convention (hyphens OK).

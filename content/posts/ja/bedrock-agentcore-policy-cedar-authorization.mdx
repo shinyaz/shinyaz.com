@@ -1,0 +1,292 @@
+---
+title: "Bedrock AgentCore Policyで自然言語からCedarポリシーを生成しエージェントのツールアクセスを制御する"
+description: "Bedrock AgentCore PolicyのGA発表を受け、CedarポリシーによるGatewayのツールアクセス制御と自然言語からのCedar生成を実際に検証。default denyや自動推論バリデーションの挙動を実体験ベースで共有する。"
+date: "2026-03-15"
+published: true
+featured: false
+categories: [ai-agents]
+tags: ["bedrock", "agentcore", "cedar", "security", "ai-agents"]
+---
+
+## はじめに
+
+2026年3月3日、AWSは[Amazon Bedrock AgentCore Policyの一般提供を開始した](https://aws.amazon.com/about-aws/whats-new/2026/03/policy-amazon-bedrock-agentcore-generally-available/)。この機能はエージェントのツールアクセスに対して、エージェントコードの外側から集中的かつ細粒度の制御を可能にする。対応リージョンは東京を含む13リージョン。
+
+エージェントが自律的にツールを呼び出す世界では「どのエージェントが、どのツールを、どの条件で呼べるか」を確実に制御する仕組みが不可欠だ。AgentCore Policyは、この課題をエージェント実装から完全に分離された決定論的なポリシーエンジンで解決する。
+
+本記事では、Policy機能のアーキテクチャを解説した上で、実際にCedarポリシーの作成からGatewayへのアタッチ、ツール呼び出しの許可・拒否テストまでの一連の流れを検証した結果を共有する。公式ドキュメントは[AgentCore Policy](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/policy.html)を参照。
+
+## Bedrock AgentCore Policyのアーキテクチャ
+
+AgentCore Policyの核心は「セキュリティをエージェントの外に置く」という設計思想にある。従来のアプローチではエージェントコード内にアクセス制御ロジックを埋め込む必要があったが、Policyではエージェントが何をしようと、Gateway層でポリシーが強制的に評価される。
+
+処理の流れは以下の通りだ。
+
+1. **Policy Engine作成** — Cedarポリシーを格納するエンジンを作成する
+2. **ポリシー定義** — Cedar言語または自然言語でアクセス制御ルールを記述する
+3. **GatewayにPolicy Engineを関連付け** — Gateway作成時または更新時にPolicy EngineをENFORCEモードでアタッチする
+4. **リクエスト評価** — エージェントのツール呼び出しがGatewayを通過する際、ポリシーエンジンが各リクエストを評価する
+5. **許可または拒否** — ポリシー評価結果に基づきリクエストが実行または拒否される
+
+重要なのは、デフォルトが **全拒否（default deny）** であることだ。明示的に`permit`されたリクエストのみが許可され、`forbid`ポリシーが1つでもマッチすれば拒否される（forbid-wins セマンティクス）。実際に検証で確認したところ、`tools/list`の時点でpermitポリシーのないツールはリストにすら表示されなかった。
+
+## 主な特徴
+
+### Cedar言語によるポリシー定義
+
+[Cedar](https://www.cedarpolicy.com/)はAWSが開発したオープンソースのポリシー言語で、Amazon Verified Permissionsでも採用されている。AgentCore Policyでは、Cedarの`principal`、`action`、`resource`、`when`の4要素でツールアクセスを制御する。
+
+AgentCore固有のポイントとして、actionとresourceにはAgentCore独自の名前空間が使われる。
+
+```text
+action  == AgentCore::Action::"[ターゲット名]___[ツール名]"
+resource == AgentCore::Gateway::"[GatewayのARN]"
+```
+
+ツール名の前にGateway Targetの名前が `___`（アンダースコア3つ）で結合される点は、MCPの`tools/list`で返されるツール名と一致している。
+
+### 自然言語からCedarへの自動変換
+
+自然言語でポリシーの意図を記述すると、`start_policy_generation` APIでCedarポリシーに自動変換できる。後述の検証で実際の変換結果を示す。
+
+### 自動推論による検証
+
+作成されたポリシーは自動推論エンジンで検証される。`create_policy` APIの`validationMode`パラメータはデフォルトで`FAIL_ON_ANY_FINDINGS`が適用され、以下の問題が検出されるとポリシー作成が失敗する。
+
+- **Overly Permissive** — 条件なしで特定のaction/resourceを全許可してしまうケース
+- **Overly Restrictive** — 正当なリクエストまで拒否してしまうケース
+- **Unsatisfiable** — 論理的にどのリクエストにもマッチしない矛盾した条件
+
+### CloudWatchによる監視
+
+ENFORCEモードで稼働するPolicy Engineは、すべてのポリシー評価結果をCloudWatchに記録する。許可・拒否の判定履歴が残るため、コンプライアンス監査やトラブルシューティングに活用できる。
+
+## セットアップと検証
+
+### 前提環境
+
+- Python 3.10以上
+- AWS CLIで認証済み（`aws sso login`等）
+- IAM権限：`bedrock-agentcore:*`、Lambda作成・実行、Cognito関連
+
+### プロジェクト作成
+
+```bash
+mkdir agentcore-policy-quickstart && cd agentcore-policy-quickstart
+python3 -m venv .venv && source .venv/bin/activate
+pip install boto3 bedrock-agentcore-starter-toolkit requests
+```
+
+### リソースの作成
+
+AgentCore Starter Toolkitを使うと、IAMロール、Cognito、Lambda、Gatewayをまとめて作成できる。以下のコードでPolicy Engine、Gateway、Lambda Targetを作成する。
+
+なお、コントロールプレーンのAPI操作には`bedrock-agentcore-control`クライアントを使用する（`bedrock-agentcore`はランタイム用で別サービス）。
+
+```python
+import boto3
+from bedrock_agentcore_starter_toolkit.operations.gateway.client import GatewayClient
+from bedrock_agentcore_starter_toolkit.operations.policy.client import PolicyClient
+
+gw_client = GatewayClient(region_name="us-west-2")
+policy_client = PolicyClient(region_name="us-west-2")
+control = boto3.client("bedrock-agentcore-control", region_name="us-west-2")
+
+# 1. Policy Engine作成（名前はアンダースコアのみ許可、ハイフン不可）
+engine = policy_client.create_or_get_policy_engine(
+    name="my_policy_engine",
+    description="Policy engine for tool access control",
+)
+engine_id = engine["policyEngineId"]
+engine_arn = engine["policyEngineArn"]
+
+# 2. MCP Gateway作成（名前はハイフンのみ許可、アンダースコア不可）
+#    IAMロール・Cognito・Lambda関数が自動生成される
+#    mode: "ENFORCE"（ポリシー強制）または "LOG_ONLY"（評価のみ、テスト用）
+gateway = gw_client.create_mcp_gateway(
+    name="my-gateway",
+    policy_engine_config={
+        "arn": engine_arn,
+        "mode": "ENFORCE",
+    },
+)
+gateway_id = gateway["gatewayId"]
+gateway_arn = gateway["gatewayArn"]
+gateway_url = gateway["gatewayUrl"]  # MCPエンドポイント
+
+# 3. Lambda Targetの追加
+#    target_payloadを省略するとデフォルトのget_weatherとget_timeツールが登録される
+target = gw_client.create_mcp_gateway_target(
+    gateway=gateway,
+    name="my-target",
+    target_type="lambda",
+)
+```
+
+### Cedarポリシーの定義
+
+「`get_weather`ツールの呼び出しを、`location`が`Tokyo`の場合のみ許可する」というポリシーを作成する。Starter ToolkitのPolicyClientでも作成可能だが、ここではCedarの構文を明示するためにboto3クライアントを直接使用する。
+
+```python
+cedar_statement = f"""permit(
+  principal,
+  action == AgentCore::Action::"my-target___get_weather",
+  resource == AgentCore::Gateway::"{gateway_arn}"
+) when {{
+  ((context.input).location) == "Tokyo"
+}};"""
+
+control.create_policy(
+    name="allow_weather_tokyo",
+    policyEngineId=engine_id,
+    definition={"cedar": {"statement": cedar_statement}},
+)
+```
+
+action名はGateway Target名とツール名が`___`（アンダースコア3つ）で結合された形式になる。`when`句で`context.input`配下のツール入力パラメータにアクセスしている。
+
+注意点として、条件なしの`permit`（例：`when`句を省略して`get_weather`を全許可）を作成すると、自動推論エンジンが「Overly Permissive」と判定しポリシー作成が`CREATE_FAILED`になる。検証時に実際に遭遇した挙動だ。
+
+### ポリシー動作テスト
+
+MCP GatewayエンドポイントにJSON-RPC 2.0でリクエストを送信し、ポリシーの強制適用を確認する。まず、Starter ToolkitがGateway作成時に自動生成したCognitoの認証情報を取得してOAuthトークンを得る。
+
+```python
+import requests, base64
+
+cognito = boto3.client("cognito-idp", region_name="us-west-2")
+
+# Gatewayの認証設定からCognito情報を取得
+gw_detail = control.get_gateway(gatewayIdentifier=gateway_id)
+auth_config = gw_detail["authorizerConfiguration"]["customJWTAuthorizer"]
+discovery_url = auth_config["discoveryUrl"]
+pool_id = discovery_url.split("/")[3]
+client_id = auth_config["allowedClients"][0]
+
+client_desc = cognito.describe_user_pool_client(UserPoolId=pool_id, ClientId=client_id)
+client_secret = client_desc["UserPoolClient"]["ClientSecret"]
+domain = cognito.describe_user_pool(UserPoolId=pool_id)["UserPool"]["Domain"]
+token_endpoint = f"https://{domain}.auth.us-west-2.amazoncognito.com/oauth2/token"
+
+# OAuthトークン取得（client_credentials grant）
+auth_header = base64.b64encode(f"{client_id}:{client_secret}".encode()).decode()
+token = requests.post(token_endpoint, headers={
+    "Content-Type": "application/x-www-form-urlencoded",
+    "Authorization": f"Basic {auth_header}",
+}, data={
+    "grant_type": "client_credentials",
+    "scope": f"{gateway['name']}/invoke",
+}).json()["access_token"]
+```
+
+トークンが取得できたら、MCPのJSON-RPC 2.0でツール呼び出しをテストする。
+
+```python
+headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+
+def call_tool(name, arguments):
+    return requests.post(gateway_url, headers=headers, json={
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "params": {"name": name, "arguments": arguments},
+        "id": "1",
+    })
+```
+
+テスト結果は以下の通りだ。
+
+**Test 1: `tools/list` — ポリシーによるツール表示フィルタ**
+
+```json
+{
+  "tools": [
+    {
+      "name": "my-target___get_weather",
+      "description": "Get weather for a location"
+    }
+  ]
+}
+```
+
+permitポリシーが存在する`get_weather`のみがリストに表示され、ポリシーのない`get_time`は**表示すらされない**。ツール一覧の段階でフィルタが効いている。
+
+**Test 2: `get_weather(location="Tokyo")` → 許可**
+
+```json
+{
+  "result": {
+    "isError": false,
+    "content": [
+      {
+        "type": "text",
+        "text": "{\"statusCode\":200,\"body\":\"{\\\"location\\\": \\\"Tokyo\\\", \\\"temperature\\\": \\\"72\\\\u00b0F\\\", \\\"conditions\\\": \\\"Sunny\\\"}\"}"
+      }
+    ]
+  }
+}
+```
+
+Cedarポリシーの`when`条件にマッチし、Lambda関数が実行されてレスポンスが返る。`text`フィールドにはLambdaの戻り値（`statusCode`と`body`を含むJSON）が文字列としてエスケープされて格納されている。
+
+**Test 3: `get_weather(location="London")` → 拒否**
+
+```json
+{
+  "error": {
+    "code": -32002,
+    "message": "Tool Execution Denied: Tool call not allowed due to policy enforcement [No policy applies to the request (denied by default).]"
+  }
+}
+```
+
+`location == "Tokyo"`の条件を満たさないため、default denyが適用される。エラーメッセージにも「denied by default」と明示されている。
+
+**Test 4: `get_time(timezone="UTC")` → 拒否**
+
+`get_time`にはpermitポリシー自体が存在しないため、同様にdefault denyで拒否される。
+
+## 自然言語ポリシー生成の検証
+
+`start_policy_generation` APIに自然言語でポリシーの意図を渡すと、Cedarポリシーが自動生成される。
+
+```python
+gen = control.start_policy_generation(
+    policyEngineId=engine_id,
+    name="nl_generation_test",
+    resource={"arn": gateway_arn},
+    content={"rawText": "Allow calling the get_time tool only when the timezone is UTC"},
+)
+# ステータスがGENERATEDになるまでget_policy_generationでポーリング
+```
+
+生成されたCedar：
+
+```text
+permit(
+  principal,
+  action == AgentCore::Action::"my-target___get_time",
+  resource == AgentCore::Gateway::"arn:aws:bedrock-agentcore:us-west-2:..."
+) when {
+  ((context.input).timezone) == "UTC"
+};
+```
+
+Action名やResource ARNはGatewayのスキーマから自動補完され、`context.input.timezone`への条件も正しく生成された。この程度のシンプルな条件であれば変換精度は十分に実用的だ。
+
+生成されたポリシーは7日後に自動削除されるため、採用する場合は`create_policy`の`definition`に`policyGeneration`を指定して登録する必要がある。
+
+## クリーンアップ
+
+検証後は以下でリソースを削除できる。
+
+```python
+policy_client.cleanup_policy_engine(engine_id)
+gw_client.cleanup_gateway(gateway_id)
+```
+
+## まとめ
+
+- **エージェントコード外のセキュリティ** — ポリシーがGateway層で強制されるため、エージェント実装のバグや脆弱性に左右されない決定論的な制御が実現できる。`tools/list`の段階でフィルタされる徹底ぶりだ
+- **自動推論のセーフガード** — 条件なしの全許可ポリシーは`Overly Permissive`として自動的に拒否される。ポリシー定義の段階で安全性を担保する仕組みが組み込まれている
+- **自然言語とCedarの二層構造** — 自然言語でドラフトしCedarでファインチューンするワークフローが、セキュリティチームと開発チームの協働を促進する
+- **APIの二重構造に注意** — `bedrock-agentcore-control`がコントロールプレーン、`bedrock-agentcore`がランタイムと分かれている。命名規則もGatewayはハイフン、Policy Engineはアンダースコアのみ許可と異なり、現時点ではやや荒削りな部分もある

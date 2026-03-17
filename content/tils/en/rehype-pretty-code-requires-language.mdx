@@ -3,9 +3,7 @@ title: "rehype-pretty-code breaks on code blocks without a language identifier"
 description: "Omitting the language on fenced code blocks in MDX causes rehype-pretty-code to produce broken HTML. Always specify a language like text for non-code content."
 date: 2026-03-08
 published: true
-tags:
-  - nextjs
-  - mdx
+tags: ["nextjs", "mdx"]
 ---
 
 A TIL entry's code block wasn't rendering correctly on the page. The fenced block started with bare ` ``` ` and had no language identifier.

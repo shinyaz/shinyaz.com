@@ -3,9 +3,7 @@ title: "dotfiles の --force をセクション指定で安全にする"
 description: "install.sh の --force が全ファイルを上書きする問題を、copy_file にセクション名を渡す方式で解決した。--force zsh git のように対象を絞れる。"
 date: 2026-03-15
 published: true
-tags:
-  - bash
-  - dotfiles
+tags: ["bash", "dotfiles"]
 ---
 
 dotfiles の `install.sh` に `--force` オプションがあるが、全ファイルを一括上書きしてしまうのが不便だった。AWS の config のように、リポジトリにはテンプレートを置いてローカルだけ実際の値を入れているファイルがあると、うっかり `--force` でテンプレートに戻ってしまう。

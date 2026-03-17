@@ -3,11 +3,7 @@ title: "A2A agent card URL defaults to 0.0.0.0 and breaks Kubernetes inter-pod c
 description: "Strands SDK A2A server sets the card url to http://0.0.0.0:9000/ by default. Fix by setting a2a.http_url to the Kubernetes Service FQDN in Helm values."
 date: "2026-03-25"
 published: true
-tags:
-  - a2a
-  - kubernetes
-  - strands-agents
-  - eks
+tags: ["a2a", "kubernetes", "strands-agents", "eks"]
 ---
 
 Tried to send an A2A message from Travel Agent to Weather Agent on EKS and got:

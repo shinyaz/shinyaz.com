@@ -3,9 +3,7 @@ title: "rehype-pretty-code は mermaid コードブロックの className を da
 description: "MDX で language-mermaid クラスを検出しようとしても、rehype-pretty-code が data-language 属性に変換済みで見つからない。pre の data-language で判定し、span ツリーからテキストを復元する必要がある。"
 date: 2026-03-09
 published: true
-tags:
-  - mdx
-  - rehype-pretty-code
+tags: ["mdx", "rehype-pretty-code"]
 ---
 
 MDX ブログに Mermaid 図のレンダリングを実装しようとした。`mdx-components` の `pre` オーバーライドで `className="language-mermaid"` を検出すれば簡単だろうと思っていたが、まったく反応しなかった。

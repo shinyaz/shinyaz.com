@@ -3,11 +3,7 @@ title: "AI エージェントの S3 セッション履歴が設定変更後も L
 description: "A2A 接続先 URL を修正しても、S3 に保存された古い会話履歴から LLM が旧 URL を学習して使い続ける。セッションクリアで解決。"
 date: "2026-03-25"
 published: true
-tags:
-  - ai-agents
-  - strands-agents
-  - s3
-  - eks
+tags: ["ai-agents", "strands-agents", "s3", "eks"]
 ---
 
 A2A エージェントカードの URL を `0.0.0.0` → 正しい FQDN に修正し、Pod も再起動したのに、Travel Agent がまだ `http://0.0.0.0:9000/` に接続しようとする現象に遭遇した。

@@ -3,9 +3,7 @@ title: "A dotfiles test script can verify file diffs, not just existence"
 description: "How to write a test script that validates dotfiles deployment in three stages: file existence, permissions, and content diffs. Includes an exclusion pattern for Git config's [user] section."
 date: 2026-03-10
 published: true
-tags:
-  - dotfiles
-  - cli
+tags: ["dotfiles", "cli"]
 ---
 
 When using dotfiles across multiple machines, I kept running into "updated the repo but forgot to deploy" and "manually tweaked a config and now it's drifted." Adding a `test.sh` next to `install.sh` with three levels of verification solved this.

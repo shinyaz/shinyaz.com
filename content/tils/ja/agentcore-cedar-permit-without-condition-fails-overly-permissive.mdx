@@ -1,0 +1,27 @@
+---
+title: "AgentCore Policyで条件なしのCedar permitはOverly Permissiveで自動拒否される"
+description: "Bedrock AgentCore PolicyでCedar permitにwhen句を付けずに作成するとCREATE_FAILEDになる。FAIL_ON_ANY_FINDINGSの自動推論が原因。"
+date: "2026-03-15"
+published: true
+tags: ["agentcore", "bedrock", "cedar", "aws"]
+---
+
+AgentCore Policyで「まず全許可で動作確認して、あとから条件を絞ろう」と思い、`when`句なしの`permit`を作成したら`CREATE_FAILED`になった。
+
+```text
+permit(
+  principal,
+  action == AgentCore::Action::"my-target___get_weather",
+  resource == AgentCore::Gateway::"arn:aws:bedrock-agentcore:..."
+);
+```
+
+ステータスが`CREATE_FAILED`になり、理由は以下の通り。
+
+```text
+Overly Permissive: Policy Engine will allow every request for the specified
+principal (AgentCore::OAuthUser), action (my-target___get_weather) and
+resource (arn:aws:bedrock-agentcore:...) combination if the policy is added
+```
+
+`create_policy` APIのデフォルト`validationMode`が`FAIL_ON_ANY_FINDINGS`で、自動推論エンジンが「このポリシーは過度に許可的だ」と判断して拒否している。`when`句で何らかの条件を付けるか、`validationMode="IGNORE_ALL_FINDINGS"`を明示する必要がある。

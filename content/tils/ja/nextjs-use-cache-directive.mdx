@@ -3,9 +3,7 @@ title: "Next.js の 'use cache' ディレクティブでコンポーネントレ
 description: "'use cache' ディレクティブを使うと、fetch に限らず任意の非同期関数の出力をキャッシュできる。従来の fetch レベルのキャッシュオプションに代わる新しい仕組み。"
 date: 2026-03-07
 published: true
-tags:
-  - nextjs
-  - caching
+tags: ["nextjs", "caching"]
 ---
 
 Server Component のデータ取得にキャッシュを効かせたくて Next.js のドキュメントを読んでいたら、従来の `fetch(..., { next: { revalidate: 60 } })` とは別に [`"use cache"` ディレクティブ](https://nextjs.org/docs/app/api-reference/directives/use-cache)が追加されていた。驚いたのは、`fetch` に限らず**任意の非同期関数や Server Component にそのまま使える**こと：

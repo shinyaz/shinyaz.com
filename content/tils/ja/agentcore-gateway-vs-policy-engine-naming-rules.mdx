@@ -1,0 +1,25 @@
+---
+title: "AgentCore GatewayとPolicy Engineで命名規則が異なる"
+description: "Bedrock AgentCore GatewayはハイフンのみでPolicy Engineはアンダースコアのみ。同じプレフィックスを使い回すとValidationExceptionになる。"
+date: "2026-03-15"
+published: true
+tags: ["agentcore", "bedrock", "aws"]
+---
+
+AgentCore PolicyのGatewayとPolicy Engineを同じ命名プレフィックスで作ろうとしたら、どちらか片方で必ず`ValidationException`になった。
+
+Gateway名はハイフンのみ許可で、アンダースコアを入れると弾かれる。
+
+```text
+Value 'my_gateway' at 'name' failed to satisfy constraint:
+Member must satisfy regular expression pattern: ([0-9a-zA-Z][-]?){1,48}
+```
+
+一方、Policy Engine名はアンダースコアのみ許可で、ハイフンを入れると弾かれる。
+
+```text
+Value at '/name' failed to satisfy constraint:
+Member must satisfy regular expression pattern: ^[A-Za-z][A-Za-z0-9_]*$
+```
+
+同じサービス内なのに命名規則が真逆なので、`my-gateway` + `my_policy_engine` のように使い分ける必要がある。Gateway Targetの名前はGatewayと同じくハイフン許可だった。

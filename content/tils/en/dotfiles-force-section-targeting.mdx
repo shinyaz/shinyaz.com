@@ -3,9 +3,7 @@ title: "Target specific sections with --force in dotfiles install.sh"
 description: "Solved the problem of --force overwriting all files by adding a section name argument to copy_file. Now --force zsh git only overwrites those sections."
 date: 2026-03-15
 published: true
-tags:
-  - bash
-  - dotfiles
+tags: ["bash", "dotfiles"]
 ---
 
 My dotfiles `install.sh` had a `--force` flag, but it overwrote everything — including files like AWS config where the repo holds a template and real values only exist locally. One careless `--force` and the actual credentials config gets replaced with a blank template.

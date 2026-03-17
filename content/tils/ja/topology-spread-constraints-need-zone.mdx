@@ -3,10 +3,7 @@ title: "topologySpreadConstraints は hostname だけでなく zone も設定す
 description: "hostname だけだと同一 AZ 内の別ノードに分散するだけ。topology.kubernetes.io/zone を追加して AZ 間分散を保証する。"
 date: "2026-03-23"
 published: true
-tags:
-  - kubernetes
-  - aws
-  - eks
+tags: ["kubernetes", "aws", "eks"]
 ---
 
 EKS アップグレードの検証中、AWS の[ベストプラクティス](https://docs.aws.amazon.com/eks/latest/best-practices/cluster-upgrades.html)を読んでいて気づいた。`topologySpreadConstraints` に `kubernetes.io/hostname` だけ設定して満足していたが、`topology.kubernetes.io/zone` も併用しないと AZ 障害時に全 Pod が落ちるリスクがある。

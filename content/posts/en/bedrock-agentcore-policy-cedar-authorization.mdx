@@ -1,0 +1,289 @@
+---
+title: "Controlling Agent Tool Access with Bedrock AgentCore Policy and Cedar Authorization"
+description: "Hands-on verification of Bedrock AgentCore Policy: Cedar-based tool access control via Gateway, natural language policy generation, and default deny behavior validated with real API calls."
+date: "2026-03-15"
+published: true
+featured: false
+categories: [ai-agents]
+tags: ["bedrock", "agentcore", "cedar", "security", "ai-agents"]
+---
+
+## Introduction
+
+On March 3, 2026, AWS [announced the general availability of Policy in Amazon Bedrock AgentCore](https://aws.amazon.com/about-aws/whats-new/2026/03/policy-amazon-bedrock-agentcore-generally-available/). This feature enables centralized, fine-grained control over agent-tool interactions, completely independent of agent code. It launched across 13 regions including Tokyo.
+
+In a world where agents autonomously invoke tools, reliably controlling "which agent can call which tool under what conditions" is essential. AgentCore Policy addresses this with a deterministic policy engine fully decoupled from agent implementation.
+
+This post covers the architecture behind Policy, then walks through a hands-on verification: creating Cedar policies, attaching them to a Gateway, and testing allow/deny behavior end to end. See the official [AgentCore Policy documentation](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/policy.html) for reference.
+
+## Architecture
+
+The core design principle is "security lives outside the agent." Traditional approaches embed access control logic inside agent code. With Policy, the Gateway layer evaluates policies regardless of what the agent attempts.
+
+The flow works as follows:
+
+1. **Create Policy Engine** — A container for storing Cedar policies
+2. **Define policies** — Write access control rules in Cedar or natural language
+3. **Associate Policy Engine with Gateway** — Attach during creation or update, in ENFORCE mode
+4. **Evaluate requests** — Every tool call passing through the Gateway gets evaluated against policies
+5. **Allow or deny** — Requests proceed or get blocked based on evaluation results
+
+Critically, the default is **deny-all**. Only explicitly `permit`ted requests are allowed, and a single matching `forbid` policy overrides any permits (forbid-wins semantics). During testing, I confirmed that `tools/list` doesn't even show tools that lack a permit policy.
+
+## Key Features
+
+### Cedar Policy Language
+
+[Cedar](https://www.cedarpolicy.com/) is AWS's open-source policy language, also used in Amazon Verified Permissions. In AgentCore Policy, Cedar's `principal`, `action`, `resource`, and `when` elements control tool access.
+
+AgentCore uses its own namespace for actions and resources:
+
+```text
+action  == AgentCore::Action::"[target_name]___[tool_name]"
+resource == AgentCore::Gateway::"[gateway ARN]"
+```
+
+Tool names are prefixed with the Gateway Target name, joined by `___` (triple underscore). This matches the tool names returned by MCP `tools/list`.
+
+### Natural Language to Cedar Conversion
+
+You can describe policy intent in natural language, and the `start_policy_generation` API converts it to Cedar. I'll show the actual conversion result later in this post.
+
+### Automated Reasoning Validation
+
+Created policies go through an automated reasoning engine. The `create_policy` API's `validationMode` parameter defaults to `FAIL_ON_ANY_FINDINGS`, which rejects policies when:
+
+- **Overly Permissive** — Unconditionally allows a specific action/resource combination
+- **Overly Restrictive** — Blocks legitimate requests
+- **Unsatisfiable** — Contains contradictory logic that can never match
+
+### CloudWatch Monitoring
+
+Policy Engines running in ENFORCE mode log all evaluation decisions to CloudWatch. This provides a complete audit trail of allow/deny decisions for compliance validation and troubleshooting.
+
+## Setup and Verification
+
+### Prerequisites
+
+- Python 3.10+
+- Authenticated AWS CLI (`aws sso login` etc.)
+- IAM permissions: `bedrock-agentcore:*`, Lambda create/invoke, Cognito
+
+### Project Setup
+
+```bash
+mkdir agentcore-policy-quickstart && cd agentcore-policy-quickstart
+python3 -m venv .venv && source .venv/bin/activate
+pip install boto3 bedrock-agentcore-starter-toolkit requests
+```
+
+### Creating Resources
+
+The AgentCore Starter Toolkit creates IAM roles, Cognito, Lambda, and Gateway together. The following code creates a Policy Engine, Gateway, and Lambda Target.
+
+Note that control plane API operations use the `bedrock-agentcore-control` client (`bedrock-agentcore` is a separate runtime service).
+
+```python
+import boto3
+from bedrock_agentcore_starter_toolkit.operations.gateway.client import GatewayClient
+from bedrock_agentcore_starter_toolkit.operations.policy.client import PolicyClient
+
+gw_client = GatewayClient(region_name="us-west-2")
+policy_client = PolicyClient(region_name="us-west-2")
+control = boto3.client("bedrock-agentcore-control", region_name="us-west-2")
+
+# 1. Create Policy Engine (names allow underscores only, no hyphens)
+engine = policy_client.create_or_get_policy_engine(
+    name="my_policy_engine",
+    description="Policy engine for tool access control",
+)
+engine_id = engine["policyEngineId"]
+engine_arn = engine["policyEngineArn"]
+
+# 2. Create MCP Gateway (names allow hyphens only, no underscores)
+#    Auto-generates IAM role, Cognito, and Lambda function
+#    mode: "ENFORCE" (enforce policies) or "LOG_ONLY" (evaluate only, for testing)
+gateway = gw_client.create_mcp_gateway(
+    name="my-gateway",
+    policy_engine_config={
+        "arn": engine_arn,
+        "mode": "ENFORCE",
+    },
+)
+gateway_id = gateway["gatewayId"]
+gateway_arn = gateway["gatewayArn"]
+gateway_url = gateway["gatewayUrl"]  # MCP endpoint
+
+# 3. Add Lambda Target
+#    Omitting target_payload registers default get_weather and get_time tools
+target = gw_client.create_mcp_gateway_target(
+    gateway=gateway,
+    name="my-target",
+    target_type="lambda",
+)
+```
+
+### Defining Cedar Policies
+
+Here's a policy that allows `get_weather` only when `location` is `Tokyo`. While the Starter Toolkit's PolicyClient can also create policies, I use the boto3 client directly here to show the Cedar syntax explicitly.
+
+```python
+cedar_statement = f"""permit(
+  principal,
+  action == AgentCore::Action::"my-target___get_weather",
+  resource == AgentCore::Gateway::"{gateway_arn}"
+) when {{
+  ((context.input).location) == "Tokyo"
+}};"""
+
+control.create_policy(
+    name="allow_weather_tokyo",
+    policyEngineId=engine_id,
+    definition={"cedar": {"statement": cedar_statement}},
+)
+```
+
+The action name joins the Gateway Target name and tool name with `___` (triple underscore). The `when` clause accesses tool input parameters via `context.input`.
+
+Note: creating a `permit` without conditions (e.g., omitting the `when` clause to allow all `get_weather` calls) triggers the automated reasoning engine's "Overly Permissive" finding and fails with `CREATE_FAILED`. I hit this during testing.
+
+### Testing Policy Enforcement
+
+I sent JSON-RPC 2.0 requests to the MCP Gateway endpoint to verify policy enforcement. First, retrieve Cognito credentials that the Starter Toolkit auto-generated during Gateway creation, and obtain an OAuth token.
+
+```python
+import requests, base64
+
+cognito = boto3.client("cognito-idp", region_name="us-west-2")
+
+# Retrieve Cognito info from Gateway's auth config
+gw_detail = control.get_gateway(gatewayIdentifier=gateway_id)
+auth_config = gw_detail["authorizerConfiguration"]["customJWTAuthorizer"]
+discovery_url = auth_config["discoveryUrl"]
+pool_id = discovery_url.split("/")[3]
+client_id = auth_config["allowedClients"][0]
+
+client_desc = cognito.describe_user_pool_client(UserPoolId=pool_id, ClientId=client_id)
+client_secret = client_desc["UserPoolClient"]["ClientSecret"]
+domain = cognito.describe_user_pool(UserPoolId=pool_id)["UserPool"]["Domain"]
+token_endpoint = f"https://{domain}.auth.us-west-2.amazoncognito.com/oauth2/token"
+
+# Get OAuth token (client_credentials grant)
+auth_header = base64.b64encode(f"{client_id}:{client_secret}".encode()).decode()
+token = requests.post(token_endpoint, headers={
+    "Content-Type": "application/x-www-form-urlencoded",
+    "Authorization": f"Basic {auth_header}",
+}, data={
+    "grant_type": "client_credentials",
+    "scope": f"{gateway['name']}/invoke",
+}).json()["access_token"]
+```
+
+With the token, test tool calls via MCP JSON-RPC 2.0.
+
+```python
+headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+
+def call_tool(name, arguments):
+    return requests.post(gateway_url, headers=headers, json={
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "params": {"name": name, "arguments": arguments},
+        "id": "1",
+    })
+```
+
+Results:
+
+**Test 1: `tools/list` — Policy filters tool visibility**
+
+```json
+{
+  "tools": [
+    {"name": "my-target___get_weather", "description": "Get weather for a location"}
+  ]
+}
+```
+
+Only `get_weather` (which has a permit policy) appears. `get_time` (no permit policy) is **hidden entirely**. Filtering happens at the list level.
+
+**Test 2: `get_weather(location="Tokyo")` — Allowed**
+
+```json
+{
+  "result": {
+    "isError": false,
+    "content": [
+      {
+        "type": "text",
+        "text": "{\"statusCode\":200,\"body\":\"{\\\"location\\\": \\\"Tokyo\\\", \\\"temperature\\\": \\\"72\\\\u00b0F\\\", \\\"conditions\\\": \\\"Sunny\\\"}\"}"
+      }
+    ]
+  }
+}
+```
+
+Matches the Cedar policy's `when` condition, Lambda executes and returns the response. The `text` field contains the Lambda return value (JSON with `statusCode` and `body`) as an escaped string.
+
+**Test 3: `get_weather(location="London")` — Denied**
+
+```json
+{
+  "error": {
+    "code": -32002,
+    "message": "Tool Execution Denied: Tool call not allowed due to policy enforcement [No policy applies to the request (denied by default).]"
+  }
+}
+```
+
+Doesn't satisfy `location == "Tokyo"`, so default deny applies. The error message explicitly states "denied by default."
+
+**Test 4: `get_time(timezone="UTC")` — Denied**
+
+No permit policy exists for `get_time`, so it's denied by default.
+
+## Natural Language Policy Generation
+
+The `start_policy_generation` API accepts natural language and generates Cedar policies automatically.
+
+```python
+gen = control.start_policy_generation(
+    policyEngineId=engine_id,
+    name="nl_generation_test",
+    resource={"arn": gateway_arn},
+    content={"rawText": "Allow calling the get_time tool only when the timezone is UTC"},
+)
+# Poll get_policy_generation until status is GENERATED
+```
+
+The generated Cedar:
+
+```text
+permit(
+  principal,
+  action == AgentCore::Action::"my-target___get_time",
+  resource == AgentCore::Gateway::"arn:aws:bedrock-agentcore:us-west-2:..."
+) when {
+  ((context.input).timezone) == "UTC"
+};
+```
+
+Action names and Resource ARNs are auto-populated from the Gateway's schema. The condition on `context.input.timezone` was generated correctly. For simple conditions like this, the conversion quality is practical.
+
+Generated policies auto-delete after 7 days, so you need to register them via `create_policy` with a `policyGeneration` definition to keep them.
+
+## Cleanup
+
+Delete all resources after testing:
+
+```python
+policy_client.cleanup_policy_engine(engine_id)
+gw_client.cleanup_gateway(gateway_id)
+```
+
+## Takeaways
+
+- **Security outside agent code** — Policies enforced at the Gateway layer provide deterministic control unaffected by agent bugs. Even `tools/list` is filtered, a thorough approach
+- **Automated reasoning safeguard** — Unconditional permit policies are automatically rejected as "Overly Permissive." Safety is built into the policy definition stage
+- **Two-tier authoring** — Draft in natural language, fine-tune in Cedar. A workflow that bridges security and development teams
+- **Watch the API split** — `bedrock-agentcore-control` is the control plane, `bedrock-agentcore` is runtime. Naming conventions also differ: Gateways use hyphens, Policy Engines use underscores only. Some rough edges remain at this stage
