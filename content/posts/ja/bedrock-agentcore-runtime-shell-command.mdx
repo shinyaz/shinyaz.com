@@ -60,8 +60,7 @@ APIは以下のパラメータを受け取り、HTTP/2上のEventStreamでレス
 
 最小限のエージェントコード`main.py`を作成してZIP化し、S3にアップロードする。`InvokeAgentRuntimeCommand`はエージェントのコードとは独立して動作するため、エージェント自体は最小実装で十分だ。
 
-```python
-# main.py
+```python title="main.py"
 import json
 import sys
 
@@ -93,7 +92,7 @@ if __name__ == "__main__":
 
 IAMロール作成、S3アップロード、ランタイム＋エンドポイント作成までを一連のコマンドで実行する。検証結果だけ読みたい場合は[検証結果](#検証結果)まで飛ばしてよい。
 
-```bash
+```bash title="ターミナル"
 # 変数設定
 ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
 BUCKET_NAME="agentcore-test-shell-cmd-${ACCOUNT_ID}"
@@ -187,7 +186,7 @@ done
 
 以降のテストはすべて以下のPythonコードをベースにしている。セッションIDは33文字以上が必要なため、UUIDを結合して生成する。
 
-```python
+```python title="Python"
 import boto3, sys, uuid
 
 client = boto3.client('bedrock-agentcore', region_name='us-west-2')
@@ -223,11 +222,11 @@ def run_command(command, timeout=30, session_id=None):
 
 ### 1. 基本的なコマンド実行とストリーミング
 
-```python
+```python title="Python"
 run_command('/bin/bash -c "echo Hello from AgentCore Runtime"')
 ```
 
-```text
+```text title="出力結果"
 [contentStart] Command execution started
 [stdout] Hello from AgentCore Runtime
 [contentStop] Exit code: 0, Status: COMPLETED
@@ -239,7 +238,7 @@ run_command('/bin/bash -c "echo Hello from AgentCore Runtime"')
 
 `uname -a`、`python3 --version`、`whoami`、各ツールの`--version`を実行して環境を調査した。
 
-```text
+```text title="出力結果"
 Linux localhost 6.1.158-15.288.amzn2023.aarch64 (Amazon Linux 2023ベース)
 Python 3.13.9
 User: root
@@ -261,7 +260,7 @@ Working directory: /
 
 同一セッション内で作成したファイルが後続コマンドから参照できるかを検証した。以下は2回の別々のAPIコール（同一セッションID）で送信したコマンドだ。
 
-```python
+```python title="Python"
 # APIコール1: ファイル作成
 run_command('/bin/bash -c "mkdir -p /tmp/test_dir && echo \'file content\' > /tmp/test_dir/test.txt"')
 
@@ -276,7 +275,7 @@ run_command('/bin/bash -c "cat /tmp/test_dir/test.txt"')
 
 一方、異なるセッションIDでは完全にファイルシステムが隔離されることを確認した。
 
-```python
+```python title="Python"
 new_session = str(uuid.uuid4()) + "-" + str(uuid.uuid4())[:8]
 run_command(
     '/bin/bash -c "cat /tmp/test_dir/test.txt 2>&1 || echo File NOT found"',
@@ -291,7 +290,7 @@ run_command(
 
 存在しないパスへの`ls`を実行した結果：
 
-```text
+```text title="出力結果"
 [stderr] ls: cannot access '/nonexistent_path': No such file or directory
 [contentStop] Exit code: 2, Status: COMPLETED
 ```
@@ -302,11 +301,11 @@ run_command(
 
 1秒のタイムアウトで5秒の`sleep`を実行した結果：
 
-```python
+```python title="Python"
 run_command('/bin/bash -c "echo start && sleep 5 && echo end"', timeout=1)
 ```
 
-```text
+```text title="出力結果"
 [stdout] start
 [contentStop] Exit code: -1, Status: TIMED_OUT
 ```
@@ -317,7 +316,7 @@ run_command('/bin/bash -c "echo start && sleep 5 && echo end"', timeout=1)
 
 同一セッション内で3つの2秒コマンドを`concurrent.futures`で並行実行した結果：
 
-```text
+```text title="出力結果"
 cmd_A: exit=0, time=3.51s, output=A_done
 cmd_B: exit=0, time=3.51s, output=B_done
 cmd_C: exit=0, time=3.51s, output=C_done
@@ -371,7 +370,7 @@ AgentCore Runtimeには`InvokeAgentRuntimeCommand`とは別に[Code Interpreter]
 
 検証後は以下の順序でリソースを削除する。エンドポイント → ランタイム → S3 → IAMの順が依存関係上安全だ。
 
-```bash
+```bash title="ターミナル"
 # エンドポイント削除
 aws bedrock-agentcore-control delete-agent-runtime-endpoint \
   --region "$REGION" \

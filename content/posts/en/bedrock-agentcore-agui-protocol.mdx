@@ -42,7 +42,7 @@ AG-UI shares port 8080 with HTTP. It exposes two endpoints: `/invocations` (SSE)
 
 Prepare these two files:
 
-```text
+```text title="Project structure"
 my_agui_project/
 ├── my_agui_server.py
 └── requirements.txt
@@ -50,7 +50,7 @@ my_agui_project/
 
 `requirements.txt`:
 
-```text
+```text title="requirements.txt"
 fastapi
 uvicorn
 ag-ui-strands
@@ -58,7 +58,7 @@ ag-ui-strands
 
 ### Install Dependencies
 
-```bash
+```bash title="Terminal"
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt bedrock-agentcore-starter-toolkit uv
 ```
@@ -67,8 +67,7 @@ pip install -r requirements.txt bedrock-agentcore-starter-toolkit uv
 
 ### Server Implementation
 
-```python
-# my_agui_server.py
+```python title="my_agui_server.py"
 import uvicorn
 from fastapi import FastAPI, Request
 from fastapi.responses import StreamingResponse, JSONResponse
@@ -125,13 +124,13 @@ The code has three layers: `Agent` from the `strands` package communicates with 
 
 Start the server and send an SSE request with curl:
 
-```bash
+```bash title="Terminal"
 python my_agui_server.py
 ```
 
 The AG-UI request body includes `threadId` (conversation thread identifier), `runId` (execution unit identifier), and `messages` (array of user messages) as its key fields. The remaining fields — `state`, `tools`, `context`, `forwardedProps` — are passed empty here.
 
-```bash
+```bash title="Terminal"
 curl -N -X POST http://localhost:8080/invocations \
   -H "Content-Type: application/json" \
   -H "Accept: text/event-stream" \
@@ -148,7 +147,7 @@ curl -N -X POST http://localhost:8080/invocations \
 
 The response arrives as an AG-UI event stream:
 
-```text
+```text title="Output"
 data: {"type":"RUN_STARTED","threadId":"test-123","runId":"run-456"}
 data: {"type":"STATE_SNAPSHOT","snapshot":{}}
 data: {"type":"TEXT_MESSAGE_START","messageId":"7c405aa9-...","role":"assistant"}
@@ -172,7 +171,7 @@ With the AG-UI event stream verified locally, the next step is deploying to Agen
 
 Use `agentcore configure` with the AGUI protocol flag:
 
-```bash
+```bash title="Terminal"
 agentcore configure -e my_agui_server.py --protocol AGUI --region us-west-2 \
   -ni -dt direct_code_deploy --runtime PYTHON_3_13
 ```
@@ -181,7 +180,7 @@ The `-ni` flag skips interactive prompts and `-dt direct_code_deploy` selects Do
 
 ### Deploy
 
-```bash
+```bash title="Terminal"
 agentcore deploy
 ```
 
@@ -195,7 +194,7 @@ The deploy process automatically handles:
 
 After completion, you get an Agent ARN:
 
-```text
+```text title="Output"
 arn:aws:bedrock-agentcore:us-west-2:123456789012:runtime/my_agui_server-BEJqTI9q7w
 ```
 
@@ -203,7 +202,7 @@ arn:aws:bedrock-agentcore:us-west-2:123456789012:runtime/my_agui_server-BEJqTI9q
 
 Invoke the deployed agent with `agentcore invoke`:
 
-```bash
+```bash title="Terminal"
 agentcore invoke '{"threadId": "test-remote-1", "runId": "run-remote-1",
   "state": {}, "messages": [{"role": "user",
   "content": "What is Amazon Bedrock AgentCore?", "id": "msg-1"}],
@@ -230,6 +229,6 @@ Two issues I hit during testing:
 
 Once you're done testing, run `agentcore destroy` to tear down the deployed resources and avoid ongoing costs:
 
-```bash
+```bash title="Terminal"
 agentcore destroy
 ```

@@ -38,7 +38,7 @@ Critically, the default is **deny-all**. Only explicitly `permit`ted requests ar
 
 AgentCore uses its own namespace for actions and resources:
 
-```text
+```text title="Cedar namespace"
 action  == AgentCore::Action::"[target_name]___[tool_name]"
 resource == AgentCore::Gateway::"[gateway ARN]"
 ```
@@ -71,7 +71,7 @@ Policy Engines running in ENFORCE mode log all evaluation decisions to CloudWatc
 
 ### Project Setup
 
-```bash
+```bash title="Terminal"
 mkdir agentcore-policy-quickstart && cd agentcore-policy-quickstart
 python3 -m venv .venv && source .venv/bin/activate
 pip install boto3 bedrock-agentcore-starter-toolkit requests
@@ -83,7 +83,7 @@ The AgentCore Starter Toolkit creates IAM roles, Cognito, Lambda, and Gateway to
 
 Note that control plane API operations use the `bedrock-agentcore-control` client (`bedrock-agentcore` is a separate runtime service).
 
-```python
+```python title="Python"
 import boto3
 from bedrock_agentcore_starter_toolkit.operations.gateway.client import GatewayClient
 from bedrock_agentcore_starter_toolkit.operations.policy.client import PolicyClient
@@ -127,7 +127,7 @@ target = gw_client.create_mcp_gateway_target(
 
 Here's a policy that allows `get_weather` only when `location` is `Tokyo`. While the Starter Toolkit's PolicyClient can also create policies, I use the boto3 client directly here to show the Cedar syntax explicitly.
 
-```python
+```python title="Python"
 cedar_statement = f"""permit(
   principal,
   action == AgentCore::Action::"my-target___get_weather",
@@ -151,7 +151,7 @@ Note: creating a `permit` without conditions (e.g., omitting the `when` clause t
 
 I sent JSON-RPC 2.0 requests to the MCP Gateway endpoint to verify policy enforcement. First, retrieve Cognito credentials that the Starter Toolkit auto-generated during Gateway creation, and obtain an OAuth token.
 
-```python
+```python title="Python"
 import requests, base64
 
 cognito = boto3.client("cognito-idp", region_name="us-west-2")
@@ -181,7 +181,7 @@ token = requests.post(token_endpoint, headers={
 
 With the token, test tool calls via MCP JSON-RPC 2.0.
 
-```python
+```python title="Python"
 headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
 
 def call_tool(name, arguments):
@@ -197,7 +197,7 @@ Results:
 
 **Test 1: `tools/list` — Policy filters tool visibility**
 
-```json
+```json title="Output: tools/list"
 {
   "tools": [
     {"name": "my-target___get_weather", "description": "Get weather for a location"}
@@ -209,7 +209,7 @@ Only `get_weather` (which has a permit policy) appears. `get_time` (no permit po
 
 **Test 2: `get_weather(location="Tokyo")` — Allowed**
 
-```json
+```json title="Output: get_weather(Tokyo) → Allowed"
 {
   "result": {
     "isError": false,
@@ -227,7 +227,7 @@ Matches the Cedar policy's `when` condition, Lambda executes and returns the res
 
 **Test 3: `get_weather(location="London")` — Denied**
 
-```json
+```json title="Output: get_weather(London) → Denied"
 {
   "error": {
     "code": -32002,
@@ -246,7 +246,7 @@ No permit policy exists for `get_time`, so it's denied by default.
 
 The `start_policy_generation` API accepts natural language and generates Cedar policies automatically.
 
-```python
+```python title="Python"
 gen = control.start_policy_generation(
     policyEngineId=engine_id,
     name="nl_generation_test",
@@ -258,7 +258,7 @@ gen = control.start_policy_generation(
 
 The generated Cedar:
 
-```text
+```text title="Generated Cedar policy"
 permit(
   principal,
   action == AgentCore::Action::"my-target___get_time",
@@ -283,7 +283,7 @@ Generated policies auto-delete after 7 days, so you need to register them via `c
 
 Delete all resources after testing:
 
-```python
+```python title="Python"
 policy_client.cleanup_policy_engine(engine_id)
 gw_client.cleanup_gateway(gateway_id)
 ```

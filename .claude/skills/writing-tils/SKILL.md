@@ -15,7 +15,7 @@ TIL writing guide: $ARGUMENTS
 ### Length & Scope
 - **Length:** 100-300 words ideal. Over 500 → convert to blog post (`/writing-posts`)
 - **Code blocks:** 1-2 ideal, max 3. 4+ = blog post territory
-- **Code block language:** Always specify (e.g. `tsx`, `bash`, `text`). Bare ` ``` ` breaks `rehype-pretty-code`
+- **Code block language:** Always specify (e.g. `tsx`, `bash`, `text`). Bare ` ``` ` breaks `rehype-pretty-code`. Add `title=` to label code blocks: language name for source code (`title="Python"`, `title="TypeScript"` etc.), `title="ターミナル"` / `title="Terminal"` for shell, `title="出力結果"` / `title="Output"` for results, or file names (`title="main.py"`)
 - Let code speak — don't repeat in prose what code already shows
 
 ### Tone

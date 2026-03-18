@@ -42,7 +42,7 @@ AG-UIはHTTPと同じポート8080を使用する。エンドポイントは `/i
 
 以下の2ファイルを用意する。
 
-```text
+```text title="プロジェクト構成"
 my_agui_project/
 ├── my_agui_server.py
 └── requirements.txt
@@ -50,7 +50,7 @@ my_agui_project/
 
 `requirements.txt` の内容は以下の通り。
 
-```text
+```text title="requirements.txt"
 fastapi
 uvicorn
 ag-ui-strands
@@ -58,7 +58,7 @@ ag-ui-strands
 
 ### 必要パッケージのインストール
 
-```bash
+```bash title="ターミナル"
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt bedrock-agentcore-starter-toolkit uv
 ```
@@ -67,8 +67,7 @@ pip install -r requirements.txt bedrock-agentcore-starter-toolkit uv
 
 ### サーバー実装
 
-```python
-# my_agui_server.py
+```python title="my_agui_server.py"
 import uvicorn
 from fastapi import FastAPI, Request
 from fastapi.responses import StreamingResponse, JSONResponse
@@ -125,13 +124,13 @@ if __name__ == "__main__":
 
 サーバーを起動し、curlでSSEリクエストを送信する。
 
-```bash
+```bash title="ターミナル"
 python my_agui_server.py
 ```
 
 AG-UIプロトコルのリクエストボディには `threadId`（会話スレッドの識別子）、`runId`（実行単位の識別子）、`messages`（ユーザーメッセージの配列）が主要なフィールドとして含まれる。`state`、`tools`、`context`、`forwardedProps` は今回空で渡している。
 
-```bash
+```bash title="ターミナル"
 curl -N -X POST http://localhost:8080/invocations \
   -H "Content-Type: application/json" \
   -H "Accept: text/event-stream" \
@@ -148,7 +147,7 @@ curl -N -X POST http://localhost:8080/invocations \
 
 レスポンスはAG-UIイベントストリームとして返ってくる。
 
-```text
+```text title="出力結果"
 data: {"type":"RUN_STARTED","threadId":"test-123","runId":"run-456"}
 data: {"type":"STATE_SNAPSHOT","snapshot":{}}
 data: {"type":"TEXT_MESSAGE_START","messageId":"7c405aa9-...","role":"assistant"}
@@ -172,7 +171,7 @@ data: {"type":"RUN_FINISHED","threadId":"test-123","runId":"run-456"}
 
 `agentcore configure` コマンドでプロトコルにAGUIを指定する。
 
-```bash
+```bash title="ターミナル"
 agentcore configure -e my_agui_server.py --protocol AGUI --region us-west-2 \
   -ni -dt direct_code_deploy --runtime PYTHON_3_13
 ```
@@ -183,7 +182,7 @@ agentcore configure -e my_agui_server.py --protocol AGUI --region us-west-2 \
 
 ### デプロイ実行
 
-```bash
+```bash title="ターミナル"
 agentcore deploy
 ```
 
@@ -197,7 +196,7 @@ agentcore deploy
 
 デプロイ完了後、Agent ARNが発行される。
 
-```text
+```text title="出力結果"
 arn:aws:bedrock-agentcore:us-west-2:123456789012:runtime/my_agui_server-BEJqTI9q7w
 ```
 
@@ -205,7 +204,7 @@ arn:aws:bedrock-agentcore:us-west-2:123456789012:runtime/my_agui_server-BEJqTI9q
 
 `agentcore invoke` でデプロイ済みエージェントを呼び出す。
 
-```bash
+```bash title="ターミナル"
 agentcore invoke '{"threadId": "test-remote-1", "runId": "run-remote-1",
   "state": {}, "messages": [{"role": "user",
   "content": "What is Amazon Bedrock AgentCore?", "id": "msg-1"}],
@@ -232,6 +231,6 @@ agentcore invoke '{"threadId": "test-remote-1", "runId": "run-remote-1",
 
 検証が終わったら `agentcore destroy` でデプロイしたリソースを削除し、不要なコストの発生を防ぐ。
 
-```bash
+```bash title="ターミナル"
 agentcore destroy
 ```

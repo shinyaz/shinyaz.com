@@ -49,8 +49,7 @@ Prerequisites:
 
 The agent code itself is minimal — `InvokeAgentRuntimeCommand` operates independently of the agent logic.
 
-```python
-# main.py
+```python title="main.py"
 import json
 import sys
 
@@ -82,7 +81,7 @@ if __name__ == "__main__":
 
 IAM role creation, S3 upload, and runtime + endpoint creation in a single sequence. If you just want the results, skip ahead to [Verification Results](#verification-results).
 
-```bash
+```bash title="Terminal"
 # Variables
 ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
 BUCKET_NAME="agentcore-test-shell-cmd-${ACCOUNT_ID}"
@@ -176,7 +175,7 @@ I tested the API across seven dimensions:
 
 All tests below use this Python base. Session IDs must be at least 33 characters, so I concatenate two UUIDs.
 
-```python
+```python title="Python"
 import boto3, sys, uuid
 
 client = boto3.client('bedrock-agentcore', region_name='us-west-2')
@@ -212,11 +211,11 @@ def run_command(command, timeout=30, session_id=None):
 
 ### 1. Basic Execution and Streaming
 
-```python
+```python title="Python"
 run_command('/bin/bash -c "echo Hello from AgentCore Runtime"')
 ```
 
-```text
+```text title="Output"
 [contentStart] Command execution started
 [stdout] Hello from AgentCore Runtime
 [contentStop] Exit code: 0, Status: COMPLETED
@@ -243,7 +242,7 @@ I ran `uname -a`, `python3 --version`, `whoami`, and `--version` checks for comm
 
 I tested whether files created in one API call are visible to subsequent calls in the same session:
 
-```python
+```python title="Python"
 # API call 1: Create file
 run_command('/bin/bash -c "mkdir -p /tmp/test_dir && echo \'file content\' > /tmp/test_dir/test.txt"')
 
@@ -258,7 +257,7 @@ The docs say "Stateless between commands" but also "Commands execute within the 
 
 A different session ID cannot access files from another session:
 
-```python
+```python title="Python"
 new_session = str(uuid.uuid4()) + "-" + str(uuid.uuid4())[:8]
 run_command(
     '/bin/bash -c "cat /tmp/test_dir/test.txt 2>&1 || echo File NOT found"',
@@ -273,7 +272,7 @@ Each session gets its own microVM with separate kernel, memory, and filesystem.
 
 Failed commands return non-zero exit codes through `contentStop`, not as API errors:
 
-```text
+```text title="Output"
 [stderr] ls: cannot access '/nonexistent_path': No such file or directory
 [contentStop] Exit code: 2, Status: COMPLETED
 ```
@@ -284,11 +283,11 @@ This makes it natural to handle test failures and build errors in normal applica
 
 A 5-second sleep with a 1-second timeout:
 
-```python
+```python title="Python"
 run_command('/bin/bash -c "echo start && sleep 5 && echo end"', timeout=1)
 ```
 
-```text
+```text title="Output"
 [stdout] start
 [contentStop] Exit code: -1, Status: TIMED_OUT
 ```
@@ -299,7 +298,7 @@ Output produced before the timeout is still streamed. Timeouts are clearly disti
 
 Three 2-second commands running concurrently in the same session via `concurrent.futures`:
 
-```text
+```text title="Output"
 cmd_A: exit=0, time=3.51s, output=A_done
 cmd_B: exit=0, time=3.51s, output=B_done
 cmd_C: exit=0, time=3.51s, output=C_done
@@ -351,7 +350,7 @@ The verification revealed runtime behaviors not obvious from the documentation a
 
 Delete resources in reverse dependency order: endpoint → runtime → S3 → IAM.
 
-```bash
+```bash title="Terminal"
 # Delete endpoint
 aws bedrock-agentcore-control delete-agent-runtime-endpoint \
   --region "$REGION" \

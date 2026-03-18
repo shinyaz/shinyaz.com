@@ -18,7 +18,7 @@ This post shares the results of testing three methods for installing and using n
 
 I started by surveying the environment inside a session.
 
-```text
+```text title="Output"
 Python 3.12.12
 pip 26.0.1 from /opt/amazon/genesis1p-tools/venv/lib64/python3.12/site-packages/pip
 aws-cli/2.32.22
@@ -57,7 +57,7 @@ If you only want the results, skip to [the next section](#verification-three-ins
 
 Create an S3 bucket, IAM role, and Code Interpreter in sequence.
 
-```bash
+```bash title="Terminal"
 ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
 BUCKET_NAME="agentcore-ci-lib-test-${ACCOUNT_ID}"
 REGION="us-east-1"
@@ -98,7 +98,7 @@ aws iam put-role-policy \
 
 Code Interpreter creation uses the control plane (`bedrock-agentcore-control`), while session operations use the data plane (`bedrock-agentcore`). This separation is easy to miss.
 
-```python
+```python title="Python"
 import boto3, time
 
 REGION = "us-east-1"
@@ -129,7 +129,7 @@ Gotchas:
 
 Common functions used in all tests below. The `name` parameter switches between `executeCode` (run Python) and `executeCommand` (run shell). The `language` parameter must be lowercase (`"python"`, `"javascript"`, `"typescript"`).
 
-```python
+```python title="Python"
 data_client = boto3.client("bedrock-agentcore", region_name=REGION)
 
 def start_session():
@@ -169,7 +169,7 @@ I tested with `cowsay`, a package not included in the pre-installed set.
 
 The simplest approach. With `networkMode: PUBLIC`, the sandbox has direct access to PyPI.
 
-```python
+```python title="Python"
 session_id = start_session()
 
 # Confirm cowsay is not pre-installed
@@ -186,7 +186,7 @@ except ImportError:
 run_cmd(session_id, "pip install cowsay")
 ```
 
-```text
+```text title="Output"
 Collecting cowsay
   Downloading cowsay-6.1-py3-none-any.whl.metadata (5.6 kB)
 Downloading cowsay-6.1-py3-none-any.whl (25 kB)
@@ -194,12 +194,12 @@ Installing collected packages: cowsay
 Successfully installed cowsay-6.1
 ```
 
-```python
+```python title="Python"
 run_code(session_id, 'import cowsay; cowsay.cow("Hello from AgentCore Code Interpreter!")')
 stop_session(session_id)
 ```
 
-```text
+```text title="Output"
 ______________________________________
 | Hello from AgentCore Code Interpreter! |
   ======================================
@@ -218,42 +218,41 @@ ______________________________________
 
 The robust approach for production. Pre-stage wheel files in S3, then download and install within the session.
 
-```bash
-# Preparation (local or CI)
+```bash title="Terminal (preparation)"
 pip download cowsay --dest ./wheels/ --only-binary=:all:
 aws s3 sync ./wheels/ s3://${BUCKET_NAME}/cowsay_wheels/
 ```
 
-```python
+```python title="Python"
 session_id = start_session()
 
 # Download wheels from S3
 run_cmd(session_id, f"mkdir -p /tmp/cowsay_s3 && aws s3 cp s3://{BUCKET_NAME}/cowsay_wheels/ /tmp/cowsay_s3/ --recursive")
 ```
 
-```text
+```text title="Output"
 download: s3://.../cowsay_wheels/cowsay-6.1-py3-none-any.whl
   to ../../../../tmp/cowsay_s3/cowsay-6.1-py3-none-any.whl
 ```
 
-```python
+```python title="Python"
 # Offline install (no PyPI access needed)
 run_cmd(session_id, "pip install --no-index --find-links /tmp/cowsay_s3/ cowsay")
 ```
 
-```text
+```text title="Output"
 Looking in links: /tmp/cowsay_s3/
 Processing /tmp/cowsay_s3/cowsay-6.1-py3-none-any.whl
 Installing collected packages: cowsay
 Successfully installed cowsay-6.1
 ```
 
-```python
+```python title="Python"
 run_code(session_id, 'import cowsay; cowsay.tux("Installed from S3 wheels!")')
 stop_session(session_id)
 ```
 
-```text
+```text title="Output"
 _________________________
 | Installed from S3 wheels! |
   =========================
@@ -277,13 +276,12 @@ Extract a wheel as a ZIP and add it to `sys.path` without using pip. The same S3
 
 For this test, I staged httpx and its dependency wheels in S3 (separately from the cowsay test) and targeted the pure Python package `h11`.
 
-```bash
-# Preparation (local or CI)
+```bash title="Terminal (preparation)"
 pip download httpx --dest ./httpx_wheels/ --only-binary=:all:
 aws s3 sync ./httpx_wheels/ s3://${BUCKET_NAME}/httpx_wheels/
 ```
 
-```python
+```python title="Python"
 session_id = start_session()
 
 # Download wheels from S3
@@ -311,7 +309,7 @@ print(f"h11 version: {h11.__version__}")
 stop_session(session_id)
 ```
 
-```text
+```text title="Output"
 h11 version: 0.16.0
 ```
 
@@ -321,7 +319,7 @@ h11 is pre-installed, but this test confirmed that the extracted module takes pr
 
 Do pip-installed packages survive across sessions?
 
-```python
+```python title="Python"
 # Session 1: Install cowsay → verify
 session1 = start_session()
 run_cmd(session1, "pip install cowsay")
@@ -340,7 +338,7 @@ except ImportError:
 stop_session(session2)
 ```
 
-```text
+```text title="Output"
 cowsay in new session: NO (not persisted)
 ```
 
@@ -356,13 +354,13 @@ Within a single session, however, the filesystem is shared across API calls — 
 
 ## Cleanup
 
-Delete resources in reverse dependency order.
+Delete resources in reverse dependency order. Code Interpreter deletion uses the control plane client (`ci_id` is the value from the setup step).
 
-```bash
-# Delete Code Interpreter
-aws bedrock-agentcore-control delete-code-interpreter \
-  --code-interpreter-id "$CI_ID" --region us-east-1
+```python title="Python"
+control.delete_code_interpreter(codeInterpreterId=ci_id)
+```
 
+```bash title="Terminal"
 # Delete S3 bucket
 aws s3 rb "s3://${BUCKET_NAME}" --force --region us-east-1
 
