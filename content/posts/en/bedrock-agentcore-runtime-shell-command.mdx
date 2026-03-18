@@ -324,6 +324,20 @@ The [documentation's best practices](https://docs.aws.amazon.com/bedrock-agentco
 - **Short timeouts with streaming output work well** — The best practices suggest 5 minutes for test suites and 30 seconds for git push. Since partial output streams before timeout (verified), setting shorter timeouts and processing output incrementally to detect failures early is a viable strategy.
 - **`exitCode` checking is essential — pay attention to the values** — The best practices recommend checking `exitCode`. The specific values found in testing: command-specific exit codes on failure (e.g., `2` for `ls` not found), and `-1` for timeout. Build this distinction into your error handling.
 
+### Code Interpreter vs InvokeAgentRuntimeCommand
+
+AgentCore Runtime also offers a [Code Interpreter](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/code-interpreter-tool.html). Despite the similar naming, the two serve distinct roles.
+
+| Aspect | InvokeAgentRuntimeCommand | Code Interpreter |
+|---|---|---|
+| Purpose | Deterministic ops: tests, builds, git | Data analysis, computation, visualization |
+| Who decides the command | Caller specifies the exact command | AI agent writes and executes code |
+| Execution environment | Same container as the agent | Isolated sandbox container |
+| Supported languages | Any shell command (bash) | Python, JavaScript, TypeScript |
+| Max execution time | 1 hour | Up to 8 hours |
+
+The decision comes down to **who decides what to run** and **where it runs**. Use `InvokeAgentRuntimeCommand` when the command is known upfront (`npm test`, git operations). Use Code Interpreter when the agent needs to write code based on its reasoning to perform calculations or data processing.
+
 ## Takeaways
 
 The verification revealed runtime behaviors not obvious from the documentation alone.

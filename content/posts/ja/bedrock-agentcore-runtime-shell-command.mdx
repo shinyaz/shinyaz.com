@@ -344,6 +344,20 @@ Total wall time: 3.51s
 - **タイムアウト設定は「短めに設定して部分出力で判断」が有効** — ベストプラクティスではテストスイートに5分、git pushに30秒が例示されている。検証でタイムアウト前の部分出力がストリーミングされることを確認したため、短めのタイムアウトを設定し、出力を逐次処理して早期に失敗を検出する戦略が実際に機能する。
 - **`exitCode`のチェックは必須、ただし値の意味に注意** — ベストプラクティスでは`exitCode`の確認が推奨されている。検証で判明した具体的な値として、コマンド失敗時はコマンド固有のexit code（例: `ls`の失敗は`2`）、タイムアウト時は`-1`が返される。この区別をエラーハンドリングに組み込むべきだ。
 
+### Code Interpreterとの使い分け
+
+AgentCore Runtimeには`InvokeAgentRuntimeCommand`とは別に[Code Interpreter](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/code-interpreter-tool.html)も提供されている。名前が似ているが、役割は明確に異なる。
+
+| 観点 | InvokeAgentRuntimeCommand | Code Interpreter |
+|---|---|---|
+| 目的 | テスト・ビルド・gitなど決定論的操作 | データ分析・数値計算・可視化 |
+| コマンドの決定者 | 呼び出し元が具体的なコマンドを指定 | AIエージェントがコードを自ら書いて実行 |
+| 実行環境 | エージェントと同じコンテナ内 | 隔離されたサンドボックスコンテナ |
+| 対応言語 | 任意のシェルコマンド（bash） | Python、JavaScript、TypeScript |
+| 最大実行時間 | 1時間 | 最大8時間 |
+
+使い分けの判断基準は「**誰がコマンドを決めるか**」と「**どこで実行するか**」の2点だ。`npm test`やgit操作のように実行内容が事前に決まっている処理は`InvokeAgentRuntimeCommand`、エージェントが推論結果に基づいてコードを書き計算やデータ処理を行う場合はCode Interpreterが適している。
+
 ## まとめ
 
 検証を通じて、ドキュメントだけでは読み取れない実挙動が明らかになった。
