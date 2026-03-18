@@ -1,0 +1,37 @@
+---
+title: "AgentCore boto3 clients are split between control plane and data plane"
+description: "Mixing up bedrock-agentcore-control (create/delete) and bedrock-agentcore (session ops/code execution) gives you an AttributeError."
+date: "2026-03-18"
+published: true
+tags: ["agentcore", "bedrock", "aws"]
+---
+
+Tried calling `create_code_interpreter` on the `bedrock-agentcore` client and got an `AttributeError`.
+
+```python
+client = boto3.client("bedrock-agentcore", region_name="us-east-1")
+client.create_code_interpreter(...)  # ← fails
+```
+
+```text
+AttributeError: 'BedrockAgentCore' object has no attribute 'create_code_interpreter'.
+Did you mean: 'invoke_code_interpreter'?
+```
+
+AgentCore uses separate boto3 clients for the **control plane** and **data plane**.
+
+```python
+# Control plane: resource CRUD
+control = boto3.client("bedrock-agentcore-control", region_name="us-east-1")
+control.create_code_interpreter(...)   # ✓
+control.delete_code_interpreter(...)   # ✓
+control.create_agent_runtime(...)      # ✓
+
+# Data plane: runtime operations
+data = boto3.client("bedrock-agentcore", region_name="us-east-1")
+data.invoke_code_interpreter(...)          # ✓
+data.start_code_interpreter_session(...)   # ✓
+data.invoke_agent_runtime(...)             # ✓
+```
+
+This split applies to both Code Interpreter and Agent Runtime. The `Did you mean` in the error helpfully suggests a data plane method — which is actually a clue that you're on the wrong client.

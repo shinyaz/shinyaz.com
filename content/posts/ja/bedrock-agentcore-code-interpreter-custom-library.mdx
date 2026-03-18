@@ -1,0 +1,372 @@
+---
+title: "Bedrock AgentCore Code Interpreterでプリインストールにないライブラリをインストールして使う"
+description: "AgentCore Code InterpreterのS3インテグレーションとPUBLICモードを検証。pip install、S3 wheel経由のオフラインインストール、sys.path直接importの3手法とクロスセッション永続性の実挙動を共有する。"
+date: "2026-03-18"
+published: true
+featured: false
+categories: [ai-agents]
+tags: ["bedrock", "agentcore", "code-interpreter", "ai-agents"]
+---
+
+## はじめに
+
+Amazon Bedrock AgentCore の [Code Interpreter](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/code-interpreter-tool.html) は、エージェントがデータ分析・計算・可視化のためにコードを生成・実行できるサンドボックス環境を提供する。200以上のPythonパッケージがプリインストールされているが、業務固有のライブラリを使いたい場面は当然ある。
+
+本記事では、プリインストールにないライブラリを Code Interpreter セッション内でインストール・実行する3つの手法を検証した結果を共有する。結論から言うと、**PyPI からの直接 pip install と S3 wheel 経由のオフラインインストールの両方が動作する**。ただしセッション間での永続化はない。
+
+## サンドボックス環境の実態
+
+まずセッション内の環境を調査した。
+
+```text
+Python 3.12.12
+pip 26.0.1 from /opt/amazon/genesis1p-tools/venv/lib64/python3.12/site-packages/pip
+aws-cli/2.32.22
+genesis1ptools
+Linux localhost 6.1.158-15.288.amzn2023.aarch64
+```
+
+[前回の記事](/ja/blog/2026/03/17/bedrock-agentcore-runtime-shell-command)で検証した AgentCore Runtime のコード構成では pip も AWS CLI も未インストールだったが、**Code Interpreter のサンドボックスには pip、AWS CLI、200以上のPythonパッケージがプリインストールされている**。これは大きな違いだ。
+
+### プリインストールパッケージ（抜粋）
+
+`pip list` の出力から主要なものを抜粋する。
+
+| カテゴリ | パッケージ |
+|---|---|
+| データ分析 | pandas 2.3.1, numpy 1.26.4, polars 1.38.1, duckdb 1.3.2 |
+| ML/DL | scikit-learn 1.5.0, torch 2.3.0, xgboost 2.0.3, onnxruntime 1.24.1 |
+| 可視化 | matplotlib 3.9.0, plotly 5.22.0, seaborn 0.13.2, bokeh 2.4.3 |
+| NLP | spacy 3.7.4, nltk 3.9.1, textblob 0.18.0.post0 |
+| HTTP | requests 2.32.4, httpx 0.28.1, openai 1.33.0 |
+| Web Framework | fastapi 0.116.1, Flask 3.0.3, Django 5.1.12 |
+| PDF/Office | pypdf 6.2.0, pdfplumber 0.11.0, python-docx 1.1.2, openpyxl 3.1.3 |
+| AWS | boto3 1.40.30, botocore 1.40.76, s3transfer 0.14.0 |
+
+PyPI への疎通も確認でき、`curl https://pypi.org/simple/` は HTTP 200 を返した。
+
+## 検証環境のセットアップ
+
+検証結果だけ知りたい場合は[次のセクション](#検証-3つのインストール手法)まで読み飛ばしてよい。
+
+- boto3 1.42.70
+- リージョン: us-east-1
+- Code Interpreter: カスタム作成（`executionRoleArn` でS3アクセス権を付与、`networkMode: PUBLIC`）
+
+### リソース作成
+
+S3 バケット、IAM ロール、Code Interpreter を順に作成する。
+
+```bash
+ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+BUCKET_NAME="agentcore-ci-lib-test-${ACCOUNT_ID}"
+REGION="us-east-1"
+
+# S3 バケット作成
+aws s3 mb "s3://${BUCKET_NAME}" --region "$REGION"
+
+# IAM ロール作成（AgentCore 信頼ポリシー）
+aws iam create-role \
+  --role-name AgentCoreCITestRole \
+  --assume-role-policy-document '{
+    "Version": "2012-10-17",
+    "Statement": [{
+      "Effect": "Allow",
+      "Principal": {"Service": "bedrock-agentcore.amazonaws.com"},
+      "Action": "sts:AssumeRole"
+    }]
+  }'
+
+# S3 アクセスポリシーを付与
+aws iam put-role-policy \
+  --role-name AgentCoreCITestRole \
+  --policy-name S3Access \
+  --policy-document "{
+    \"Version\": \"2012-10-17\",
+    \"Statement\": [{
+      \"Effect\": \"Allow\",
+      \"Action\": [\"s3:GetObject\", \"s3:PutObject\", \"s3:ListBucket\"],
+      \"Resource\": [
+        \"arn:aws:s3:::${BUCKET_NAME}\",
+        \"arn:aws:s3:::${BUCKET_NAME}/*\"
+      ]
+    }]
+  }"
+```
+
+### Code Interpreter の作成
+
+Code Interpreter はコントロールプレーン（`bedrock-agentcore-control`）で作成し、セッション操作はデータプレーン（`bedrock-agentcore`）で行う。この分離は見落としやすい。
+
+```python
+import boto3, time
+
+REGION = "us-east-1"
+ACCOUNT_ID = "123456789012"  # 自分のアカウントIDに置き換え
+ROLE_ARN = f"arn:aws:iam::{ACCOUNT_ID}:role/AgentCoreCITestRole"
+
+control = boto3.client("bedrock-agentcore-control", region_name=REGION)
+response = control.create_code_interpreter(
+    name="ciLibInstallTest",
+    executionRoleArn=ROLE_ARN,
+    networkConfiguration={"networkMode": "PUBLIC"},
+)
+ci_id = response["codeInterpreterId"]
+
+# READY になるまでポーリング
+while True:
+    status = control.get_code_interpreter(codeInterpreterId=ci_id)["status"]
+    if status == "READY":
+        break
+    time.sleep(5)
+```
+
+注意点:
+- 名前は `[a-zA-Z][a-zA-Z0-9_]{0,47}` のパターン制約がある。**ハイフンは使えない**（`ci-test` → NG、`ciTest` → OK）
+- 準備完了ステータスは AgentCore Runtime の `ACTIVE` ではなく **`READY`**
+
+### コード実行のヘルパー
+
+以降の検証で使う共通関数を定義する。`invoke_code_interpreter` の `name` パラメータで `executeCode`（コード実行）と `executeCommand`（シェルコマンド実行）を切り替える。`language` は小文字（`"python"`, `"javascript"`, `"typescript"`）で指定する。
+
+```python
+data_client = boto3.client("bedrock-agentcore", region_name=REGION)
+
+def start_session():
+    return data_client.start_code_interpreter_session(
+        codeInterpreterIdentifier=ci_id)["sessionId"]
+
+def run_code(session_id, code):
+    resp = data_client.invoke_code_interpreter(
+        codeInterpreterIdentifier=ci_id, sessionId=session_id,
+        name="executeCode", arguments={"code": code, "language": "python"})
+    for event in resp.get("stream", []):
+        if "result" in event:
+            sc = event["result"].get("structuredContent", {})
+            if sc.get("stdout"): print(sc["stdout"])
+            if sc.get("stderr"): print(sc["stderr"])
+
+def run_cmd(session_id, command):
+    resp = data_client.invoke_code_interpreter(
+        codeInterpreterIdentifier=ci_id, sessionId=session_id,
+        name="executeCommand", arguments={"command": command})
+    for event in resp.get("stream", []):
+        if "result" in event:
+            sc = event["result"].get("structuredContent", {})
+            if sc.get("stdout"): print(sc["stdout"])
+            if sc.get("stderr"): print(sc["stderr"])
+
+def stop_session(session_id):
+    data_client.stop_code_interpreter_session(
+        codeInterpreterIdentifier=ci_id, sessionId=session_id)
+```
+
+## 検証: 3つのインストール手法
+
+プリインストールに含まれない `cowsay` パッケージで検証した。
+
+### 手法1: PUBLIC モードで PyPI から直接 pip install
+
+最もシンプルな方法。`networkMode: PUBLIC` で作成した Code Interpreter なら、PyPI への直接アクセスが可能だ。
+
+```python
+session_id = start_session()
+
+# cowsay がプリインストールにないことを確認
+run_code(session_id, """
+try:
+    import cowsay
+    print(f"cowsay installed: {cowsay.__version__}")
+except ImportError:
+    print("cowsay: NOT installed")
+""")
+# → cowsay: NOT installed
+
+# PyPI から直接インストール
+run_cmd(session_id, "pip install cowsay")
+```
+
+```text
+Collecting cowsay
+  Downloading cowsay-6.1-py3-none-any.whl.metadata (5.6 kB)
+Downloading cowsay-6.1-py3-none-any.whl (25 kB)
+Installing collected packages: cowsay
+Successfully installed cowsay-6.1
+```
+
+```python
+run_code(session_id, 'import cowsay; cowsay.cow("Hello from AgentCore Code Interpreter!")')
+stop_session(session_id)
+```
+
+```text
+______________________________________
+| Hello from AgentCore Code Interpreter! |
+  ======================================
+                                      \
+                                       \
+                                         ^__^
+                                         (oo)\_______
+                                         (__)\       )\/\
+                                             ||----w |
+                                             ||     ||
+```
+
+**手軽さは最高だが、PyPI への依存とバージョン固定の難しさがある。**
+
+### 手法2: S3 から wheel をダウンロードしてオフラインインストール
+
+本番環境向けの堅実な方法。事前に wheel ファイルを S3 に配置し、セッション内でダウンロードしてインストールする。
+
+```bash
+# 事前準備（ローカルまたはCI）
+pip download cowsay --dest ./wheels/ --only-binary=:all:
+aws s3 sync ./wheels/ s3://${BUCKET_NAME}/cowsay_wheels/
+```
+
+```python
+session_id = start_session()
+
+# S3 から wheel をダウンロード
+run_cmd(session_id, f"mkdir -p /tmp/cowsay_s3 && aws s3 cp s3://{BUCKET_NAME}/cowsay_wheels/ /tmp/cowsay_s3/ --recursive")
+```
+
+```text
+download: s3://.../cowsay_wheels/cowsay-6.1-py3-none-any.whl
+  to ../../../../tmp/cowsay_s3/cowsay-6.1-py3-none-any.whl
+```
+
+```python
+# オフラインインストール（PyPI へのアクセスなし）
+run_cmd(session_id, "pip install --no-index --find-links /tmp/cowsay_s3/ cowsay")
+```
+
+```text
+Looking in links: /tmp/cowsay_s3/
+Processing /tmp/cowsay_s3/cowsay-6.1-py3-none-any.whl
+Installing collected packages: cowsay
+Successfully installed cowsay-6.1
+```
+
+```python
+run_code(session_id, 'import cowsay; cowsay.tux("Installed from S3 wheels!")')
+stop_session(session_id)
+```
+
+```text
+_________________________
+| Installed from S3 wheels! |
+  =========================
+                              \
+                               \
+                                \
+                                 .--.
+                                |o_o |
+                                |:_/ |
+                               //   \ \
+                              (|     | )
+                             /'\_   _/`\
+                             \___)=(___/
+```
+
+`pip install --no-index` はネットワークアクセスを必要としないため、**SANDBOX モードでも S3 からのダウンロードと組み合わせれば動作すると考えられる**（本検証は PUBLIC モードで実施）。バージョンを完全に固定できる点も本番向けだ。
+
+### 手法3: sys.path に直接追加（pip 不要）
+
+pip を使わず、wheel を ZIP 展開して `sys.path` に追加する方法。手法2と同じ要領で S3 から wheel をダウンロードするが、`pip install` の代わりに Python の標準ライブラリだけでインストールする。
+
+この検証では、手法1・2とは別に httpx とその依存パッケージの wheel を S3 に配置し、その中の pure Python パッケージ `h11` を対象にした。事前準備は以下の通り。
+
+```bash
+# 事前準備（ローカルまたはCI）
+pip download httpx --dest ./httpx_wheels/ --only-binary=:all:
+aws s3 sync ./httpx_wheels/ s3://${BUCKET_NAME}/httpx_wheels/
+```
+
+```python
+session_id = start_session()
+
+# S3 から wheel をダウンロード
+run_cmd(session_id, f"mkdir -p /tmp/wheels && aws s3 cp s3://{BUCKET_NAME}/httpx_wheels/ /tmp/wheels/ --recursive")
+
+# pip を使わず wheel を展開して直接 import
+run_code(session_id, """
+import sys, os, zipfile, importlib
+
+whl_path = "/tmp/wheels/h11-0.16.0-py3-none-any.whl"
+extract_dir = "/tmp/lib_direct"
+os.makedirs(extract_dir, exist_ok=True)
+
+with zipfile.ZipFile(whl_path, 'r') as z:
+    z.extractall(extract_dir)
+
+sys.path.insert(0, extract_dir)
+
+# プリインストール版ではなく展開版を確実にロード
+if 'h11' in sys.modules:
+    del sys.modules['h11']
+h11 = importlib.import_module('h11')
+print(f"h11 version: {h11.__version__}")
+""")
+stop_session(session_id)
+```
+
+```text
+h11 version: 0.16.0
+```
+
+h11 はプリインストールに含まれるパッケージだが、`sys.path` の優先順位により展開先のモジュールが先にロードされることを確認した。**pure Python パッケージ限定だが、pip が何らかの理由で使えない場合のフォールバックとして有効。** C拡張を含むパッケージには使えない。
+
+## クロスセッション永続性
+
+pip install したパッケージは別セッションに引き継がれるのか。
+
+```python
+# セッション1: cowsay をインストール → 動作確認
+session1 = start_session()
+run_cmd(session1, "pip install cowsay")
+run_code(session1, "import cowsay; print('Session 1: OK')")
+stop_session(session1)
+
+# セッション2: 新規セッションで import を試みる
+session2 = start_session()
+run_code(session2, """
+try:
+    import cowsay
+    print(f"cowsay available: YES")
+except ImportError:
+    print("cowsay available: NO (not persisted)")
+""")
+stop_session(session2)
+```
+
+```text
+cowsay in new session: NO (not persisted)
+```
+
+**pip install したパッケージはセッション間で永続化されない。** 別の検証で `/tmp` に作成したファイルも新しいセッションからは見えないことを確認した。各セッションは独立したサンドボックスで実行されるため、セッション開始時に毎回インストールが必要だ。
+
+一方、同一セッション内では API コール間でファイルシステムが共有される。手法2・3で S3 からダウンロードしたファイルを後続の API コールで参照できたことがその証拠だ。このセッション内共有・セッション間隔離のモデルは [InvokeAgentRuntimeCommand の検証結果](/ja/blog/2026/03/17/bedrock-agentcore-runtime-shell-command)と一致する。
+
+## まとめ
+
+- **Code Interpreter は pip + AWS CLI 付きのリッチなサンドボックス** — AgentCore Runtime のコード構成とは異なり、200以上のパッケージ、pip、AWS CLI がプリインストールされている。カスタムライブラリの追加インストールも容易だ。
+- **S3 wheel + オフラインインストールが本番向けの選択肢** — `pip install --no-index` はネットワーク不要なので SANDBOX モードとの組み合わせも期待できる。バージョン固定と再現性を両立できる。PUBLIC モードでの直接 pip install は開発時の手軽さに優れる。
+- **セッション間でのライブラリ永続化はない** — 各セッションは独立したサンドボックスなので、セッション開始時にインストールスクリプトを実行するパターンを組み込む必要がある。
+
+## クリーンアップ
+
+リソースは作成の逆順で削除する。
+
+```bash
+# Code Interpreter 削除
+aws bedrock-agentcore-control delete-code-interpreter \
+  --code-interpreter-id "$CI_ID" --region us-east-1
+
+# S3 バケット削除
+aws s3 rb "s3://${BUCKET_NAME}" --force --region us-east-1
+
+# IAM ロール削除（ポリシーを先に外す）
+aws iam delete-role-policy --role-name AgentCoreCITestRole --policy-name S3Access
+aws iam delete-role --role-name AgentCoreCITestRole
+```

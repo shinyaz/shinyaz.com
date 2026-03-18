@@ -1,0 +1,37 @@
+---
+title: "AgentCore の boto3 クライアントはコントロールプレーンとデータプレーンで分かれている"
+description: "bedrock-agentcore-control（作成・削除）と bedrock-agentcore（セッション操作・コード実行）を混同すると AttributeError になる。"
+date: "2026-03-18"
+published: true
+tags: ["agentcore", "bedrock", "aws"]
+---
+
+AgentCore の Code Interpreter を boto3 で操作しようとして、`create_code_interpreter` を `bedrock-agentcore` クライアントで呼んだら `AttributeError` が返ってきた。
+
+```python
+client = boto3.client("bedrock-agentcore", region_name="us-east-1")
+client.create_code_interpreter(...)  # ← これが失敗する
+```
+
+```text
+AttributeError: 'BedrockAgentCore' object has no attribute 'create_code_interpreter'.
+Did you mean: 'invoke_code_interpreter'?
+```
+
+原因は、AgentCore が**コントロールプレーン**と**データプレーン**で別のクライアントを使う設計になっていること。
+
+```python
+# コントロールプレーン: リソースの CRUD
+control = boto3.client("bedrock-agentcore-control", region_name="us-east-1")
+control.create_code_interpreter(...)   # ✓
+control.delete_code_interpreter(...)   # ✓
+control.create_agent_runtime(...)      # ✓
+
+# データプレーン: 実行時の操作
+data = boto3.client("bedrock-agentcore", region_name="us-east-1")
+data.invoke_code_interpreter(...)          # ✓
+data.start_code_interpreter_session(...)   # ✓
+data.invoke_agent_runtime(...)             # ✓
+```
+
+この分離は Code Interpreter だけでなく Agent Runtime にも共通する。エラーメッセージの `Did you mean` が親切にデータプレーン側のメソッドを示してくれるので、「そっちじゃない」と気づくヒントにはなる。
