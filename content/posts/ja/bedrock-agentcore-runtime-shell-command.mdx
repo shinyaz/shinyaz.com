@@ -352,3 +352,29 @@ Total wall time: 3.51s
 - **タイムアウトはexit code -1で明示的に区別される** — コマンド失敗（非ゼロexit code + COMPLETED）とタイムアウト（exit code -1 + TIMED_OUT）が二軸で分離されており、部分出力も正しくストリーミングされる。
 - **並行実行は実測で確認済み** — ドキュメントには「コマンド実行がエージェント呼び出しをブロックしない」とあるが、検証では同一セッションへの複数コマンドも並行実行されることを確認した。3コマンドで合計wall timeが1コマンド分に収まった。
 - **コード構成のコンテナではnode・pip・AWS CLIが使えない** — git（2.50.1）とcurl（8.17.0）はプリインストールされているが、node、pip、AWS CLIは含まれなかった。ツールチェーンが必要な場合はコンテナ構成を選択すべきだ。
+
+## クリーンアップ
+
+検証後は以下の順序でリソースを削除する。エンドポイント → ランタイム → S3 → IAMの順が依存関係上安全だ。
+
+```bash
+# エンドポイント削除
+aws bedrock-agentcore-control delete-agent-runtime-endpoint \
+  --region "$REGION" \
+  --agent-runtime-id "$RUNTIME_ID" \
+  --endpoint-name shell_cmd_test_endpoint
+
+# ランタイム削除
+aws bedrock-agentcore-control delete-agent-runtime \
+  --region "$REGION" \
+  --agent-runtime-id "$RUNTIME_ID"
+
+# S3バケット削除（中身ごと）
+aws s3 rb "s3://${BUCKET_NAME}" --force --region "$REGION"
+
+# IAMロール削除（ポリシーを先に外す）
+aws iam delete-role-policy --role-name AgentCoreRuntimeTestRole --policy-name S3Access
+aws iam detach-role-policy --role-name AgentCoreRuntimeTestRole \
+  --policy-arn arn:aws:iam::aws:policy/AmazonBedrockFullAccess
+aws iam delete-role --role-name AgentCoreRuntimeTestRole
+```

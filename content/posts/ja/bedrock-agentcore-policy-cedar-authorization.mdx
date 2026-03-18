@@ -275,6 +275,13 @@ Action名やResource ARNはGatewayのスキーマから自動補完され、`con
 
 生成されたポリシーは7日後に自動削除されるため、採用する場合は`create_policy`の`definition`に`policyGeneration`を指定して登録する必要がある。
 
+## まとめ
+
+- **エージェントコード外のセキュリティ** — ポリシーがGateway層で強制されるため、エージェント実装のバグや脆弱性に左右されない決定論的な制御が実現できる。`tools/list`の段階でフィルタされる徹底ぶりだ
+- **自動推論のセーフガード** — 条件なしの全許可ポリシーは`Overly Permissive`として自動的に拒否される。ポリシー定義の段階で安全性を担保する仕組みが組み込まれている
+- **自然言語とCedarの二層構造** — 自然言語でドラフトしCedarでファインチューンするワークフローが、セキュリティチームと開発チームの協働を促進する
+- **APIの二重構造に注意** — `bedrock-agentcore-control`がコントロールプレーン、`bedrock-agentcore`がランタイムと分かれている。命名規則もGatewayはハイフン、Policy Engineはアンダースコアのみ許可と異なり、現時点ではやや荒削りな部分もある
+
 ## クリーンアップ
 
 検証後は以下でリソースを削除できる。
@@ -283,10 +290,3 @@ Action名やResource ARNはGatewayのスキーマから自動補完され、`con
 policy_client.cleanup_policy_engine(engine_id)
 gw_client.cleanup_gateway(gateway_id)
 ```
-
-## まとめ
-
-- **エージェントコード外のセキュリティ** — ポリシーがGateway層で強制されるため、エージェント実装のバグや脆弱性に左右されない決定論的な制御が実現できる。`tools/list`の段階でフィルタされる徹底ぶりだ
-- **自動推論のセーフガード** — 条件なしの全許可ポリシーは`Overly Permissive`として自動的に拒否される。ポリシー定義の段階で安全性を担保する仕組みが組み込まれている
-- **自然言語とCedarの二層構造** — 自然言語でドラフトしCedarでファインチューンするワークフローが、セキュリティチームと開発チームの協働を促進する
-- **APIの二重構造に注意** — `bedrock-agentcore-control`がコントロールプレーン、`bedrock-agentcore`がランタイムと分かれている。命名規則もGatewayはハイフン、Policy Engineはアンダースコアのみ許可と異なり、現時点ではやや荒削りな部分もある

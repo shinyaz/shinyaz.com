@@ -272,6 +272,13 @@ Action names and Resource ARNs are auto-populated from the Gateway's schema. The
 
 Generated policies auto-delete after 7 days, so you need to register them via `create_policy` with a `policyGeneration` definition to keep them.
 
+## Takeaways
+
+- **Security outside agent code** — Policies enforced at the Gateway layer provide deterministic control unaffected by agent bugs. Even `tools/list` is filtered, a thorough approach
+- **Automated reasoning safeguard** — Unconditional permit policies are automatically rejected as "Overly Permissive." Safety is built into the policy definition stage
+- **Two-tier authoring** — Draft in natural language, fine-tune in Cedar. A workflow that bridges security and development teams
+- **Watch the API split** — `bedrock-agentcore-control` is the control plane, `bedrock-agentcore` is runtime. Naming conventions also differ: Gateways use hyphens, Policy Engines use underscores only. Some rough edges remain at this stage
+
 ## Cleanup
 
 Delete all resources after testing:
@@ -280,10 +287,3 @@ Delete all resources after testing:
 policy_client.cleanup_policy_engine(engine_id)
 gw_client.cleanup_gateway(gateway_id)
 ```
-
-## Takeaways
-
-- **Security outside agent code** — Policies enforced at the Gateway layer provide deterministic control unaffected by agent bugs. Even `tools/list` is filtered, a thorough approach
-- **Automated reasoning safeguard** — Unconditional permit policies are automatically rejected as "Overly Permissive." Safety is built into the policy definition stage
-- **Two-tier authoring** — Draft in natural language, fine-tune in Cedar. A workflow that bridges security and development teams
-- **Watch the API split** — `bedrock-agentcore-control` is the control plane, `bedrock-agentcore` is runtime. Naming conventions also differ: Gateways use hyphens, Policy Engines use underscores only. Some rough edges remain at this stage

@@ -332,3 +332,29 @@ The verification revealed runtime behaviors not obvious from the documentation a
 - **Timeout is explicitly signaled with exit code -1** — Command failure (non-zero exit code + COMPLETED) and timeout (exit code -1 + TIMED_OUT) are cleanly separated on two axes, and partial output is still streamed before timeout.
 - **Concurrent execution is verified** — The docs state that command execution doesn't block agent invocations, but testing confirmed that multiple commands in the same session also run in parallel. Three commands completed in the wall time of one.
 - **Code configuration containers lack node, pip, and AWS CLI** — git (2.50.1) and curl (8.17.0) are pre-installed, but node, pip, and AWS CLI were not available. Choose container configuration when your agent needs a full toolchain.
+
+## Cleanup
+
+Delete resources in reverse dependency order: endpoint → runtime → S3 → IAM.
+
+```bash
+# Delete endpoint
+aws bedrock-agentcore-control delete-agent-runtime-endpoint \
+  --region "$REGION" \
+  --agent-runtime-id "$RUNTIME_ID" \
+  --endpoint-name shell_cmd_test_endpoint
+
+# Delete runtime
+aws bedrock-agentcore-control delete-agent-runtime \
+  --region "$REGION" \
+  --agent-runtime-id "$RUNTIME_ID"
+
+# Delete S3 bucket and contents
+aws s3 rb "s3://${BUCKET_NAME}" --force --region "$REGION"
+
+# Delete IAM role (detach policies first)
+aws iam delete-role-policy --role-name AgentCoreRuntimeTestRole --policy-name S3Access
+aws iam detach-role-policy --role-name AgentCoreRuntimeTestRole \
+  --policy-arn arn:aws:iam::aws:policy/AmazonBedrockFullAccess
+aws iam delete-role --role-name AgentCoreRuntimeTestRole
+```

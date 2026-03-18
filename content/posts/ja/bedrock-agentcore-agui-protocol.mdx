@@ -222,6 +222,12 @@ agentcore invoke '{"threadId": "test-remote-1", "runId": "run-remote-1",
 
 **X-Rayのトレースセグメント設定** — デプロイ中のメモリリソース作成時に、Observability設定で `ValidationException` が発生した。X-Ray Delivery DestinationにはCloudWatch Logsのトレースセグメント先が事前に必要だが、メモリリソースの段階では未設定だった。ただし、後続のランタイム作成フェーズでトレースセグメント先が自動設定され、ランタイム本体のObservabilityは正常に有効化された。エージェントの動作には影響しない。
 
+## まとめ
+
+- **StrandsAgentラッパーだけでAG-UI対応が完了する** — 既存のStrands Agentに `StrandsAgent` をかぶせるだけで、AG-UIプロトコルのイベントストリーミングが自動的に実装される。プロトコル仕様を意識する必要がほぼない。
+- **Direct Code Deployでコンテナレスデプロイが実現する** — Dockerfileを書くことなく、Pythonコードをそのままクラウドにデプロイできる。ローカルとクラウドでコード変更が不要な点は開発体験として優秀である。
+- **AG-UIはMCP・A2Aと補完関係にある** — MCPがツール連携、A2Aがエージェント間通信を担うのに対し、AG-UIはUIへのリアルタイム配信を担当する。3つのプロトコルを組み合わせることで、エージェントシステムのフルスタックが構成できる。AG-UIは[LangGraph](https://docs.ag-ui.com/quickstart/introduction)や[CrewAI](https://docs.ag-ui.com/quickstart/introduction)といった他のフレームワークでも利用可能で、[AG-UI Dojo](https://dojo.ag-ui.com/)でインタラクティブに試すこともできる。
+
 ## クリーンアップ
 
 検証が終わったら `agentcore destroy` でデプロイしたリソースを削除し、不要なコストの発生を防ぐ。
@@ -229,9 +235,3 @@ agentcore invoke '{"threadId": "test-remote-1", "runId": "run-remote-1",
 ```bash
 agentcore destroy
 ```
-
-## まとめ
-
-- **StrandsAgentラッパーだけでAG-UI対応が完了する** — 既存のStrands Agentに `StrandsAgent` をかぶせるだけで、AG-UIプロトコルのイベントストリーミングが自動的に実装される。プロトコル仕様を意識する必要がほぼない。
-- **Direct Code Deployでコンテナレスデプロイが実現する** — Dockerfileを書くことなく、Pythonコードをそのままクラウドにデプロイできる。ローカルとクラウドでコード変更が不要な点は開発体験として優秀である。
-- **AG-UIはMCP・A2Aと補完関係にある** — MCPがツール連携、A2Aがエージェント間通信を担うのに対し、AG-UIはUIへのリアルタイム配信を担当する。3つのプロトコルを組み合わせることで、エージェントシステムのフルスタックが構成できる。AG-UIは[LangGraph](https://docs.ag-ui.com/quickstart/introduction)や[CrewAI](https://docs.ag-ui.com/quickstart/introduction)といった他のフレームワークでも利用可能で、[AG-UI Dojo](https://dojo.ag-ui.com/)でインタラクティブに試すこともできる。

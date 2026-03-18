@@ -220,6 +220,12 @@ Two issues I hit during testing:
 
 **X-Ray trace segment configuration** — During the memory resource creation phase, a `ValidationException` fires because X-Ray Delivery Destination requires CloudWatch Logs as a trace segment destination, which isn't set up yet. The subsequent runtime creation phase auto-configures the trace destination, so runtime observability works fine. The agent itself is unaffected either way.
 
+## Takeaways
+
+- **StrandsAgent wrapper is all you need for AG-UI** — Wrap an existing Strands Agent with `StrandsAgent` and the AG-UI event streaming protocol is handled automatically. Almost zero protocol awareness required.
+- **Direct Code Deploy enables containerless deployment** — No Dockerfile, no Docker build. Python code goes straight to the cloud with identical behavior locally and remotely. Great developer experience.
+- **AG-UI complements MCP and A2A** — MCP handles tool integration, A2A handles agent-to-agent communication, AG-UI handles real-time UI delivery. Together they form a full-stack agent protocol suite. AG-UI also works with [LangGraph and CrewAI](https://docs.ag-ui.com/quickstart/introduction), and you can try it interactively at the [AG-UI Dojo](https://dojo.ag-ui.com/).
+
 ## Cleanup
 
 Once you're done testing, run `agentcore destroy` to tear down the deployed resources and avoid ongoing costs:
@@ -227,9 +233,3 @@ Once you're done testing, run `agentcore destroy` to tear down the deployed reso
 ```bash
 agentcore destroy
 ```
-
-## Takeaways
-
-- **StrandsAgent wrapper is all you need for AG-UI** — Wrap an existing Strands Agent with `StrandsAgent` and the AG-UI event streaming protocol is handled automatically. Almost zero protocol awareness required.
-- **Direct Code Deploy enables containerless deployment** — No Dockerfile, no Docker build. Python code goes straight to the cloud with identical behavior locally and remotely. Great developer experience.
-- **AG-UI complements MCP and A2A** — MCP handles tool integration, A2A handles agent-to-agent communication, AG-UI handles real-time UI delivery. Together they form a full-stack agent protocol suite. AG-UI also works with [LangGraph and CrewAI](https://docs.ag-ui.com/quickstart/introduction), and you can try it interactively at the [AG-UI Dojo](https://dojo.ag-ui.com/).
