@@ -32,16 +32,16 @@ In [the previous post](/en/blog/2026/03/17/bedrock-agentcore-runtime-shell-comma
 
 Key packages from the `pip list` output:
 
-| Category | Packages |
-|---|---|
-| Data analysis | pandas 2.3.1, numpy 1.26.4, polars 1.38.1, duckdb 1.3.2 |
-| ML/DL | scikit-learn 1.5.0, torch 2.3.0, xgboost 2.0.3, onnxruntime 1.24.1 |
-| Visualization | matplotlib 3.9.0, plotly 5.22.0, seaborn 0.13.2, bokeh 2.4.3 |
-| NLP | spacy 3.7.4, nltk 3.9.1, textblob 0.18.0.post0 |
-| HTTP | requests 2.32.4, httpx 0.28.1, openai 1.33.0 |
-| Web frameworks | fastapi 0.116.1, Flask 3.0.3, Django 5.1.12 |
-| PDF/Office | pypdf 6.2.0, pdfplumber 0.11.0, python-docx 1.1.2, openpyxl 3.1.3 |
-| AWS | boto3 1.40.30, botocore 1.40.76, s3transfer 0.14.0 |
+| Category       | Packages                                                           |
+| -------------- | ------------------------------------------------------------------ |
+| Data analysis  | pandas 2.3.1, numpy 1.26.4, polars 1.38.1, duckdb 1.3.2            |
+| ML/DL          | scikit-learn 1.5.0, torch 2.3.0, xgboost 2.0.3, onnxruntime 1.24.1 |
+| Visualization  | matplotlib 3.9.0, plotly 5.22.0, seaborn 0.13.2, bokeh 2.4.3       |
+| NLP            | spacy 3.7.4, nltk 3.9.1, textblob 0.18.0.post0                     |
+| HTTP           | requests 2.32.4, httpx 0.28.1, openai 1.33.0                       |
+| Web frameworks | fastapi 0.116.1, Flask 3.0.3, Django 5.1.12                        |
+| PDF/Office     | pypdf 6.2.0, pdfplumber 0.11.0, python-docx 1.1.2, openpyxl 3.1.3  |
+| AWS            | boto3 1.40.30, botocore 1.40.76, s3transfer 0.14.0                 |
 
 PyPI was reachable too — `curl https://pypi.org/simple/` returned HTTP 200.
 
@@ -122,6 +122,7 @@ while True:
 ```
 
 Gotchas:
+
 - Names must match `[a-zA-Z][a-zA-Z0-9_]{0,47}`. **Hyphens are not allowed** (`ci-test` → fails, `ciTest` → OK)
 - Readiness status is **`READY`**, not `ACTIVE` as in AgentCore Runtime
 
@@ -339,6 +340,11 @@ stop_session(session2)
 ```
 
 ```text title="Output"
+
+# Session 1
+Session 1: OK
+
+# Session 2
 cowsay in new session: NO (not persisted)
 ```
 
