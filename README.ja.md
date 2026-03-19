@@ -85,7 +85,7 @@ npm run test:e2e
 
 ### UI 翻訳
 
-UI 文字列は `src/lib/i18n.ts` の軽量な辞書オブジェクトで管理されています。外部 i18n ライブラリは不要です。
+UI 文字列は `src/lib/i18n/` 配下の軽量な辞書オブジェクト (ロケールごとに1ファイル) で管理されています。外部 i18n ライブラリは不要です。
 
 ### コンテンツ翻訳
 
@@ -317,7 +317,10 @@ src/
     mdx/                       # MdxContent, MdxComponents
     common/                    # GTM
   lib/
-    i18n.ts                    # ロケール型, 辞書, getDictionary()
+    i18n/
+      index.ts                 # ロケール型, getDictionary()
+      ja.ts                    # 日本語辞書
+      en.ts                    # 英語辞書
     constants.ts               # サイト URL, 著者名, 1ページあたり記事数, OG 画像パス, ソーシャルリンク
     posts.ts                   # ブログクエリユーティリティ (ロケール対応, getRelatedPosts() を含む)
     tils.ts                    # TIL クエリユーティリティ (ロケール対応)

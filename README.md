@@ -85,7 +85,7 @@ Accessing `/` without a locale prefix redirects to `/en` (or `/ja` if the browse
 
 ### UI Translations
 
-UI strings are managed via a lightweight dictionary object in `src/lib/i18n.ts`. No external i18n library is required.
+UI strings are managed via lightweight dictionary objects in `src/lib/i18n/` (one file per locale). No external i18n library is required.
 
 ### Content Translations
 
@@ -317,7 +317,10 @@ src/
     mdx/                       # MdxContent, MdxComponents
     common/                    # GTM
   lib/
-    i18n.ts                    # Locale types, dictionaries, getDictionary()
+    i18n/
+      index.ts                 # Locale types, getDictionary()
+      ja.ts                    # Japanese dictionary
+      en.ts                    # English dictionary
     constants.ts               # Site URL, author, posts per page, OG image path, social links
     posts.ts                   # Blog query utilities (locale-aware, includes getRelatedPosts())
     tils.ts                    # TIL query utilities (locale-aware)
