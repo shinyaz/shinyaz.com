@@ -6,6 +6,9 @@ published: true
 featured: false
 categories: [ai-tools]
 tags: ["claude-code", "ai-tools", "best-practices", "automation"]
+series: "claude-code-productivity"
+seriesOrder: 6
+seriesExtra: true
 ---
 
 [前回の記事](/ja/blog/2026/03/16/refactoring-agent-skills-with-best-practices)では、公式ベストプラクティスに照らして予約語の修正やprogressive disclosureの適用を行った。今回はその続きとして、スキル名の命名パターン統一、descriptionの最適化、スキル統合の3つに取り組んだ記録だ。
@@ -115,14 +118,3 @@ optimizing-agent-instructions/     ← 分析 + 最適化を統合
 - **命名の一貫性はコレクション全体で評価する** — 個々のスキル名が正しくても、パターンが混在していれば公式基準に違反する。gerund形への統一で12スキルが均一なパターンになった
 - **descriptionは「pushy」に書くことでundertriggerを防ぐ** — Claudeはスキルを使わなすぎる傾向がある。「Use when」句に具体的なトリガー条件とカジュアルな表現を含めることで、自動呼び出しの機会が増える
 - **品質基準は一元管理する** — 複数スキルに同じ基準を個別に書くと、更新漏れと矛盾が発生する。共有リファレンスファイルに集約し、各スキルから参照する設計が正しい
-
----
-
-_シリーズ記事：_
-
-1. _[CLAUDE.md でAIコーディングアシスタントを最大活用する](/ja/blog/2026/03/07/claude-md-ai-coding-assistant-guide)_
-2. _[Claude CodeのCLAUDE.mdを83%削減してスキルシステムで効率化した話](/ja/blog/2026/03/08/optimizing-claude-code-with-skills)_
-3. _[Claude Codeのメタスキル：スキルを管理するスキルで実現する自己改善サイクル](/ja/blog/2026/03/09/claude-code-meta-skills)_
-4. _[Claude Codeメタスキルのチーム展開：組織全体でAI支援開発の生産性を最大化する](/ja/blog/2026/03/10/claude-code-team-productivity)_
-5. _[公式ベストプラクティスでエージェントスキルをリファクタリングする](/ja/blog/2026/03/16/refactoring-agent-skills-with-best-practices)（番外編1）_
-6. _エージェントスキルの命名統一とdescription最適化（本記事・番外編2）_

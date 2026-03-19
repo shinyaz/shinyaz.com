@@ -6,6 +6,8 @@ published: false
 featured: false
 categories: [ai-agents]
 tags: ["eks", "kubernetes", "ai-agents", "cognito", "hpa", "gradio"]
+series: "agentic-ai-on-eks"
+seriesOrder: 3
 ---
 
 ## はじめに
@@ -140,11 +142,3 @@ travel-agent    cpu: 1%/50%   1         3         1
 - **4 コンポーネント合計 723Mi** — アイドル時のフットプリントは軽量。ただし LLM 呼び出しを含む実運用では、セッション管理（S3）とモデル呼び出し（Bedrock）のコストが支配的になる。
 
 シリーズ全体を通じて見えてきたのは、AI エージェントの本番運用では**プロトコル設計（MCP / A2A）、設定の外部化（ConfigMap / Secret）、セッション状態管理**の 3 つが従来のマイクロサービスにはない新しい設計軸になるということだ。ワークショップはこの 3 軸を 4 コンポーネントの構成で体験できる、よくできた教材だった。
-
----
-
-本記事は Agentic AI on EKS ワークショップ検証シリーズの Part 3（最終回）である。
-
-- [Part 1: EKS上でAIエージェントをデプロイする](/ja/blog/2026/03/24/agentic-ai-on-eks-workshop)
-- [Part 2: A2Aプロトコルで実現するマルチエージェント連携](/ja/blog/2026/03/25/a2a-multi-agent-on-eks)
-- Part 3: Cognito認証UIとHPAで仕上げるエージェント基盤（本記事）

@@ -13,7 +13,12 @@ interface TableOfContentsProps {
 export function TableOfContents({ headings, locale }: TableOfContentsProps) {
   const t = getDictionary(locale);
   const [activeId, setActiveId] = useState<string>("");
+  const [isOpen, setIsOpen] = useState(true);
   const observerRef = useRef<IntersectionObserver | null>(null);
+
+  useEffect(() => {
+    setIsOpen(window.innerWidth >= 768);
+  }, []);
 
   useEffect(() => {
     const elements = headings
@@ -45,36 +50,39 @@ export function TableOfContents({ headings, locale }: TableOfContentsProps) {
   if (headings.length === 0) return null;
 
   return (
-    <details className="toc mb-8 rounded-lg border border-border bg-muted/50 p-4" open>
-      <summary className="cursor-pointer text-sm font-semibold">
+    <details className="toc mb-8 overflow-hidden rounded-lg border border-border" open={isOpen} onToggle={(e) => setIsOpen(e.currentTarget.open)}>
+      <summary className="cursor-pointer border-b border-border bg-muted/50 px-5 py-2 text-base font-bold tracking-tight">
         {t.toc.title}
       </summary>
-      <nav aria-label={t.toc.title} className="mt-3">
-        <ul className="space-y-1 text-sm">
-          {headings.map((heading) => (
-            <li
-              key={heading.id}
-              className={heading.level === 3 ? "ml-4" : ""}
-            >
-              <a
-                href={`#${heading.id}`}
-                onClick={(e) => {
-                  e.preventDefault();
-                  document.getElementById(heading.id)?.scrollIntoView({
-                    behavior: "smooth",
-                  });
-                  setActiveId(heading.id);
-                }}
-                className={`block py-0.5 transition-colors hover:text-foreground ${
-                  activeId === heading.id
-                    ? "font-bold text-foreground"
-                    : "text-muted-foreground"
-                }`}
+      <nav aria-label={t.toc.title} className="px-5 py-3">
+        <ul className="space-y-0.5">
+          {headings.map((heading) => {
+            const isActive = activeId === heading.id;
+            return (
+              <li
+                key={heading.id}
+                className={heading.level === 3 ? "ml-4" : ""}
               >
-                {heading.text}
-              </a>
-            </li>
-          ))}
+                <a
+                  href={`#${heading.id}`}
+                  onClick={(e) => {
+                    e.preventDefault();
+                    document.getElementById(heading.id)?.scrollIntoView({
+                      behavior: "smooth",
+                    });
+                    setActiveId(heading.id);
+                  }}
+                  className={`block rounded-md px-3 py-1 text-[0.9375rem] transition-colors hover:bg-muted/50 hover:text-foreground ${
+                    isActive
+                      ? "border-l-2 border-foreground bg-muted/30 font-medium text-foreground"
+                      : "border-l-2 border-transparent text-muted-foreground"
+                  }`}
+                >
+                  {heading.text}
+                </a>
+              </li>
+            );
+          })}
         </ul>
       </nav>
     </details>

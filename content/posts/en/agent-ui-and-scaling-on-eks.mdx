@@ -6,6 +6,8 @@ published: false
 featured: false
 categories: [ai-agents]
 tags: ["eks", "kubernetes", "ai-agents", "cognito", "hpa", "gradio"]
+series: "agentic-ai-on-eks"
+seriesOrder: 3
 ---
 
 ## Introduction
@@ -140,11 +142,3 @@ The idle footprint is lightweight at 8m CPU / 723Mi memory total. However, Weath
 - **723Mi total for 4 components** — The idle footprint is light. In production, session management (S3) and model invocation (Bedrock) costs dominate rather than compute.
 
 Looking back across the series, the key takeaway is that production AI agents introduce three design axes absent from traditional microservices: **protocol design (MCP / A2A), configuration externalization (ConfigMap / Secret), and session state management**. The workshop covers all three through its four-component architecture — a well-crafted learning experience.
-
----
-
-This is Part 3 (final) of the Agentic AI on EKS workshop validation series.
-
-- [Part 1: Deploying AI Agents on EKS](/en/blog/2026/03/24/agentic-ai-on-eks-workshop)
-- [Part 2: Multi-Agent Coordination with A2A Protocol](/en/blog/2026/03/25/a2a-multi-agent-on-eks)
-- Part 3: Cognito Auth UI and HPA to Complete the Agent Platform (this article)

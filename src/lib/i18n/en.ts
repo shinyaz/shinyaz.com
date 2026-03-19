@@ -84,6 +84,11 @@ export const en = {
   toc: {
     title: "Table of Contents",
   },
+  series: {
+    title: "Series",
+    currentPart: "this article",
+    extra: "Extra",
+  },
   relatedPosts: {
     title: "Related Posts",
   },

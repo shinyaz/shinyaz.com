@@ -6,6 +6,8 @@ published: false
 featured: false
 categories: [ai-agents]
 tags: ["eks", "kubernetes", "ai-agents", "strands-agents", "a2a", "bedrock"]
+series: "agentic-ai-on-eks"
+seriesOrder: 2
 ---
 
 ## はじめに
@@ -220,11 +222,3 @@ Travel Agent がシステムプロンプトのルール通り「According to the
 - **エージェントカードの URL は Kubernetes Service の FQDN に設定する** — A2A サーバーのデフォルト `0.0.0.0` ではクラスター内通信が不可能。`a2a.http_url` の設定が必須だ。
 - **セッション履歴は LLM の判断を汚染する** — 従来のサービスと異なり、AI エージェントは過去の会話コンテキストに基づいて判断する。設定変更後のセッションクリアを運用手順に組み込む必要がある。
 - **A2A はエージェント単位の委譲** — MCP がツール単位で接続するのに対し、A2A では自然言語でリクエストを送り、受け手のエージェントが内部で判断する。オーケストレーター型の設計に適している。
-
----
-
-本記事は Agentic AI on EKS ワークショップ検証シリーズの Part 2 である。
-
-- [Part 1: EKS上でAIエージェントをデプロイする](/ja/blog/2026/03/24/agentic-ai-on-eks-workshop)
-- Part 2: A2Aプロトコルで実現するマルチエージェント連携（本記事）
-- [Part 3: Cognito認証UIとHPAで仕上げるエージェント基盤](/ja/blog/2026/03/26/agent-ui-and-scaling-on-eks)
