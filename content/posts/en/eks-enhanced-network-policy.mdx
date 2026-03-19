@@ -44,7 +44,7 @@ Two configuration steps are required in Auto Mode environments.
 
 ### Enable the Controller via ConfigMap
 
-```bash
+```bash title="Terminal"
 kubectl apply -f - <<EOF
 apiVersion: v1
 kind: ConfigMap
@@ -60,14 +60,14 @@ EOF
 
 By default, NodeClass `networkPolicy` is set to `DefaultAllow`. Change it to `DefaultDeny`:
 
-```bash
+```bash title="Terminal"
 kubectl patch nodeclass default --type=merge \
   -p '{"spec":{"networkPolicy":"DefaultDeny"}}'
 ```
 
 Critical caveat: **this change only applies to newly created nodes**. Existing nodes retain `DefaultAllow`. You'll need to rotate nodes — either by deleting workloads and waiting for Auto Mode to provision new ones, or manually replacing them.
 
-```bash
+```bash title="Output"
 $ kubectl get cninodes -o jsonpath='{range .items[*]}{.metadata.name}: {.spec.networkPolicy}{"\n"}{end}'
 i-0676bb1b28ac86c6a: DefaultDeny    # New node → applied
 i-0e088c13093d6f297: DefaultAllow   # Existing node → not applied
@@ -97,7 +97,7 @@ All communication is blocked without explicit policies.
 
 FQDN filtering requires DNS resolution to work first. Allow DNS egress with a standard NetworkPolicy:
 
-```yaml
+```yaml title="allow-dns.yaml"
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -121,7 +121,7 @@ At this point, name resolution succeeds but HTTP traffic remains blocked. Note t
 
 Apply a policy allowing `role=backend` pods to reach only `example.com` on port 80. **The `domainNames` field is the core of FQDN-based filtering.**
 
-```yaml
+```yaml title="allow-example-com-only.yaml"
 apiVersion: networking.k8s.aws/v1alpha1
 kind: ApplicationNetworkPolicy
 metadata:
@@ -156,7 +156,7 @@ FQDN filtering works precisely, and pod label selection behaves as expected.
 
 Finally, allow intra-namespace communication using a ClusterNetworkPolicy at Admin tier. Service-based communication requires explicitly allowing the ClusterIP CIDR (`10.100.0.0/16`).
 
-```yaml
+```yaml title="allow-intra-app.yaml"
 apiVersion: networking.k8s.aws/v1alpha1
 kind: ClusterNetworkPolicy
 metadata:

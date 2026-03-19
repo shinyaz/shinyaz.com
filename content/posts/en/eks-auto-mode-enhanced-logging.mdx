@@ -35,7 +35,7 @@ Configuration takes three steps. Here I'll use CloudWatch Logs as the destinatio
 
 Register the EKS cluster as a log source. This must be done for each of the four log types.
 
-```bash
+```bash title="Terminal"
 # Create delivery source for Compute logs
 aws logs put-delivery-source \
   --name "sandbox-AUTO_MODE_COMPUTE_LOGS" \
@@ -49,7 +49,7 @@ Important: each log type triggers a cluster update. You must wait for completion
 
 Register a CloudWatch Logs log group as the destination.
 
-```bash
+```bash title="Terminal"
 # Create log group
 aws logs create-log-group \
   --log-group-name "/aws/eks/sandbox/auto-mode/compute"
@@ -65,7 +65,7 @@ aws logs put-delivery-destination \
 
 Link source to destination. At this point, log-type-specific `recordFields` are automatically configured.
 
-```bash
+```bash title="Terminal"
 aws logs create-delivery \
   --delivery-source-name "sandbox-AUTO_MODE_COMPUTE_LOGS" \
   --delivery-destination-arn \
@@ -82,7 +82,7 @@ With logs flowing, let's put Logs Insights to work. This is where it gets intere
 
 I deployed nginx with 3 replicas, then deleted it, and traced the Compute logs chronologically.
 
-```text
+```text title="Compute Logs"
 04:29:36 [INFO]  provisioner           | found provisionable pod(s)
 04:29:36 [INFO]  provisioner           | computed new nodeclaim(s) to fit pod(s)
 04:29:36 [INFO]  provisioner           | created nodeclaim
@@ -106,7 +106,7 @@ Previously, this entire sequence was a black box. Now you can even measure time 
 
 Get the big picture of cluster activity:
 
-```text
+```text title="Logs Insights"
 stats count(*) as event_count by controller
 | sort event_count desc
 ```
@@ -125,7 +125,7 @@ Results:
 
 Detect errors across all four log groups:
 
-```text
+```text title="Logs Insights"
 fields @timestamp, message
 | filter level = "ERROR" or level = "error" or stream = "stderr"
 | sort @timestamp desc
@@ -137,13 +137,13 @@ In my testing, this caught 4 errors in block-storage — the EBS CSI trying to r
 
 Track IP address management during node additions:
 
-```text
+```text title="Logs Insights"
 fields @timestamp, level, message, controller, controllerKind
 | filter message like /created|allocat|subnet|CNINode|finalized/
 | sort @timestamp asc
 ```
 
-```text
+```text title="IPAM Logs"
 04:29:54 [info] nodeclaim/NodeClaim  | created CNINode
 04:29:55 [info] cninode/CNINode      | allocated ips
 04:29:55 [info] cninode/CNINode      | updated CNINode Status

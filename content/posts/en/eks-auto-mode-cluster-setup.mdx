@@ -49,7 +49,7 @@ Auto Mode is ideal when you want Kubernetes without the infrastructure overhead.
 
 Creating an EKS cluster with Auto Mode is remarkably simple — just add the `--enable-auto-mode` flag.
 
-```bash
+```bash title="Terminal"
 eksctl create cluster \
   --name sandbox \
   --region ap-northeast-1 \
@@ -121,7 +121,7 @@ This configuration ensures both control plane ↔ node and node ↔ node communi
 
 With traditional managed node groups, you had to explicitly specify node configuration:
 
-```bash
+```bash title="Terminal"
 # Traditional approach (managed node groups)
 eksctl create cluster \
   --name sandbox \
@@ -143,19 +143,19 @@ Auto Mode removes all node group specifications. EKS decides instance types and 
 
 After cluster creation, start by verifying the control plane and nodes.
 
-```bash
+```bash title="Terminal"
 kubectl cluster-info
 ```
 
-```text
+```text title="Output"
 Kubernetes control plane is running at https://xxxxx.gr7.ap-northeast-1.eks.amazonaws.com
 ```
 
-```bash
+```bash title="Terminal"
 kubectl get nodes
 ```
 
-```text
+```text title="Output"
 NAME                  STATUS   ROLES    AGE   VERSION
 i-0a3b6967393de6f9d   Ready    <none>   18s   v1.32.11-eks-ac2d5a0
 i-0bc928a12acfe91a2   Ready    <none>   18s   v1.32.11-eks-ac2d5a0
@@ -167,17 +167,17 @@ Right after creation, Auto Mode has already provisioned 2 nodes automatically. T
 
 The real power of Auto Mode lies in dynamic node provisioning based on workload demand. Let's deploy nginx with 3 replicas to see it in action.
 
-```bash
+```bash title="Terminal"
 kubectl create deployment nginx --image=nginx:latest --replicas=3
 ```
 
 Pods start in Pending state, but after about 30 seconds all are Running.
 
-```bash
+```bash title="Terminal"
 kubectl get pods -o wide
 ```
 
-```text
+```text title="Output"
 NAME                     READY   STATUS    RESTARTS   AGE   IP                NODE
 nginx-54c98b4f84-7sc9x   1/1     Running   0          54s   192.168.163.242   i-04012a4d55813e76a
 nginx-54c98b4f84-8kp22   1/1     Running   0          54s   192.168.163.240   i-04012a4d55813e76a
@@ -186,11 +186,11 @@ nginx-54c98b4f84-mc9lw   1/1     Running   0          54s   192.168.163.241   i-
 
 Checking nodes again reveals a third node (`i-04012a4d55813e76a`) was automatically added.
 
-```bash
+```bash title="Terminal"
 kubectl get nodes
 ```
 
-```text
+```text title="Output"
 NAME                  STATUS   ROLES    AGE   VERSION
 i-04012a4d55813e76a   Ready    <none>   35s   v1.32.11-eks-ac2d5a0
 i-0a3b6967393de6f9d   Ready    <none>   81s   v1.32.11-eks-ac2d5a0
@@ -203,17 +203,17 @@ Auto Mode automatically added a node in response to workload demand — no Karpe
 
 Let's verify scale-down as well. Delete the nginx deployment we just created.
 
-```bash
+```bash title="Terminal"
 kubectl delete deployment nginx
 ```
 
 Checking nodes after deletion, the third node that was added for the workload has been automatically removed, bringing the count back to 2.
 
-```bash
+```bash title="Terminal"
 kubectl get nodes
 ```
 
-```text
+```text title="Output"
 NAME                  STATUS   ROLES    AGE   VERSION
 i-0bc928a12acfe91a2   Ready    <none>   79m   v1.32.11-eks-ac2d5a0
 i-04012a4d55813e76a   Ready    <none>   78m   v1.32.11-eks-ac2d5a0
