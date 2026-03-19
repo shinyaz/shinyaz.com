@@ -1,0 +1,563 @@
+---
+title: "Hands-On with Stateful MCP Servers on Bedrock AgentCore Runtime: Elicitation, Sampling, and Progress Notifications"
+description: "Verifying AgentCore Runtime's new stateful MCP features. Tested elicitation (server-initiated input), sampling (LLM generation requests), and progress notifications both locally and on AgentCore."
+date: "2026-03-19"
+published: true
+featured: false
+categories: [ai-agents]
+tags: ["bedrock", "agentcore", "mcp", "ai-agents"]
+---
+
+## Introduction
+
+On March 10, 2026, AWS [added stateful MCP server capabilities to Amazon Bedrock AgentCore Runtime](https://aws.amazon.com/about-aws/whats-new/2026/03/amazon-bedrock-agentcore-runtime-stateful-mcp/). Previously, MCP servers on AgentCore Runtime were stateless only — context reset with every tool call. Stateful MCP ties sessions to dedicated microVMs via `Mcp-Session-Id` headers, enabling multi-request interactions.
+
+Three new features ship with this update: **Elicitation** (server-initiated user input), **Sampling** (server-to-client LLM generation requests), and **Progress Notifications** (real-time progress updates). This post shares the results of building a stateful MCP server with FastMCP, deploying it to AgentCore Runtime, and verifying all three features end-to-end. See the [official documentation](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/mcp-stateful-features.html) for the full reference.
+
+## The Three New Stateful Features
+
+Traditional MCP was one-directional: clients call tools, servers return results. Stateful MCP makes communication bidirectional — servers can actively request actions from clients.
+
+| Feature | Direction | Purpose |
+|---|---|---|
+| **Elicitation** | Server → Client | Collect user preferences or additional info interactively |
+| **Sampling** | Server → Client | Request LLM text generation on the client side |
+| **Progress Notifications** | Server → Client | Report progress during long-running operations |
+
+All three require session maintenance, enabled by `stateless_http=False` with the `streamable-http` transport.
+
+## Building the Test Environment
+
+I built a travel planning MCP server with FastMCP 3.1.1 that combines all three features in a single `plan_trip` tool.
+
+Prerequisites:
+
+- AWS CLI configured (`bedrock-agentcore:*`, `iam:*`, `s3:*` permissions)
+- Python 3.10+
+- `agentcore` CLI (`uv tool install bedrock-agentcore-starter-toolkit`)
+
+### MCP Server Code
+
+```python title="travel_server.py"
+from fastmcp import FastMCP, Context
+import json
+
+mcp = FastMCP("Travel Planner")
+
+DESTINATIONS = {
+    "tokyo": {"city": "Tokyo", "highlights": ["Shibuya Crossing", "Senso-ji Temple", "Tsukiji Market"]},
+    "paris": {"city": "Paris", "highlights": ["Eiffel Tower", "Louvre Museum", "Seine River Cruise"]},
+}
+
+@mcp.resource("travel://destinations")
+def list_destinations() -> str:
+    return json.dumps(DESTINATIONS, indent=2)
+
+@mcp.tool()
+async def plan_trip(ctx: Context) -> str:
+    """Trip planning combining elicitation, sampling, and progress notifications."""
+    total_steps = 5
+
+    # Elicitation: server asks client for input
+    await ctx.report_progress(progress=0, total=total_steps)
+    dest_result = await ctx.elicit(
+        message="Where would you like to go?\nOptions: Paris, Tokyo",
+        response_type=str,
+    )
+    if dest_result.action != "accept":
+        return "Cancelled."
+    destination = dest_result.data
+    await ctx.report_progress(progress=1, total=total_steps)
+
+    days_result = await ctx.elicit(
+        message=f"How many days will you spend in {destination}?", response_type=int,
+    )
+    days = days_result.data
+    await ctx.report_progress(progress=3, total=total_steps)
+
+    # Sampling: server requests LLM generation from client
+    response = await ctx.sample(
+        messages=f"Give 3 tips for a trip to {destination} ({days} days).",
+        max_tokens=200,
+    )
+    ai_tips = response.text
+    await ctx.report_progress(progress=5, total=total_steps)
+
+    return json.dumps({
+        "destination": destination, "days": days,
+        "ai_tips": ai_tips, "status": "planned",
+    }, indent=2)
+
+if __name__ == "__main__":
+    mcp.run(transport="streamable-http", host="0.0.0.0", port=8000, stateless_http=False)
+```
+
+The critical setting is `stateless_http=False`. The official documentation marks this as `CRITICAL` — without it, elicitation and sampling callbacks never reach the client.
+
+The above is a simplified excerpt. The full server used for verification also includes `search_flights` (for progress notifications), `quick_recommend` (sampling-only), parameterized resources, and prompt templates.
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">Full server code (travel_server.py)</summary>
+
+```python title="travel_server.py"
+import asyncio
+import json
+
+from fastmcp import FastMCP, Context
+
+mcp = FastMCP(
+    "Travel Planner",
+    instructions="A stateful travel planning MCP server that demonstrates "
+    "elicitation, sampling, and progress notifications.",
+)
+
+DESTINATIONS = {
+    "paris": {
+        "city": "Paris",
+        "country": "France",
+        "highlights": ["Eiffel Tower", "Louvre Museum", "Seine River Cruise"],
+        "best_season": "Spring",
+    },
+    "tokyo": {
+        "city": "Tokyo",
+        "country": "Japan",
+        "highlights": ["Shibuya Crossing", "Senso-ji Temple", "Tsukiji Market"],
+        "best_season": "Autumn",
+    },
+    "new york": {
+        "city": "New York",
+        "country": "USA",
+        "highlights": ["Central Park", "Statue of Liberty", "Broadway"],
+        "best_season": "Fall",
+    },
+    "bali": {
+        "city": "Bali",
+        "country": "Indonesia",
+        "highlights": ["Ubud Rice Terraces", "Tanah Lot Temple", "Seminyak Beach"],
+        "best_season": "Dry Season (Apr-Oct)",
+    },
+}
+
+
+@mcp.resource("travel://destinations")
+def list_destinations() -> str:
+    return json.dumps(DESTINATIONS, indent=2)
+
+
+@mcp.resource("travel://destination/{city}")
+def get_destination(city: str) -> str:
+    dest = DESTINATIONS.get(city.lower())
+    if dest:
+        return json.dumps(dest, indent=2)
+    return json.dumps({"error": f"Destination '{city}' not found"})
+
+
+@mcp.prompt()
+def packing_list(destination: str, days: int, trip_type: str) -> str:
+    return (
+        f"Create a detailed {days}-day packing list for a {trip_type} trip "
+        f"to {destination}. Include weather-appropriate clothing, essentials, "
+        f"and destination-specific items."
+    )
+
+
+@mcp.prompt()
+def local_phrases(destination: str) -> str:
+    return (
+        f"Teach me 10 essential local phrases for visiting {destination}. "
+        f"Include greetings, asking for directions, ordering food, "
+        f"and emergency phrases with pronunciation guides."
+    )
+
+
+@mcp.tool()
+async def plan_trip(ctx: Context) -> str:
+    """Plan a complete trip using elicitation, sampling, and progress notifications."""
+    total_steps = 5
+    await ctx.report_progress(progress=0, total=total_steps)
+    dest_result = await ctx.elicit(
+        message="Where would you like to go?\nOptions: Paris, Tokyo, New York, Bali",
+        response_type=str,
+    )
+    if dest_result.action != "accept":
+        return "Trip planning cancelled."
+    destination = dest_result.data
+    await ctx.report_progress(progress=1, total=total_steps)
+
+    days_result = await ctx.elicit(
+        message=f"How many days will you spend in {destination}?",
+        response_type=int,
+    )
+    if days_result.action != "accept":
+        return "Trip planning cancelled."
+    days = days_result.data
+    await ctx.report_progress(progress=2, total=total_steps)
+
+    type_result = await ctx.elicit(
+        message="What type of trip?\nOptions: leisure, business, adventure",
+        response_type=str,
+    )
+    if type_result.action != "accept":
+        return "Trip planning cancelled."
+    trip_type = type_result.data
+    await ctx.report_progress(progress=3, total=total_steps)
+
+    response = await ctx.sample(
+        messages=f"Give 3 brief tips for a {trip_type} trip to {destination} "
+        f"lasting {days} days. Be concise.",
+        max_tokens=200,
+    )
+    ai_tips = response.text
+    await ctx.report_progress(progress=5, total=total_steps)
+
+    dest_info = DESTINATIONS.get(destination.lower(), {})
+    highlights = dest_info.get("highlights", ["No specific highlights available"])
+    return json.dumps({
+        "destination": destination,
+        "days": days,
+        "trip_type": trip_type,
+        "highlights": highlights,
+        "ai_tips": ai_tips,
+        "status": "planned",
+    }, indent=2)
+
+
+@mcp.tool()
+async def quick_recommend(ctx: Context) -> str:
+    """Get a quick destination recommendation using sampling only."""
+    response = await ctx.sample(
+        messages="Recommend one travel destination from: Paris, Tokyo, New York, Bali. "
+        "Give a one-sentence reason why.",
+        max_tokens=100,
+    )
+    return f"Recommendation: {response.text}"
+
+
+@mcp.tool()
+async def search_flights(ctx: Context, origin: str, destination: str) -> str:
+    """Simulate a flight search with progress notifications."""
+    total = 4
+    stages = [
+        "Searching airlines...",
+        "Comparing prices...",
+        "Checking availability...",
+        "Finalizing results...",
+    ]
+    for i, stage in enumerate(stages):
+        await ctx.report_progress(progress=i + 1, total=total)
+        await ctx.info(stage)
+        await asyncio.sleep(0.3)
+    return json.dumps({
+        "origin": origin,
+        "destination": destination,
+        "flights": [
+            {"airline": "AirExample", "price": "$450", "duration": "8h 30m"},
+            {"airline": "SkyDemo", "price": "$520", "duration": "7h 15m"},
+        ],
+    }, indent=2)
+
+
+if __name__ == "__main__":
+    mcp.run(transport="streamable-http", host="0.0.0.0", port=8000, stateless_http=False)
+```
+
+</details>
+
+### Deployment
+
+Create `requirements.txt` for dependencies.
+
+```text title="requirements.txt"
+fastmcp>=2.10.0
+mcp
+```
+
+The `agentcore` CLI's Direct Code Deploy mode requires no Dockerfile.
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">Local testing steps</summary>
+
+You can verify the server locally before deploying to AgentCore.
+
+```bash title="Terminal"
+# Create virtual environment and install dependencies
+uv venv && source .venv/bin/activate
+uv pip install "fastmcp>=2.10.0" mcp
+
+# Start the server (run in a separate terminal)
+python travel_server.py
+# → Starts at http://0.0.0.0:8000/mcp
+```
+
+Use MCP Inspector to test tools and resources from the browser. For programmatic testing, see the client code below.
+
+</details>
+
+```bash title="Terminal"
+# Configure (MCP protocol + Direct Code Deploy)
+agentcore configure \
+  -e travel_server.py -p MCP -n stateful_mcp_demo \
+  -dt direct_code_deploy -rf requirements.txt -r us-west-2 -ni
+
+# Deploy (IAM role and S3 bucket auto-created)
+agentcore deploy
+```
+
+```text title="Output"
+✅ Deployment completed successfully
+Agent ARN: arn:aws:bedrock-agentcore:us-west-2:381492023699:runtime/stateful_mcp_demo-ZgZZ0pEA9n
+Deployment Type: Direct Code Deploy
+```
+
+Everything from IAM role creation to Linux ARM64 cross-compilation of dependencies to S3 upload happens automatically. Deployment took about 3 minutes, mostly spent waiting for memory resource initialization.
+
+### Test Client
+
+The test client uses MCP Python SDK's `streamablehttp_client` with registered callbacks for elicitation and sampling. Remote connections require SigV4 authentication.
+
+```python title="Python"
+from mcp.client.streamable_http import streamablehttp_client
+from mcp.client.session import ClientSession
+
+async with streamablehttp_client(url, httpx_client_factory=sigv4_factory) as (
+    read_stream, write_stream, get_session_id
+):
+    async with ClientSession(
+        read_stream, write_stream,
+        elicitation_callback=elicit_handler,
+        sampling_callback=sampling_handler,
+    ) as session:
+        await session.initialize()
+        session_id = get_session_id()  # → "d28be10a-298b-4bfe-a16a-c810f95269c8"
+```
+
+The remote endpoint URL requires the full ARN to be URL-encoded:
+
+```text title="Endpoint URL"
+https://bedrock-agentcore.{REGION}.amazonaws.com/runtimes/{ENCODED_ARN}/invocations?qualifier=DEFAULT
+```
+
+The core of stateful MCP lies in the callback implementations. Elicitation controls how the client responds to server questions; sampling controls how (and with which LLM) text is generated on the client side.
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">Callback implementations and SigV4 auth (full test client)</summary>
+
+```python title="test_client.py"
+import asyncio
+import json
+import urllib.parse
+
+import boto3
+from botocore.auth import SigV4Auth
+from botocore.awsrequest import AWSRequest
+from botocore.credentials import Credentials
+import httpx
+
+from mcp.client.streamable_http import streamablehttp_client
+from mcp.client.session import ClientSession
+from mcp.types import CreateMessageResult, ElicitResult, TextContent
+
+AGENT_RUNTIME_ARN = "arn:aws:bedrock-agentcore:us-west-2:ACCOUNT_ID:runtime/YOUR_RUNTIME_ID"
+REGION = "us-west-2"
+
+
+async def elicit_callback(context, params):
+    """Elicitation callback: respond to server-initiated questions."""
+    msg = params.message if hasattr(params, "message") else str(params)
+    print(f"  [ELICITATION] Server asks: {msg}")
+    # In production, prompt the user for input here
+    response = input("  Your answer: ").strip()
+    return ElicitResult(action="accept", content={"value": response})
+
+
+async def sampling_callback(context, params):
+    """Sampling callback: respond to server-initiated LLM generation requests."""
+    msg_text = ""
+    if hasattr(params, "messages"):
+        for m in params.messages:
+            if hasattr(m.content, "text"):
+                msg_text = m.content.text
+                break
+    print(f"  [SAMPLING] Server requests: {msg_text[:100]}...")
+    # In production, call your LLM API here
+    ai_response = "1. Research local customs. 2. Pack light. 3. Book in advance."
+    return CreateMessageResult(
+        role="assistant",
+        content=TextContent(type="text", text=ai_response),
+        model="your-model-id",
+        stopReason="endTurn",
+    )
+
+
+class SigV4HttpxAuth(httpx.Auth):
+    """SigV4 auth for AgentCore Runtime connections."""
+    def __init__(self, region, service="bedrock-agentcore"):
+        self.region = region
+        self.service = service
+        session = boto3.Session()
+        creds = session.get_credentials().get_frozen_credentials()
+        self.credentials = Credentials(creds.access_key, creds.secret_key, creds.token)
+
+    def auth_flow(self, request):
+        aws_request = AWSRequest(
+            method=request.method, url=str(request.url),
+            headers=dict(request.headers), data=request.content,
+        )
+        SigV4Auth(self.credentials, self.service, self.region).add_auth(aws_request)
+        for key, value in aws_request.headers.items():
+            request.headers[key] = value
+        yield request
+
+
+def create_sigv4_httpx_client(**kwargs):
+    kwargs.pop("auth", None)  # Remove SDK-provided auth to avoid conflict
+    return httpx.AsyncClient(auth=SigV4HttpxAuth(REGION), **kwargs)
+
+
+async def main():
+    encoded_arn = urllib.parse.quote(AGENT_RUNTIME_ARN, safe="")
+    url = f"https://bedrock-agentcore.{REGION}.amazonaws.com/runtimes/{encoded_arn}/invocations?qualifier=DEFAULT"
+
+    async with streamablehttp_client(
+        url, httpx_client_factory=create_sigv4_httpx_client,
+        timeout=120, sse_read_timeout=120, terminate_on_close=False,
+    ) as (read_stream, write_stream, get_session_id):
+        async with ClientSession(
+            read_stream, write_stream,
+            elicitation_callback=elicit_callback,
+            sampling_callback=sampling_callback,
+        ) as session:
+            await session.initialize()
+            print(f"Session ID: {get_session_id()}")
+
+            # List tools
+            tools = await session.list_tools()
+            for t in tools.tools:
+                print(f"  {t.name}: {t.description}")
+
+            # Call tool (triggers elicitation + sampling + progress)
+            result = await session.call_tool("plan_trip", {})
+            for c in result.content:
+                if hasattr(c, "text"):
+                    print(c.text)
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```
+
+For local testing, remove `create_sigv4_httpx_client` and change the URL to `http://localhost:8000/mcp`.
+
+</details>
+
+## Verification Results
+
+I tested elicitation, sampling, progress notifications, resources, prompts, and session management against both local (`localhost:8000`) and remote (AgentCore Runtime) endpoints.
+
+### 1. Elicitation — Server-Initiated User Input
+
+When `ctx.elicit()` fires inside `plan_trip`, the server sends a JSON-RPC request to the client, triggering the `elicitation_callback`.
+
+```text title="Output"
+[ELICITATION] Server asks: Where would you like to go?
+Options: Paris, Tokyo
+[ELICITATION] Auto-responding: Tokyo
+
+[ELICITATION] Server asks: How many days will you spend in Tokyo?
+[ELICITATION] Auto-responding: 3
+```
+
+Previously, MCP servers had no way to ask questions during tool execution. Stateful MCP pauses the tool, waits for user input via the session, and resumes. In this test, I verified that `response_type` works with both `str` and `int`. Per the MCP specification, this type annotation also enables input validation.
+
+### 2. Sampling — Server-to-Client LLM Requests
+
+`ctx.sample()` lets the server ask the client to generate text using its own LLM.
+
+```text title="Output"
+[SAMPLING] Server requests: Give 3 tips for a trip to Tokyo (3 days)...
+[SAMPLING] Auto-responding with preset text
+```
+
+The key design choice: **LLM calls happen on the client side, not the server.** The MCP server never touches API keys or model selection. The client (AI agent host) uses its own LLM and returns the result. This keeps MCP servers model-agnostic while still leveraging AI-generated content.
+
+### 3. Progress Notifications — Real-Time Updates
+
+The `search_flights` tool in the full server simulates a flight search with 4-step progress notifications.
+
+```text title="Output (local)"
+  Found 2 flights
+    AirExample: $450 (8h 30m)
+    SkyDemo: $520 (7h 15m)
+  PASS: Flight search with progress completed
+```
+
+`ctx.report_progress(progress=1, total=4)` specifies step count and total. Per the MCP specification, progress notifications are fire-and-forget (no response expected), and our test confirmed that server-side processing continues without blocking.
+
+### 4. Resources / Prompts — Coexistence with Existing Primitives
+
+Stateful MCP doesn't break existing features. Resources and prompts work as before.
+
+```text title="Output"
+--- Read Parameterized Resource ---
+  Tokyo highlights: ['Shibuya Crossing', 'Senso-ji Temple', 'Tsukiji Market']
+  PASS: Parameterized resource read successfully
+
+--- List Prompts ---
+  packing_list: Generate a packing list prompt for a trip.
+  local_phrases: Generate a prompt for learning local phrases.
+  PASS: 2 prompts found
+```
+
+### 5. Session Management — Mcp-Session-Id Persistence
+
+Across all the tests above (tool listing, resource reads, elicitation, sampling, progress), the session ID remained consistent.
+
+```text title="Output"
+  Initial: d28be10a-298b-4bfe-a16a-c810f95269c8
+  Final:   d28be10a-298b-4bfe-a16a-c810f95269c8
+  PASS: Session ID maintained across all requests
+```
+
+### Local vs. Remote Comparison
+
+| Test | Local | Remote (AgentCore) |
+|---|---|---|
+| Elicitation | PASS | PASS |
+| Sampling | PASS | PASS |
+| Progress Notifications | PASS | PASS |
+| Resources | PASS | PASS |
+| Prompts | PASS | PASS |
+| Session ID Persistence | PASS | PASS |
+| Auth Method | None | SigV4 |
+| Session ID Format | Hex string | UUID |
+
+Functional behavior was identical. The only differences were authentication and session ID format.
+
+## Implementation Gotchas
+
+### ARN Encoding in Endpoint URL
+
+The MCP endpoint URL requires the full ARN to be URL-encoded under `/invocations?qualifier=DEFAULT`. Using just the runtime ID at `/runtimes/{runtimeId}/mcp` returns a 404. The SDK samples abstract this away, but when constructing HTTP requests directly, this is easy to miss.
+
+### SigV4 Auth with httpx_client_factory
+
+The MCP Python SDK's `streamablehttp_client` uses httpx internally. To inject SigV4 auth, pass a custom factory via `httpx_client_factory`. The SDK passes its own `auth` kwarg, so you need `kwargs.pop("auth", None)` before injecting your SigV4 auth.
+
+### The stateless_http=False Gate
+
+FastMCP defaults to `stateless_http=True`. According to the official documentation, with this default even `streamable-http` transport won't maintain sessions, and elicitation/sampling callbacks silently fail to fire. Always set `False` explicitly for stateful features.
+
+## Takeaways
+
+- **Stateful MCP enables bidirectional server-client communication** — Elicitation, sampling, and progress notifications let MCP servers interact with clients during tool execution, moving beyond the previous one-way call-and-return model.
+- **Sampling preserves model-agnostic design** — By delegating LLM calls to the client, MCP servers stay independent of specific models or API keys. This upholds MCP's core philosophy of separating tools from models.
+- **Local and remote behavior matched completely** — All stateful features worked identically on localhost and AgentCore Runtime. The main remote-specific hurdles are ARN URL encoding and SigV4 auth setup.
+- **One line gates all stateful features** — `stateless_http=False` is the single switch that enables session management. Missing it means stateful features silently do nothing, with no error messages to guide you.
+
+## Cleanup
+
+```bash title="Terminal"
+cd /tmp/agentcore-stateful-mcp
+agentcore destroy
+```
+
+`agentcore destroy` removes the runtime, endpoint, IAM role, S3 bucket, and memory resources in one command.
