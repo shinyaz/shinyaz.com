@@ -1,7 +1,7 @@
 ---
 title: "Hands-On with Stateful MCP Servers on Bedrock AgentCore Runtime: Elicitation, Sampling, and Progress Notifications"
 description: "Verifying AgentCore Runtime's new stateful MCP features. Tested elicitation (server-initiated input), sampling (LLM generation requests), and progress notifications both locally and on AgentCore."
-date: "2026-03-19"
+date: "2026-03-11"
 published: true
 featured: false
 categories: [ai-agents]
@@ -18,11 +18,11 @@ Three new features ship with this update: **Elicitation** (server-initiated user
 
 Traditional MCP was one-directional: clients call tools, servers return results. Stateful MCP makes communication bidirectional — servers can actively request actions from clients.
 
-| Feature | Direction | Purpose |
-|---|---|---|
-| **Elicitation** | Server → Client | Collect user preferences or additional info interactively |
-| **Sampling** | Server → Client | Request LLM text generation on the client side |
-| **Progress Notifications** | Server → Client | Report progress during long-running operations |
+| Feature                    | Direction       | Purpose                                                   |
+| -------------------------- | --------------- | --------------------------------------------------------- |
+| **Elicitation**            | Server → Client | Collect user preferences or additional info interactively |
+| **Sampling**               | Server → Client | Request LLM text generation on the client side            |
+| **Progress Notifications** | Server → Client | Report progress during long-running operations            |
 
 All three require session maintenance, enabled by `stateless_http=False` with the `streamable-http` transport.
 
@@ -519,16 +519,16 @@ Across all the tests above (tool listing, resource reads, elicitation, sampling,
 
 ### Local vs. Remote Comparison
 
-| Test | Local | Remote (AgentCore) |
-|---|---|---|
-| Elicitation | PASS | PASS |
-| Sampling | PASS | PASS |
-| Progress Notifications | PASS | PASS |
-| Resources | PASS | PASS |
-| Prompts | PASS | PASS |
-| Session ID Persistence | PASS | PASS |
-| Auth Method | None | SigV4 |
-| Session ID Format | Hex string | UUID |
+| Test                   | Local      | Remote (AgentCore) |
+| ---------------------- | ---------- | ------------------ |
+| Elicitation            | PASS       | PASS               |
+| Sampling               | PASS       | PASS               |
+| Progress Notifications | PASS       | PASS               |
+| Resources              | PASS       | PASS               |
+| Prompts                | PASS       | PASS               |
+| Session ID Persistence | PASS       | PASS               |
+| Auth Method            | None       | SigV4              |
+| Session ID Format      | Hex string | UUID               |
 
 Functional behavior was identical. The only differences were authentication and session ID format.
 
@@ -556,7 +556,6 @@ FastMCP defaults to `stateless_http=True`. According to the official documentati
 ## Cleanup
 
 ```bash title="Terminal"
-cd /tmp/agentcore-stateful-mcp
 agentcore destroy
 ```
 
