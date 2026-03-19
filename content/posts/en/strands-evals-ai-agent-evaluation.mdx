@@ -1,0 +1,574 @@
+---
+title: "Evaluating AI Agents with Strands Evals — Hands-on Testing of 6 Key Features"
+description: "A practical walkthrough of Strands Evals' core features: deterministic checks, LLM-based scoring, multi-turn simulation, and auto-generated test cases. Includes gotchas discovered through real testing."
+date: "2026-03-19"
+published: true
+featured: false
+categories: [ai-agents]
+tags: ["strands-agents", "ai-agents", "bedrock", "evaluation", "testing"]
+---
+
+## Introduction
+
+Moving AI agents from prototypes to production exposes a testing gap that traditional approaches can't fill. The same input yields different outputs, tool call sequences vary, and there's no single "correct" answer. How do you systematically evaluate a non-deterministic system?
+
+[Strands Evals](https://github.com/strands-agents/evals) is an evaluation framework for AI agents built with the Strands Agents SDK. It's organized around three concepts: Cases (test scenarios), Experiments (test suites), and Evaluators (judges). The framework spans deterministic checks through LLM-based quality assessment.
+
+Based on the AWS blog post "[Evaluating AI agents for production: A practical guide to Strands Evals](https://aws.amazon.com/blogs/machine-learning/evaluating-ai-agents-for-production-a-practical-guide-to-strands-evals/)", I tested six core features hands-on and share both the results and practical gotchas I discovered along the way.
+
+The tests progress from basic structure (Tests 1–2), through LLM-based quality evaluation (Tests 3–4), to multi-turn simulation (Test 5) and automatic test case generation (Test 6).
+
+## Setup
+
+The PyPI package name is `strands-agents-evals`, while the Python import name is `strands_evals`. The blog post code examples use the import name (`from strands_evals import ...`), so don't confuse it with the pip install name.
+
+```bash title="Terminal"
+python3 -m venv strands-evals-env
+source strands-evals-env/bin/activate
+pip install strands-agents strands-agents-tools strands-agents-evals
+```
+
+AWS credentials are required since evaluators use Bedrock by default. The default evaluator model is `us.anthropic.claude-sonnet-4-20250514-v1:0`.
+
+## Test 1: Basics — Case / Experiment / OutputEvaluator
+
+The most fundamental flow: define Cases, configure an OutputEvaluator with a rubric, and let the LLM judge the output.
+
+```python title="test_01_basic.py"
+from strands_evals import Case, Experiment
+from strands_evals.evaluators import OutputEvaluator
+
+cases = [
+    Case(name="Capital of France",
+         input="What is the capital of France?",
+         expected_output="The capital of France is Paris."),
+    Case(name="Simple Math", input="What is 2 + 3?", expected_output="5"),
+]
+
+evaluator = OutputEvaluator(
+    rubric="Score 1.0 if correct and complete. Score 0.5 if partial. Score 0.0 if incorrect."
+)
+experiment = Experiment(cases=cases, evaluators=[evaluator])
+
+def simple_task(case):
+    answers = {
+        "What is the capital of France?": "The capital of France is Paris.",
+        "What is 2 + 3?": "2 + 3 = 5",
+    }
+    return {"output": answers.get(case.input, "I don't know")}
+
+reports = experiment.run_evaluations(simple_task)
+
+for report in reports:
+    print(f"Overall Score: {report.overall_score:.3f}")
+    for case, score, passed in zip(report.cases, report.scores, report.test_passes):
+        print(f"  {case['name']}: score={score:.3f}, pass={passed}")
+```
+
+```text title="Output"
+Overall Score: 1.000
+  Capital of France: score=1.000, pass=True
+  Simple Math: score=1.000, pass=True
+```
+
+The Task Function bridges your agent and the evaluation system. Return `{"output": ..., "trajectory": ...}` to evaluate both output and tool usage.
+
+## Test 2: Deterministic Evaluators — Fast Checks Without LLM
+
+Deterministic evaluators run without LLM calls — fast, cheap, and perfectly reproducible.
+
+```python title="Python"
+from strands_evals.evaluators import Equals, Contains, StartsWith, ToolCalled
+
+Equals()                           # Exact match against expected_output
+Contains(value="Paris")            # Substring check (value is required)
+StartsWith(value="The")            # Prefix check (value is required)
+ToolCalled(tool_name="calculator") # Verify specific tool was called (tool_name is required)
+```
+
+```text title="Output"
+  Exact Match: score=1.00, pass=True
+  Mismatch: score=0.00, pass=False
+  Contains Paris: score=1.00, pass=True
+  Missing Paris: score=0.00, pass=False
+  Calculator called: score=1.00, pass=True, reason=tool 'calculator' was called
+  No weather_api: score=0.00, pass=False, reason=tool 'weather_api' was not called
+```
+
+`Contains` and `StartsWith` require `value`, and `ToolCalled` requires `tool_name` in the constructor. These deterministic evaluators aren't covered in the AWS blog post, but they're quite useful in practice.
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">Full runnable script (test_02_deterministic.py)</summary>
+
+```python title="test_02_deterministic.py"
+from strands_evals import Case, Experiment
+from strands_evals.evaluators import Equals, Contains, ToolCalled
+
+# --- Equals: exact match against expected_output ---
+cases_eq = [
+    Case(name="Exact Match", input="test", expected_output="hello world"),
+    Case(name="Mismatch", input="test", expected_output="hello world"),
+]
+exp_eq = Experiment(cases=cases_eq, evaluators=[Equals()])
+
+def task_eq(case):
+    return {"output": "hello world" if case.name == "Exact Match" else "hello"}
+
+for r in exp_eq.run_evaluations(task_eq):
+    for c, s, p in zip(r.cases, r.scores, r.test_passes):
+        print(f"  {c['name']}: score={s:.2f}, pass={p}")
+
+# --- Contains: substring check ---
+cases_cont = [
+    Case(name="Contains Paris", input="test"),
+    Case(name="Missing Paris", input="test"),
+]
+exp_cont = Experiment(cases=cases_cont, evaluators=[Contains(value="Paris")])
+
+def task_cont(case):
+    if case.name == "Contains Paris":
+        return {"output": "The capital of France is Paris."}
+    return {"output": "The capital of Japan is Tokyo."}
+
+for r in exp_cont.run_evaluations(task_cont):
+    for c, s, p in zip(r.cases, r.scores, r.test_passes):
+        print(f"  {c['name']}: score={s:.2f}, pass={p}")
+
+# --- ToolCalled: verify specific tool was called ---
+exp_tc1 = Experiment(
+    cases=[Case(name="Calculator called", input="test")],
+    evaluators=[ToolCalled(tool_name="calculator")],
+)
+exp_tc2 = Experiment(
+    cases=[Case(name="No weather_api", input="test")],
+    evaluators=[ToolCalled(tool_name="weather_api")],
+)
+
+def task_tc(case):
+    return {"output": "4", "trajectory": ["calculator", "search"]}
+
+for r in exp_tc1.run_evaluations(task_tc):
+    for c, s, p, reason in zip(r.cases, r.scores, r.test_passes, r.reasons):
+        print(f"  {c['name']}: score={s:.2f}, pass={p}, reason={reason}")
+for r in exp_tc2.run_evaluations(task_tc):
+    for c, s, p, reason in zip(r.cases, r.scores, r.test_passes, r.reasons):
+        print(f"  {c['name']}: score={s:.2f}, pass={p}, reason={reason}")
+```
+
+</details>
+
+## Test 3: Semantic Evaluators — LLM-Based Quality Assessment
+
+Helpfulness, Faithfulness, and Harmfulness evaluators mimic human judgment using LLMs.
+
+**Key discovery**: These trace/session-level evaluators require a `Session` object as `actual_trajectory`. Passing plain strings triggers `Trace parsing requires actual_trajectory to be a Session object`. You need the following helper to build Sessions manually:
+
+```python title="Python"
+from strands_evals.types.trace import Session, Trace, AgentInvocationSpan, SpanInfo
+from datetime import datetime, timezone
+
+def make_session(user_prompt, agent_response, session_id="test"):
+    now = datetime.now(tz=timezone.utc)
+    span_info = SpanInfo(
+        trace_id="t-001", span_id="s-001",
+        session_id=session_id, start_time=now, end_time=now,
+    )
+    span = AgentInvocationSpan(
+        span_info=span_info, user_prompt=user_prompt,
+        agent_response=agent_response, available_tools=[],
+    )
+    trace = Trace(spans=[span], trace_id="t-001", session_id=session_id)
+    return Session(traces=[trace], session_id=session_id)
+```
+
+With this helper, the task function returns `{"output": response, "trajectory": make_session(...)}`. Results:
+
+```text title="Output"
+=== HelpfulnessEvaluator (7-point scale) ===
+  Helpful weather response: score=0.833 (Very helpful), pass=True
+  Unhelpful vague response: score=0.167 (Very unhelpful), pass=False
+
+=== HarmfulnessEvaluator (binary) ===
+  Safe cooking response: score=1.000 (Not harmful), pass=True
+```
+
+HelpfulnessEvaluator uses a 7-point categorical scale (0.0–1.0). A detailed weather response scored "Very helpful" (0.833) while a vague "maybe try something" scored "Very unhelpful" (0.167) — matching intuition well.
+
+FaithfulnessEvaluator requires caution. It judges faithfulness based solely on conversation history, not Case metadata. For RAG systems, you need to include retrieved context in the `AgentInvocationSpan`'s `user_prompt`, or build a multi-turn Session with context information embedded in the conversation history.
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">Full runnable script (test_03_semantic.py)</summary>
+
+```python title="test_03_semantic.py"
+from datetime import datetime, timezone
+from strands_evals import Case, Experiment
+from strands_evals.evaluators import HelpfulnessEvaluator, HarmfulnessEvaluator
+from strands_evals.types.trace import Session, Trace, AgentInvocationSpan, SpanInfo
+
+
+def make_session(user_prompt, agent_response, session_id="test"):
+    now = datetime.now(tz=timezone.utc)
+    span_info = SpanInfo(
+        trace_id="t-001", span_id="s-001",
+        session_id=session_id, start_time=now, end_time=now,
+    )
+    span = AgentInvocationSpan(
+        span_info=span_info, user_prompt=user_prompt,
+        agent_response=agent_response, available_tools=[],
+    )
+    trace = Trace(spans=[span], trace_id="t-001", session_id=session_id)
+    return Session(traces=[trace], session_id=session_id)
+
+
+# --- HelpfulnessEvaluator ---
+print("=== HelpfulnessEvaluator ===")
+cases = [
+    Case(name="Helpful weather response",
+         input="What is the weather like in Tokyo today?"),
+    Case(name="Unhelpful vague response",
+         input="How do I reset my password?"),
+]
+exp = Experiment(cases=cases, evaluators=[HelpfulnessEvaluator()])
+
+
+def task_helpful(case):
+    responses = {
+        "What is the weather like in Tokyo today?": (
+            "Currently in Tokyo, it's 22°C (72°F) with partly cloudy skies. "
+            "Humidity is at 65% with light winds from the southeast at 10 km/h."
+        ),
+        "How do I reset my password?": "I'm not sure, maybe try something.",
+    }
+    response = responses.get(case.input, "No response")
+    return {"output": response, "trajectory": make_session(case.input, response, case.session_id)}
+
+
+for r in exp.run_evaluations(task_helpful):
+    print(f"Overall Helpfulness: {r.overall_score:.3f}")
+    for c, s, p in zip(r.cases, r.scores, r.test_passes):
+        print(f"  {c['name']}: score={s:.3f}, pass={p}")
+
+# --- HarmfulnessEvaluator ---
+print("\n=== HarmfulnessEvaluator ===")
+cases_harm = [Case(name="Safe cooking response", input="How to cook pasta?")]
+exp_harm = Experiment(cases=cases_harm, evaluators=[HarmfulnessEvaluator()])
+
+
+def task_harm(case):
+    response = "Boil salted water, add pasta, cook per package directions, drain and serve."
+    return {"output": response, "trajectory": make_session(case.input, response, case.session_id)}
+
+
+for r in exp_harm.run_evaluations(task_harm):
+    for c, s, p in zip(r.cases, r.scores, r.test_passes):
+        print(f"  {c['name']}: score={s:.3f}, pass={p}")
+```
+
+</details>
+
+## Test 4: Agent + Tool Trajectory Evaluation
+
+Testing a real Strands Agent with tools, evaluating both output quality and tool usage patterns.
+
+```python title="Python"
+from strands import Agent, tool
+from strands_evals.extractors import tools_use_extractor
+
+@tool
+def calculator(expression: str) -> str:
+    """Evaluate a mathematical expression."""
+    return str(eval(expression, {"__builtins__": {}}, {}))
+
+@tool
+def get_current_time() -> str:
+    """Get the current date and time."""
+    from datetime import datetime
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+def agent_task(case):
+    agent = Agent(tools=[calculator, get_current_time], callback_handler=None)
+    result = agent(case.input)
+    trajectory = tools_use_extractor.extract_agent_tools_used(agent.messages)
+    return {"output": str(result), "trajectory": trajectory}
+```
+
+With both OutputEvaluator and TrajectoryEvaluator applied to the `calculator` and `get_current_time` tools:
+
+```text title="Output"
+  [Agent] Input: What is 15% of 847? → Tools: ['calculator'] → Output: 127.05
+  [Agent] Input: What time is it?    → Tools: ['get_current_time'] → Output: 2026-03-19 12:10:44
+
+--- OutputEvaluator (Overall: 0.500) ---
+  Math calculation: score=1.000, pass=True
+  Current time:     score=0.000, pass=False  ← evaluator LLM judged 2026 as a future date
+
+--- TrajectoryEvaluator (Overall: 1.000) ---
+  Math calculation: score=1.000, pass=True
+  Current time:     score=1.000, pass=True
+```
+
+An interesting result: TrajectoryEvaluator confirmed correct tool usage for both cases, but OutputEvaluator scored the time query at 0 because the evaluator LLM judged "2026" as a future date. This is likely due to the evaluator model's training data cutoff — a good reminder that **the evaluator itself isn't always right**.
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">Full runnable script (test_04_agent_tools.py)</summary>
+
+```python title="test_04_agent_tools.py"
+from strands import Agent, tool
+from strands_evals import Case, Experiment
+from strands_evals.evaluators import OutputEvaluator, TrajectoryEvaluator
+from strands_evals.extractors import tools_use_extractor
+
+
+@tool
+def calculator(expression: str) -> str:
+    """Evaluate a mathematical expression.
+
+    Args:
+        expression: A mathematical expression to evaluate, e.g. "2 + 3 * 4"
+    """
+    try:
+        result = eval(expression, {"__builtins__": {}}, {})
+        return str(result)
+    except Exception as e:
+        return f"Error: {e}"
+
+
+@tool
+def get_current_time() -> str:
+    """Get the current date and time."""
+    from datetime import datetime
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+cases = [
+    Case(name="Math calculation",
+         input="What is 15% of 847? Use the calculator tool.",
+         expected_output="127.05",
+         expected_trajectory=["calculator"]),
+    Case(name="Current time",
+         input="What time is it right now? Use the get_current_time tool.",
+         expected_trajectory=["get_current_time"]),
+]
+
+output_eval = OutputEvaluator(
+    rubric="Score 1.0 if the response contains the correct answer. Score 0.0 if incorrect."
+)
+trajectory_eval = TrajectoryEvaluator(
+    rubric="Verify the agent used appropriate tools. Score 1.0 if correct tools were used."
+)
+experiment = Experiment(cases=cases, evaluators=[output_eval, trajectory_eval])
+
+
+def agent_task(case):
+    agent = Agent(
+        tools=[calculator, get_current_time],
+        system_prompt="You are a helpful assistant. Use tools when needed. Be concise.",
+        callback_handler=None,
+    )
+    result = agent(case.input)
+    trajectory = tools_use_extractor.extract_agent_tools_used(agent.messages)
+    print(f"  [Agent] Input: {case.input}")
+    print(f"  [Agent] Output: {str(result)[:100]}")
+    print(f"  [Agent] Tools used: {[t['name'] for t in trajectory]}")
+    return {"output": str(result), "trajectory": trajectory}
+
+
+reports = experiment.run_evaluations(agent_task)
+for i, report in enumerate(reports):
+    eval_name = ["OutputEvaluator", "TrajectoryEvaluator"][i]
+    print(f"\n--- {eval_name} ---")
+    print(f"Overall Score: {report.overall_score:.3f}")
+    for c, s, p in zip(report.cases, report.scores, report.test_passes):
+        print(f"  {c['name']}: score={s:.3f}, pass={p}")
+```
+
+</details>
+
+## Test 5: ActorSimulator — Multi-Turn Conversation Simulation
+
+ActorSimulator generates realistic user personas with LLMs and drives multi-turn conversations with your agent.
+
+```python title="Python"
+from strands import Agent
+from strands_evals import Case, ActorSimulator
+
+case = Case(
+    input="I need help setting up a new savings account",
+    metadata={"task_description": "Successfully open a savings account"},
+)
+user_sim = ActorSimulator.from_case_for_user_simulator(case=case, max_turns=5)
+
+agent = Agent(system_prompt="You are a helpful banking assistant.", callback_handler=None)
+
+user_message = case.input
+while user_sim.has_next():
+    agent_response = agent(user_message)
+    user_result = user_sim.act(str(agent_response))
+    user_message = str(user_result.structured_output.message)
+```
+
+The generated persona was impressively detailed:
+
+```text title="Output (generated persona)"
+Name: Sarah Chen | Age 28 | Marketing coordinator (first role after MBA)
+Goal: Open a high-yield savings account, build $10,000 emergency fund in 2 years
+Traits: Tech-savvy, detail-oriented, prefers online banking
+```
+
+Here's how the 5-turn conversation unfolded:
+
+```text title="Output (conversation log excerpt, responses abbreviated)"
+--- Turn 1 ---
+User: I need help setting up a new savings account
+Agent: I'd be happy to help you open a new savings account! ...
+       First, may I have your full name as you'd like it to appear on the account?
+
+--- Turn 3 ---
+User: Before I decide on the deposit amount, can you tell me the exact interest
+      rates and monthly fees for both accounts?
+Agent: I should clarify that I don't have access to the current specific interest
+       rates, fees, or detailed feature [information] ...
+
+--- Turn 5 ---
+User: This isn't working - I need actual help, not more referrals. I'll just go
+      elsewhere to find a bank that can actually open an account ...
+Agent: I completely understand your frustration, and I sincerely apologize. ...
+
+Conversation completed in 5 turns
+```
+
+The simulator naturally asked follow-up questions, expressed frustration when the agent couldn't provide specific rates, and eventually abandoned the conversation. This kind of realistic user behavior (frustration, goal pivoting, abandonment) is exactly what scripted tests can't replicate.
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">Full runnable script (test_05_simulation.py)</summary>
+
+```python title="test_05_simulation.py"
+from strands import Agent
+from strands_evals import Case, ActorSimulator
+
+case = Case(
+    input="I need help setting up a new savings account",
+    metadata={"task_description": "Successfully open a savings account"},
+)
+
+# Generate persona and create simulator
+user_sim = ActorSimulator.from_case_for_user_simulator(case=case, max_turns=5)
+print(f"Generated profile:\n{user_sim.actor_profile.model_dump_json(indent=2)}\n")
+
+# Target agent to evaluate
+agent = Agent(
+    system_prompt=(
+        "You are a helpful banking assistant. Help customers open savings accounts. "
+        "Ask for their name, initial deposit amount, and preferred account type."
+    ),
+    callback_handler=None,
+)
+
+# Multi-turn conversation loop
+user_message = case.input
+turn = 0
+while user_sim.has_next():
+    turn += 1
+    print(f"--- Turn {turn} ---")
+    print(f"User: {user_message}")
+
+    agent_response = agent(user_message)
+    agent_text = str(agent_response)
+    print(f"Agent: {agent_text[:200]}")
+
+    user_result = user_sim.act(agent_text)
+    user_message = str(user_result.structured_output.message)
+    print(f"[Reasoning]: {user_result.structured_output.reasoning[:150]}\n")
+
+print(f"Conversation completed in {turn} turns")
+```
+
+</details>
+
+## Test 6: ExperimentGenerator — Automatic Test Case Generation
+
+ExperimentGenerator creates test cases and rubrics from a context description.
+
+```python title="Python"
+import asyncio
+from strands_evals.generators import ExperimentGenerator
+from strands_evals.evaluators import OutputEvaluator
+
+async def main():
+    generator = ExperimentGenerator(
+        input_type=str, output_type=str, include_expected_output=True,
+    )
+    experiment = await generator.from_context_async(
+        context="A customer service agent for an e-commerce platform",
+        task_description="Handle inquiries about orders, returns, and products",
+        num_cases=5,
+        evaluator=OutputEvaluator,
+    )
+    # Save to JSON for reuse
+    experiment.to_file("generated_experiment.json")
+
+asyncio.run(main())
+```
+
+```text title="Output"
+Generated 5 test cases:
+  1: Order Status and Shipping Delay Inquiry (medium)
+  2: Basic Product Availability Question (easy)
+  3: Pre-order Cancellation with Payment Complications (hard)
+  4: Basic Warranty Information Request (easy)
+  5: International Order with Compatibility Questions (hard)
+
+Generated rubric:
+  "Scoring should evaluate how accurately and completely the agent
+   addresses the specific customer inquiry..."
+```
+
+Five cases were generated across difficulty levels. Internally, the first 30% of indices are requested as easy, the last 20% as hard, and the rest as medium (for 5 cases: easy=2, medium=2, hard=1). An auto-generated rubric is attached and ready for OutputEvaluator. Additional methods like `from_scratch_async` (topic-based) and `from_experiment_async` (extend existing experiments) are also available.
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">Full runnable script (test_06_generator.py)</summary>
+
+```python title="test_06_generator.py"
+import asyncio
+from strands_evals.generators import ExperimentGenerator
+from strands_evals.evaluators import OutputEvaluator
+
+
+async def main():
+    generator = ExperimentGenerator(
+        input_type=str, output_type=str, include_expected_output=True,
+    )
+
+    experiment = await generator.from_context_async(
+        context="A customer service agent for an e-commerce platform that sells electronics",
+        task_description="Handle customer inquiries about orders, returns, and product specifications",
+        num_cases=5,
+        evaluator=OutputEvaluator,
+    )
+
+    print(f"Generated {len(experiment.cases)} test cases:")
+    for i, case in enumerate(experiment.cases):
+        print(f"  {i+1}: {case.name}")
+        print(f"     Input: {case.input[:100]}")
+        if case.expected_output:
+            print(f"     Expected: {str(case.expected_output)[:100]}")
+
+    for ev in experiment.evaluators:
+        if hasattr(ev, "rubric"):
+            print(f"\nGenerated rubric: {ev.rubric[:200]}")
+
+    experiment.to_file("generated_experiment.json")
+    print("\nSaved to generated_experiment.json")
+
+
+asyncio.run(main())
+```
+
+</details>
+
+## Takeaways
+
+- **The Session object wall** — Semantic evaluators (Helpfulness, Faithfulness, GoalSuccessRate, etc.) all require Session objects, not plain strings. Building `AgentInvocationSpan`-based Sessions is mandatory and not immediately obvious from the documentation.
+- **Deterministic + LLM is the practical combo** — Use Equals/Contains/ToolCalled for fast correctness checks, then layer OutputEvaluator and HelpfulnessEvaluator for quality dimensions. This gives you both speed and depth.
+- **ActorSimulator's value is the unexpected** — Its ability to simulate frustration, goal pivoting, and abandonment catches issues that scripted multi-turn tests simply cannot reproduce.
+- **Auto-generation as a starting point** — Use ExperimentGenerator for broad coverage, then refine with hand-crafted cases targeting known failure patterns. This is the most efficient workflow for building comprehensive test suites.
