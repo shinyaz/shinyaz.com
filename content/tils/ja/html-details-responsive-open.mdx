@@ -1,0 +1,31 @@
+---
+title: "HTML <details> の open 属性はCSSメディアクエリで制御できない"
+description: "details要素の開閉状態をレスポンシブに切り替えたかったが、open属性はHTML属性なのでCSSでは制御不可。useEffectでwindow.innerWidthを見て初期状態を設定する必要がある。"
+date: "2026-03-19"
+published: true
+tags: ["html", "react", "web-design"]
+---
+
+ブログの目次を `<details>` で実装していて、デスクトップでは開いた状態、モバイルでは閉じた状態にしたかった。CSSの `@media` で `open` 属性を切り替えられると思ったが、`open` はHTML属性であってCSSプロパティではないため不可能だった。
+
+React での解決策はシンプルで、`useEffect` でマウント時にウィンドウ幅を判定する。
+
+```tsx title="TypeScript"
+const [isOpen, setIsOpen] = useState(true);
+
+useEffect(() => {
+  setIsOpen(window.innerWidth >= 768);
+}, []);
+
+return (
+  <details
+    open={isOpen}
+    onToggle={(e) => setIsOpen(e.currentTarget.open)}
+  >
+    <summary>目次</summary>
+    {/* ... */}
+  </details>
+);
+```
+
+`onToggle` でユーザーの手動開閉も追跡するのがポイント。SSR時は `true`（開いた状態）でレンダリングされ、クライアントでモバイルなら閉じるという流れになる。

@@ -1,0 +1,19 @@
+---
+title: "Tailwind v4 で text-sm と text-base の中間サイズを作るには arbitrary value を使う"
+description: "text-sm(14px)とtext-base(16px)の間にユーティリティクラスがない。text-[0.9375rem]のようにarbitrary valueで15pxなど任意サイズを指定できる。"
+date: "2026-03-19"
+published: true
+tags: ["tailwindcss", "web-design"]
+---
+
+シリーズナビゲーションの文字サイズを調整していて、`text-sm`(14px) では小さく `text-base`(16px) では大きいという場面に遭遇した。Tailwind v4 のデフォルトスケールにはこの間のステップがない。
+
+解決策は arbitrary value で直接指定すること。
+
+```text title="Tailwind CSS"
+text-[0.9375rem]   → 15px
+text-[0.875rem]    → 14px (text-sm と同じ)
+text-[1rem]        → 16px (text-base と同じ)
+```
+
+`rem` で指定すればブラウザのフォントサイズ設定にも追従する。Tailwind v4 では `tailwind.config.ts` なしでも `[]` 記法で任意値が使えるため、デザイントークンの隙間を埋めるのに便利だ。

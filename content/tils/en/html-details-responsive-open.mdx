@@ -1,0 +1,31 @@
+---
+title: "HTML <details> open attribute can't be controlled with CSS media queries"
+description: "Wanted to open details on desktop and close on mobile. The open attribute is an HTML attribute, not a CSS property, so media queries don't work. useEffect with window.innerWidth is the solution."
+date: "2026-03-19"
+published: true
+tags: ["html", "react", "web-design"]
+---
+
+I was implementing a table of contents with `<details>` and wanted it open on desktop, closed on mobile. My first instinct was CSS `@media` — but `open` is an HTML attribute, not a CSS property. There's no way to toggle it with media queries.
+
+The React solution is straightforward: check `window.innerWidth` on mount.
+
+```tsx title="TypeScript"
+const [isOpen, setIsOpen] = useState(true);
+
+useEffect(() => {
+  setIsOpen(window.innerWidth >= 768);
+}, []);
+
+return (
+  <details
+    open={isOpen}
+    onToggle={(e) => setIsOpen(e.currentTarget.open)}
+  >
+    <summary>Table of Contents</summary>
+    {/* ... */}
+  </details>
+);
+```
+
+The `onToggle` handler is key — it tracks manual open/close by the user. During SSR it renders as `true` (open), then on the client it closes if mobile.

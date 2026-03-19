@@ -1,0 +1,19 @@
+---
+title: "Use Tailwind v4 arbitrary values to get font sizes between text-sm and text-base"
+description: "No utility class exists between text-sm (14px) and text-base (16px). Use text-[0.9375rem] for 15px or any size in between via arbitrary values."
+date: "2026-03-19"
+published: true
+tags: ["tailwindcss", "web-design"]
+---
+
+While tweaking the font size for a series navigation component, `text-sm` (14px) was too small and `text-base` (16px) was too large. Tailwind v4's default scale has no step in between.
+
+The fix is arbitrary values.
+
+```text title="Tailwind CSS"
+text-[0.9375rem]   → 15px
+text-[0.875rem]    → 14px (same as text-sm)
+text-[1rem]        → 16px (same as text-base)
+```
+
+Using `rem` ensures it respects the user's browser font size setting. In Tailwind v4, the `[]` syntax works without a `tailwind.config.ts`, making it easy to fill gaps in the design token scale.

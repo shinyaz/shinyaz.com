@@ -1,0 +1,22 @@
+---
+title: "Next.js path aliases resolve identically whether the target is a file or a directory with index.ts"
+description: "Refactored src/lib/i18n.ts into src/lib/i18n/index.ts without changing any of the 50+ import statements using @/lib/i18n. Node.js module resolution falls back to index.ts automatically."
+date: "2026-03-19"
+published: true
+tags: ["nextjs", "typescript"]
+---
+
+I split `src/lib/i18n.ts` into `src/lib/i18n/index.ts` + `ja.ts` + `en.ts` for better maintainability. None of the 50+ files importing from `@/lib/i18n` needed changes.
+
+```text title="Before"
+src/lib/i18n.ts          ← @/lib/i18n resolves here
+```
+
+```text title="After"
+src/lib/i18n/
+  index.ts               ← @/lib/i18n resolves here (same path)
+  ja.ts
+  en.ts
+```
+
+Node.js module resolution first looks for `i18n.ts`, then falls back to `i18n/index.ts`. As long as exports are preserved, migrating from a single file to a directory is fully transparent. Zero import changes, zero test updates.

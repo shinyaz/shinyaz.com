@@ -1,0 +1,22 @@
+---
+title: "Next.js のパスエイリアスはファイルをディレクトリに分割してもインポートパスが変わらない"
+description: "src/lib/i18n.ts を src/lib/i18n/index.ts に分割した際、@/lib/i18n からのインポートがそのまま動作した。Node.jsのモジュール解決でindex.tsが自動的に参照される。"
+date: "2026-03-19"
+published: true
+tags: ["nextjs", "typescript"]
+---
+
+i18n の辞書を1ファイルから言語別ファイルに分割するリファクタリングをした。`src/lib/i18n.ts` を削除して `src/lib/i18n/index.ts` + `ja.ts` + `en.ts` に分割したが、プロジェクト全体の50箇所以上ある `import { ... } from "@/lib/i18n"` を一切変更せずに済んだ。
+
+```text title="Before"
+src/lib/i18n.ts          ← @/lib/i18n で解決
+```
+
+```text title="After"
+src/lib/i18n/
+  index.ts               ← @/lib/i18n で解決（同じパス）
+  ja.ts
+  en.ts
+```
+
+Node.js のモジュール解決が `@/lib/i18n` に対してまずファイル `i18n.ts` を探し、なければディレクトリ `i18n/index.ts` にフォールバックするためだ。エクスポートさえ維持すれば、ファイル→ディレクトリの移行は完全に透過的に行える。
