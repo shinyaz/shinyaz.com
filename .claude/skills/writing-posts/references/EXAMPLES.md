@@ -34,11 +34,15 @@ published: true
 featured: false # Reserve for major milestones only
 categories: [ai-tools] # Available: ai-tools, infrastructure, programming, writing
 tags: ["nextjs", "typescript", "tailwindcss"] # lowercase, hyphenated
+series: "my-series" # optional: series identifier (shared across posts in the same series)
+seriesOrder: 1 # optional: position within the series
+seriesExtra: true # optional: mark as bonus/extra entry (default: false)
 ---
 ```
 
 ## Series Articles
 
-- シリーズの場合、末尾に全記事へのリンク一覧を追加する
-- 現在の記事には「（本記事）」/ `(this article)` を付記
-- 前後の記事への導入リンクを本文冒頭に含める
+- Posts sharing the same `series` identifier automatically get a series navigation component
+- `seriesOrder` controls display order (starting from 1)
+- Bonus entries use `seriesExtra: true` to appear in a separate section
+- Include introductory links to previous/next articles at the beginning of the body

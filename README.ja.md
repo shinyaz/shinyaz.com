@@ -151,6 +151,9 @@ published: true
 featured: true               # 任意: トップページの「注目記事」セクションに表示
 updated: 2026-01-15          # 任意: 最終更新日
 cover: "/images/cover.png"   # 任意: カバー画像
+series: "my-series"          # 任意: シリーズ識別子（ナビゲーション自動生成）
+seriesOrder: 1               # 任意: シリーズ内の順番
+seriesExtra: true            # 任意: 番外編マーク（デフォルト: false）
 categories:
   - programming
 tags:

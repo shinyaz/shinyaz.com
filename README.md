@@ -151,6 +151,9 @@ published: true
 featured: true               # optional: show in "Featured" section on home page
 updated: 2026-01-15          # optional: last updated date
 cover: "/images/cover.png"   # optional: cover image
+series: "my-series"          # optional: series identifier (auto-generates navigation)
+seriesOrder: 1               # optional: position within the series
+seriesExtra: true            # optional: mark as bonus/extra entry (default: false)
 categories:
   - programming
 tags:
