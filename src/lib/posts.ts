@@ -89,6 +89,13 @@ export function getPostsByTag(tag: string, locale?: Locale) {
   return getPublishedPosts(locale).filter((post) => post.tags.includes(tag));
 }
 
+export function getSeriesPosts(post: Post): Post[] {
+  if (!post.series) return [];
+  return getPublishedPosts(post.locale as Locale)
+    .filter((p) => p.series === post.series)
+    .sort((a, b) => (a.seriesOrder ?? 0) - (b.seriesOrder ?? 0));
+}
+
 export function getRelatedPosts(post: Post, limit = 3): Post[] {
   const candidates = getPublishedPosts(post.locale as Locale).filter(
     (p) => p.permalink !== post.permalink

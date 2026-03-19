@@ -1,6 +1,6 @@
 import type { Metadata } from "next";
 import { notFound } from "next/navigation";
-import { getPostBySlug, getRelatedPosts } from "@/lib/posts";
+import { getPostBySlug, getRelatedPosts, getSeriesPosts } from "@/lib/posts";
 import { formatDate, formatReadingTime } from "@/lib/utils";
 import { MdxContent } from "@/components/mdx/mdx-content";
 import { CategoryBadge } from "@/components/blog/category-badge";
@@ -12,6 +12,7 @@ import { locales, isValidLocale, getDictionary } from "@/lib/i18n";
 import { extractHeadings } from "@/lib/toc";
 import { TableOfContents } from "@/components/blog/table-of-contents";
 import { ProfileCard } from "@/components/common/profile-card";
+import { SeriesNavigation } from "@/components/blog/series-navigation";
 import { generateBlogStaticParams } from "@/lib/blog-params";
 
 interface PostPageProps {
@@ -62,6 +63,7 @@ export default async function PostPage({ params }: PostPageProps) {
   if (!post) notFound();
 
   const headings = extractHeadings(post.content);
+  const seriesPosts = getSeriesPosts(post);
   const relatedPosts = getRelatedPosts(post);
 
   const blogPostingJsonLd = {
@@ -156,6 +158,11 @@ export default async function PostPage({ params }: PostPageProps) {
         <div className="prose">
           <MdxContent code={post.body} />
         </div>
+        <SeriesNavigation
+          seriesPosts={seriesPosts}
+          currentPermalink={post.permalink}
+          locale={locale}
+        />
         <SocialShare
           url={`${SITE_URL}${post.permalink}`}
           title={post.title}

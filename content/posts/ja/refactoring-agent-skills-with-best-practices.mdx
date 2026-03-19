@@ -6,6 +6,9 @@ published: true
 featured: false
 categories: [ai-tools]
 tags: ["claude-code", "ai-tools", "best-practices", "automation"]
+series: "claude-code-productivity"
+seriesOrder: 5
+seriesExtra: true
 ---
 
 本記事は、Claude Codeの生産性を最大化するシリーズの番外編だ。本編では[CLAUDE.mdの設計](/ja/blog/2026/03/07/claude-md-ai-coding-assistant-guide)から[スキルシステム](/ja/blog/2026/03/08/optimizing-claude-code-with-skills)、[メタスキル](/ja/blog/2026/03/09/claude-code-meta-skills)、[チーム展開](/ja/blog/2026/03/10/claude-code-team-productivity)まで紹介した。今回は本編で構築したスキルセットを、Anthropicの公式ベストプラクティスに照らして検証し、リファクタリングした記録だ。
@@ -183,14 +186,3 @@ Analysis Progress:
 - **公式ベストプラクティスは「動くスキル」を「正しく設計されたスキル」に変える** — 予約語の禁止や動名詞命名のような規則は、ドキュメントを読まないと気づかない。エラーにならない違反こそ危険だ
 - **progressive disclosure でSKILL.mdは概要に集中させる** — 詳細を参照ファイルに分離すると、エージェントのコンテキスト消費が必要最小限になる。SKILL.mdは「目次」、参照ファイルは「本文」と考えるとよい
 - **セルフチェックスキルで品質を継続的に維持する** — `/analyzing-agent-instructions` を定期的に実行すれば、スキルの追加や変更による品質低下を早期に検出できる
-
----
-
-_シリーズ記事：_
-
-1. _[CLAUDE.md でAIコーディングアシスタントを最大活用する](/ja/blog/2026/03/07/claude-md-ai-coding-assistant-guide)_
-2. _[Claude CodeのCLAUDE.mdを83%削減してスキルシステムで効率化した話](/ja/blog/2026/03/08/optimizing-claude-code-with-skills)_
-3. _[Claude Codeのメタスキル：スキルを管理するスキルで実現する自己改善サイクル](/ja/blog/2026/03/09/claude-code-meta-skills)_
-4. _[Claude Codeメタスキルのチーム展開：組織全体でAI支援開発の生産性を最大化する](/ja/blog/2026/03/10/claude-code-team-productivity)_
-5. _公式ベストプラクティスでエージェントスキルをリファクタリングする（本記事・番外編1）_
-6. _[エージェントスキルの命名統一とdescription最適化](/ja/blog/2026/03/17/skill-naming-and-description-optimization)（番外編2）_

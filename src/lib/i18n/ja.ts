@@ -84,6 +84,11 @@ export const ja = {
   toc: {
     title: "目次",
   },
+  series: {
+    title: "シリーズ記事",
+    currentPart: "本記事",
+    extra: "番外編",
+  },
   relatedPosts: {
     title: "関連記事",
   },

@@ -6,6 +6,8 @@ published: false
 featured: false
 categories: [ai-agents]
 tags: ["eks", "kubernetes", "ai-agents", "strands-agents", "mcp", "bedrock", "kaniko"]
+series: "agentic-ai-on-eks"
+seriesOrder: 1
 ---
 
 ## Introduction
@@ -267,11 +269,3 @@ The system prompt rules — "3-day forecast" and "include outdoor activity suita
 - **One agent, three access paths** — Chat with it via REST (port 3000), embed it as a tool via MCP (port 8080), or call it from another agent via A2A (port 9000). Co-locating three protocols in a single container means new integration patterns without reimplementation.
 - **ConfigMap-driven agent behavior** — Injecting `agent.md` and `mcp.json` via Helm values means prompt and tool changes don't require image rebuilds.
 - **Pod Identity + Kaniko for Docker-free builds** — Kaniko on EKS with S3 build context and Pod Identity creates a container build pipeline that doesn't depend on a Docker daemon.
-
----
-
-This is Part 1 of the Agentic AI on EKS workshop validation series.
-
-- Part 1: Deploying AI Agents on EKS (this article)
-- [Part 2: Multi-Agent Coordination with A2A Protocol](/en/blog/2026/03/25/a2a-multi-agent-on-eks)
-- [Part 3: Cognito Auth UI and HPA to Complete the Agent Platform](/en/blog/2026/03/26/agent-ui-and-scaling-on-eks)

@@ -6,6 +6,8 @@ published: false
 featured: false
 categories: [ai-agents]
 tags: ["eks", "kubernetes", "ai-agents", "strands-agents", "mcp", "bedrock", "kaniko"]
+series: "agentic-ai-on-eks"
+seriesOrder: 1
 ---
 
 ## はじめに
@@ -275,11 +277,3 @@ Here's the weather forecast for New York City for the next 3 days:
 - **1 つのエージェントに 3 つのアクセス経路** — UI からは REST（port 3000）で会話し、MCP（port 8080）でツールとして組み込み、A2A（port 9000）で他のエージェントから呼び出せる。同じコンテナに 3 プロトコルを同居させることで、再実装なしに利用形態を広げられる設計だ。
 - **ConfigMap でエージェントの振る舞いを制御** — `agent.md` と `mcp.json` を Helm values で注入する設計により、イメージ再ビルドなしでプロンプトやツール接続先を変更できる。
 - **Pod Identity + Kaniko で Docker 不要のビルドパイプライン** — EKS 上の Kaniko + S3 ビルドコンテキスト + Pod Identity で、Docker デーモンに依存しないコンテナビルドが完結する。
-
----
-
-本記事は Agentic AI on EKS ワークショップ検証シリーズの Part 1 である。
-
-- Part 1: EKS上でAIエージェントをデプロイする（本記事）
-- [Part 2: A2Aプロトコルで実現するマルチエージェント連携](/ja/blog/2026/03/25/a2a-multi-agent-on-eks)
-- [Part 3: Cognito認証UIとHPAで仕上げるエージェント基盤](/ja/blog/2026/03/26/agent-ui-and-scaling-on-eks)

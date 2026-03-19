@@ -6,6 +6,8 @@ published: false
 featured: false
 categories: [ai-agents]
 tags: ["eks", "kubernetes", "ai-agents", "strands-agents", "a2a", "bedrock"]
+series: "agentic-ai-on-eks"
+seriesOrder: 2
 ---
 
 ## Introduction
@@ -220,11 +222,3 @@ The Travel Agent correctly followed its system prompt rules — attributing weat
 - **Set agent card URLs to Kubernetes Service FQDNs** — The A2A server defaults to `0.0.0.0`, which is unreachable within the cluster. Configuring `a2a.http_url` is mandatory.
 - **Session history poisons LLM decisions** — Unlike traditional services, AI agents make decisions based on conversation context. Stale URLs in session history cause persistent failures even after config fixes. Build session clearing into your operational procedures.
 - **A2A delegates at the agent level** — While MCP connects at the tool level, A2A sends natural language requests and lets the receiving agent decide how to handle them. This suits orchestrator-style architectures.
-
----
-
-This is Part 2 of the Agentic AI on EKS workshop validation series.
-
-- [Part 1: Deploying AI Agents on EKS](/en/blog/2026/03/24/agentic-ai-on-eks-workshop)
-- Part 2: Multi-Agent Coordination with A2A Protocol (this article)
-- [Part 3: Cognito Auth UI and HPA to Complete the Agent Platform](/en/blog/2026/03/26/agent-ui-and-scaling-on-eks)
