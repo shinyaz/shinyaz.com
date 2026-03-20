@@ -165,6 +165,7 @@ client_id = auth_config["allowedClients"][0]
 
 client_desc = cognito.describe_user_pool_client(UserPoolId=pool_id, ClientId=client_id)
 client_secret = client_desc["UserPoolClient"]["ClientSecret"]
+scope = client_desc["UserPoolClient"]["AllowedOAuthScopes"][0]
 domain = cognito.describe_user_pool(UserPoolId=pool_id)["UserPool"]["Domain"]
 token_endpoint = f"https://{domain}.auth.us-west-2.amazoncognito.com/oauth2/token"
 
@@ -175,7 +176,7 @@ token = requests.post(token_endpoint, headers={
     "Authorization": f"Basic {auth_header}",
 }, data={
     "grant_type": "client_credentials",
-    "scope": f"{gateway['name']}/invoke",
+    "scope": scope,
 }).json()["access_token"]
 ```
 

@@ -229,14 +229,14 @@ I ran `uname -a`, `python3 --version`, `whoami`, and `--version` checks for comm
 
 | Tool | Available? |
 |---|---|
-| git | 2.50.1 (pre-installed) |
-| curl | 8.17.0 (pre-installed) |
 | python3 | 3.13.9 (matches runtime config) |
+| git | Not installed |
+| curl | Not installed |
 | node | Not installed |
 | pip | Not installed |
 | aws CLI | Not installed |
 
-**Code configuration includes git and curl but not node, pip, or AWS CLI.** Use container configuration with a custom Dockerfile for production agents that need additional tools.
+**Code configuration only includes the Python runtime — git, curl, node, pip, and AWS CLI are not pre-installed.** Use container configuration with a custom Dockerfile for production agents that need additional tools.
 
 ### 3. In-Session File Persistence
 
@@ -313,7 +313,7 @@ Each command took about 3.5 seconds (2s sleep + API overhead), but all three com
 
 **File-based step chaining** — Leverage in-session filesystem sharing: agent generates code → writes to file → runs tests → reads results → feeds back to reasoning. The shared filesystem makes this flow natural.
 
-**Parallel execution for faster feedback** — Fire off tests, linting, and type checks in parallel to cut per-turn latency. Note that code configuration doesn't include node or pip, so production agents should use container configuration with a custom Dockerfile.
+**Parallel execution for faster feedback** — Fire off tests, linting, and type checks in parallel to cut per-turn latency. Note that code configuration doesn't include tools beyond the Python runtime, so production agents should use container configuration with a custom Dockerfile.
 
 ### Notes on the Official Best Practices
 
@@ -344,7 +344,7 @@ The verification revealed runtime behaviors not obvious from the documentation a
 - **"Stateless" only applies to shell process state** — The docs say "Stateless between commands" but also "same container, filesystem." Testing confirmed that `/tmp/` files persisted across API calls within a session. Only shell history and environment variables are reset.
 - **Timeout is explicitly signaled with exit code -1** — Command failure (non-zero exit code + COMPLETED) and timeout (exit code -1 + TIMED_OUT) are cleanly separated on two axes, and partial output is still streamed before timeout.
 - **Concurrent execution is verified** — The docs state that command execution doesn't block agent invocations, but testing confirmed that multiple commands in the same session also run in parallel. Three commands completed in the wall time of one.
-- **Code configuration containers lack node, pip, and AWS CLI** — git (2.50.1) and curl (8.17.0) are pre-installed, but node, pip, and AWS CLI were not available. Choose container configuration when your agent needs a full toolchain.
+- **Code configuration containers lack common tools beyond Python** — git, curl, node, pip, and AWS CLI were not available. Choose container configuration when your agent needs a full toolchain.
 
 ## Cleanup
 
