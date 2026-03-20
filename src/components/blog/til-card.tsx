@@ -1,15 +1,13 @@
 import Link from "next/link";
 import { formatDate, formatReadingTime } from "@/lib/utils";
-import { CategoryBadge } from "./category-badge";
 import { TagBadge } from "./tag-badge";
 import type { Locale } from "@/lib/i18n";
 
-interface PostCardProps {
+interface TilCardProps {
   title: string;
   description?: string;
   date: string;
   permalink: string;
-  categories: string[];
   tags: string[];
   locale: Locale;
   readingTime?: number;
@@ -17,12 +15,12 @@ interface PostCardProps {
 
 const MAX_TAGS = 3;
 
-export function PostCard({ title, description, date, permalink, categories, tags, locale, readingTime }: PostCardProps) {
+export function TilCard({ title, description, date, permalink, tags, locale, readingTime }: TilCardProps) {
   return (
-    <article className="group border-b border-border py-6 first:pt-0 last:border-b-0 border-l-3 border-l-foreground pl-4">
+    <article className="group border-b border-border py-6 first:pt-0 last:border-b-0 border-l-3 border-l-muted-foreground/40 pl-4">
       <div className="flex items-center gap-2 mb-1.5">
-        <span className="inline-flex items-center rounded-sm bg-foreground/10 px-1.5 py-0.5 text-xs font-semibold text-foreground">
-          Blog
+        <span className="inline-flex items-center rounded-sm bg-muted-foreground/15 px-1.5 py-0.5 text-xs font-semibold text-muted-foreground">
+          TIL
         </span>
       </div>
       <Link href={permalink} className="block">
@@ -43,13 +41,6 @@ export function PostCard({ title, description, date, permalink, categories, tags
           <span className="text-xs text-muted-foreground">
             {formatReadingTime(readingTime, locale)}
           </span>
-        )}
-        {categories.length > 0 && (
-          <div className="flex gap-1.5">
-            {categories.map((cat) => (
-              <CategoryBadge key={cat} slug={cat} locale={locale} />
-            ))}
-          </div>
         )}
         {tags.length > 0 && (
           <div className="flex gap-1.5">

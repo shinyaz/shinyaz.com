@@ -86,7 +86,7 @@ export function ProfileCard({ locale }: ProfileCardProps) {
             </div>
             <Link
               href={`/${locale}/about`}
-              className="text-sm text-muted-foreground hover:text-foreground transition-colors"
+              className="inline-flex items-center gap-1 rounded-md border border-border px-3 py-1.5 text-sm text-foreground hover:bg-muted transition-colors"
             >
               {t.home.aboutReadMore} &rarr;
             </Link>

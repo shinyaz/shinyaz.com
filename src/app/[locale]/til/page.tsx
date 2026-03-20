@@ -2,7 +2,7 @@ import type { Metadata } from "next";
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { getPublishedTils, getPaginatedTils } from "@/lib/tils";
-import { PostList } from "@/components/blog/post-list";
+import { TilCard } from "@/components/blog/til-card";
 import { Pagination } from "@/components/blog/pagination";
 import { getDictionary, isValidLocale } from "@/lib/i18n";
 import { SITE_URL } from "@/lib/constants";
@@ -42,16 +42,6 @@ export default async function TilPage({ params, searchParams }: TilPageProps) {
   const allTils = getPublishedTils(locale);
   const { tils, totalPages, currentPage } = getPaginatedTils(page, allTils);
 
-  const tilsAsPostCards = tils.map((til) => ({
-    title: til.title,
-    description: til.description,
-    date: til.date,
-    permalink: til.permalink,
-    categories: [] as string[],
-    tags: til.tags,
-    metadata: { readingTime: til.metadata.readingTime },
-  }));
-
   return (
     <div className="mx-auto max-w-3xl px-4 py-6 md:py-12">
       <header className="mb-8">
@@ -70,7 +60,20 @@ export default async function TilPage({ params, searchParams }: TilPageProps) {
         <p className="text-muted-foreground">{t.til.empty}</p>
       ) : (
         <>
-          <PostList posts={tilsAsPostCards} locale={locale} />
+          <div>
+            {tils.map((til) => (
+              <TilCard
+                key={til.permalink}
+                title={til.title}
+                description={til.description}
+                date={til.date}
+                permalink={til.permalink}
+                tags={til.tags}
+                locale={locale}
+                readingTime={til.metadata.readingTime}
+              />
+            ))}
+          </div>
           <Pagination currentPage={currentPage} totalPages={totalPages} basePath={`/${locale}/til`} locale={locale} />
         </>
       )}
