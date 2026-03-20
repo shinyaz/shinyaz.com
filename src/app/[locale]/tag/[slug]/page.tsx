@@ -3,6 +3,7 @@ import { notFound } from "next/navigation";
 import { getAllTagsIncludingTils, getPostsByTag } from "@/lib/posts";
 import { getTilsByTag } from "@/lib/tils";
 import { PostList } from "@/components/blog/post-list";
+import { TilCard } from "@/components/blog/til-card";
 import Link from "next/link";
 import { locales, isValidLocale, getDictionary } from "@/lib/i18n";
 import { SITE_URL } from "@/lib/constants";
@@ -57,16 +58,6 @@ export default async function TagPage({ params }: TagPageProps) {
 
   if (posts.length === 0 && tilItems.length === 0) notFound();
 
-  const tilsAsPostCards = tilItems.map((til) => ({
-    title: til.title,
-    description: til.description,
-    date: til.date,
-    permalink: til.permalink,
-    categories: [] as string[],
-    tags: til.tags,
-    metadata: { readingTime: til.metadata.readingTime },
-  }));
-
   return (
     <div className="mx-auto max-w-3xl px-4 py-6 md:py-12">
       <Link
@@ -96,7 +87,20 @@ export default async function TagPage({ params }: TagPageProps) {
           {posts.length > 0 && (
             <h2 className="mb-4 text-xl font-semibold">{t.tag.tilsSection}</h2>
           )}
-          <PostList posts={tilsAsPostCards} locale={locale} />
+          <div>
+            {tilItems.map((til) => (
+              <TilCard
+                key={til.permalink}
+                title={til.title}
+                description={til.description}
+                date={til.date}
+                permalink={til.permalink}
+                tags={til.tags}
+                locale={locale}
+                readingTime={til.metadata.readingTime}
+              />
+            ))}
+          </div>
         </section>
       )}
     </div>

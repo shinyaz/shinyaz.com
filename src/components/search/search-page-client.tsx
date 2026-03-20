@@ -3,6 +3,7 @@
 import { useState, useMemo } from "react";
 import { useSearchParams, useRouter } from "next/navigation";
 import { PostCard } from "@/components/blog/post-card";
+import { TilCard } from "@/components/blog/til-card";
 import { searchPosts, type SearchablePost } from "@/lib/search";
 import type { Dictionary, Locale } from "@/lib/i18n";
 
@@ -55,18 +56,30 @@ export function SearchPageClient({ posts, locale, t }: SearchPageClientProps) {
                 )}
               </p>
               <div>
-                {results.map(({ post }) => (
-                  <PostCard
-                    key={post.permalink}
-                    title={post.title}
-                    description={post.description}
-                    date={post.date}
-                    permalink={post.permalink}
-                    categories={post.categories}
-                    tags={post.tags}
-                    locale={locale}
-                  />
-                ))}
+                {results.map(({ post }) =>
+                  post.permalink.includes("/til/") ? (
+                    <TilCard
+                      key={post.permalink}
+                      title={post.title}
+                      description={post.description}
+                      date={post.date}
+                      permalink={post.permalink}
+                      tags={post.tags}
+                      locale={locale}
+                    />
+                  ) : (
+                    <PostCard
+                      key={post.permalink}
+                      title={post.title}
+                      description={post.description}
+                      date={post.date}
+                      permalink={post.permalink}
+                      categories={post.categories}
+                      tags={post.tags}
+                      locale={locale}
+                    />
+                  ),
+                )}
               </div>
             </>
           ) : (
