@@ -1,0 +1,410 @@
+---
+title: "Same-AZ Routing with Lambda AZ Metadata — Halving ElastiCache Latency"
+description: "Hands-on verification of Lambda's new AZ metadata endpoint. Measured same-AZ vs cross-AZ latency to an ElastiCache Valkey cluster and quantified the routing benefit."
+date: "2026-03-20"
+published: true
+featured: false
+categories: [infrastructure]
+tags: ["aws", "lambda", "elasticache", "valkey", "networking"]
+series: "lambda-az-metadata"
+seriesOrder: 1
+---
+
+## Introduction
+
+On March 19, 2026, AWS announced a [metadata endpoint that lets Lambda functions discover which Availability Zone they're running in](https://aws.amazon.com/about-aws/whats-new/2026/03/lambda-availability-zone-metadata/). Until now, Lambda had no way to determine its AZ, making it impossible to prefer the nearest node when connecting to multi-AZ resources like ElastiCache or RDS.
+
+This post verifies the metadata endpoint's API behavior, then measures real connection latency to an ElastiCache Valkey cluster across 3 AZs to quantify the benefit of same-AZ routing. Jump to [Same-AZ Routing Verification](#same-az-routing-verification) if you want the numbers first.
+
+Prerequisites:
+
+- AWS CLI configured with `lambda:*`, `elasticache:*`, `ec2:*`, and `iam:*` permissions
+- A default VPC with subnets in 3+ AZs
+- Test region: ap-northeast-1 (Tokyo)
+
+## How the Metadata Endpoint Works
+
+Two environment variables are automatically set in every Lambda execution environment:
+
+| Variable | Description | Example |
+|---|---|---|
+| `AWS_LAMBDA_METADATA_API` | Metadata server address | `169.254.100.1:9001` |
+| `AWS_LAMBDA_METADATA_TOKEN` | Per-environment auth token | (auto-generated) |
+
+A simple HTTP GET returns the AZ ID:
+
+```bash title="Request"
+curl -s \
+  -H "Authorization: Bearer ${AWS_LAMBDA_METADATA_TOKEN}" \
+  "http://${AWS_LAMBDA_METADATA_API}/2026-01-15/metadata/execution-environment"
+```
+
+```json title="Response"
+{
+  "AvailabilityZoneID": "apne1-az2"
+}
+```
+
+The response includes `Cache-Control: private, max-age=43200, immutable`. No additional configuration or IAM permissions are required, and it works across all runtimes including custom runtimes and container images.
+
+Note that the endpoint returns an AZ ID (`apne1-az2`), not an AZ name (`ap-northeast-1d`). AZ names map differently across AWS accounts, while AZ IDs consistently reference the same physical zone.
+
+## API Behavior Verification
+
+Before diving into same-AZ routing, I verified the metadata endpoint's response characteristics using a simple non-VPC Lambda function. The tests covered latency, caching behavior, error handling, and AZ distribution.
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">API test Lambda function (lambda_az_metadata.py)</summary>
+
+```python title="lambda_az_metadata.py"
+import json
+import os
+import urllib.request
+import time
+
+def handler(event, context):
+    metadata_api = os.environ.get("AWS_LAMBDA_METADATA_API")
+    metadata_token = os.environ.get("AWS_LAMBDA_METADATA_TOKEN")
+    test_mode = event.get("test_mode", "basic")
+
+    url = f"http://{metadata_api}/2026-01-15/metadata/execution-environment"
+
+    if test_mode == "basic":
+        req = urllib.request.Request(
+            url, headers={"Authorization": f"Bearer {metadata_token}"}
+        )
+        start = time.time()
+        with urllib.request.urlopen(req) as resp:
+            elapsed_ms = (time.time() - start) * 1000
+            body = json.loads(resp.read())
+            return {
+                "az_id": body["AvailabilityZoneID"],
+                "latency_ms": round(elapsed_ms, 3),
+                "headers": dict(resp.headers),
+            }
+
+    elif test_mode == "cache_test":
+        latencies = []
+        for _ in range(3):
+            req = urllib.request.Request(
+                url, headers={"Authorization": f"Bearer {metadata_token}"}
+            )
+            start = time.time()
+            with urllib.request.urlopen(req) as resp:
+                json.loads(resp.read())
+                latencies.append(round((time.time() - start) * 1000, 3))
+        return {"latencies_ms": latencies}
+
+    elif test_mode == "error_bad_token":
+        req = urllib.request.Request(
+            url, headers={"Authorization": "Bearer invalid-token"}
+        )
+        try:
+            urllib.request.urlopen(req)
+        except urllib.error.HTTPError as e:
+            return {"status": e.code, "reason": e.reason}
+```
+
+Deployed as a non-VPC Lambda (Python 3.13, 256MB memory), switching `test_mode` for each test.
+
+</details>
+
+### Basics and Caching
+
+```json title="Output (test_mode: basic)"
+{
+  "az_id": "apne1-az2",
+  "latency_ms": 180.221,
+  "headers": {
+    "Cache-Control": "private, max-age=43200, immutable",
+    "Content-Type": "application/json",
+    "Content-Length": "34"
+  }
+}
+```
+
+The first call took ~180ms. Three consecutive calls within the same execution environment returned `[0.676, 0.342, 0.393]` ms — roughly 250x faster. Since the response is `immutable`, the AZ ID never changes during an execution environment's lifetime. **Fetch once during Init and cache in a module-level variable.**
+
+### Error Handling and AZ Distribution
+
+Error responses matched the documentation:
+
+| Test Case | Status Code | Description |
+|---|---|---|
+| Invalid token | 401 Unauthorized | Bearer token is wrong |
+| No Authorization header | 401 Unauthorized | Header missing entirely |
+| POST method | 405 Method Not Allowed | Only GET is supported |
+
+Forcing cold starts with 50 concurrent invocations yielded: apne1-az2 appeared 40 times and apne1-az4 appeared 10 times. The exact scheduling algorithm isn't documented, but Lambda clearly distributes across multiple AZs.
+
+## Same-AZ Routing Verification
+
+Here's the core question: how much latency do you save by routing to the same-AZ cache node?
+
+### Test Setup
+
+Built in ap-northeast-1 (Tokyo):
+
+- **ElastiCache Valkey cluster**: 1 primary + 2 replicas across 3 AZs, TLS enabled, cache.t3.micro
+- **Lambda function**: VPC-attached, subnets in all 3 AZs, Python 3.13, 512MB memory
+- **Measurement**: Valkey `PING` RTT over TLS, 50 iterations per node per invocation
+
+```text title="Node Placement"
+az-metadata-test-001 | ap-northeast-1a (apne1-az4) | primary
+az-metadata-test-002 | ap-northeast-1c (apne1-az1) | replica
+az-metadata-test-003 | ap-northeast-1d (apne1-az2) | replica
+```
+
+### Lambda Function
+
+The function fetches its AZ ID from the metadata endpoint, then measures PING latency to each Valkey node over TLS. Since VPC-attached Lambda cannot call AWS APIs (like `elasticache:DescribeReplicationGroups`) without a NAT gateway, node information is passed via environment variables.
+
+```python title="lambda_same_az_routing.py"
+import json
+import os
+import socket
+import ssl
+import time
+import urllib.request
+
+
+def get_az_id():
+    api = os.environ["AWS_LAMBDA_METADATA_API"]
+    token = os.environ["AWS_LAMBDA_METADATA_TOKEN"]
+    url = f"http://{api}/2026-01-15/metadata/execution-environment"
+    req = urllib.request.Request(
+        url, headers={"Authorization": f"Bearer {token}"}
+    )
+    with urllib.request.urlopen(req) as resp:
+        return json.loads(resp.read())["AvailabilityZoneID"]
+
+
+def measure_valkey_latency(host, port, iterations=50):
+    ctx = ssl.create_default_context()
+    sock = socket.create_connection((host, port), timeout=5)
+    tls_sock = ctx.wrap_socket(sock, server_hostname=host)
+    latencies = []
+    try:
+        for _ in range(iterations):
+            start = time.perf_counter()
+            tls_sock.sendall(b"*1\r\n$4\r\nPING\r\n")
+            tls_sock.recv(64)
+            latencies.append((time.perf_counter() - start) * 1000)
+    finally:
+        tls_sock.close()
+    latencies.sort()
+    return {
+        "avg_ms": round(sum(latencies) / len(latencies), 3),
+        "p50_ms": round(latencies[len(latencies) // 2], 3),
+        "min_ms": round(latencies[0], 3),
+    }
+
+
+def handler(event, context):
+    lambda_az_id = get_az_id()
+
+    # Node info from env: cluster_id|address|port|az_id|az_name|role,...
+    nodes = []
+    for entry in os.environ["CACHE_NODES"].split(","):
+        parts = entry.split("|")
+        nodes.append({
+            "id": parts[0], "address": parts[1], "port": int(parts[2]),
+            "az_id": parts[3], "az_name": parts[4], "role": parts[5],
+        })
+
+    results = {"lambda_az_id": lambda_az_id, "same_az": [], "cross_az": []}
+    for node in nodes:
+        latency = measure_valkey_latency(node["address"], node["port"])
+        entry = {**node, "latency": latency}
+        if node["az_id"] == lambda_az_id:
+            results["same_az"].append(entry)
+        else:
+            results["cross_az"].append(entry)
+    return results
+```
+
+The metadata endpoint runs on a link-local address (`169.254.100.1`), so it works from VPC Lambda without any NAT gateway or VPC endpoint — a key advantage of this feature.
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">Deployment steps (reproducing the test environment)</summary>
+
+Follow these commands to reproduce. ElastiCache cluster creation takes ~10 minutes.
+
+```bash title="Terminal (ElastiCache)"
+# Security group allowing port 6379 within itself
+SG_ID=$(aws ec2 create-security-group \
+  --group-name az-test-sg --description "AZ test" \
+  --vpc-id <VPC_ID> --query 'GroupId' --output text)
+aws ec2 authorize-security-group-ingress \
+  --group-id $SG_ID --protocol tcp --port 6379 --source-group $SG_ID
+
+# Subnet group (specify subnets in 3 AZs)
+aws elasticache create-cache-subnet-group \
+  --cache-subnet-group-name az-test-subnet \
+  --cache-subnet-group-description "AZ test" \
+  --subnet-ids <SUBNET_1a> <SUBNET_1c> <SUBNET_1d>
+
+# Valkey replication group (3 AZs, TLS enabled)
+aws elasticache create-replication-group \
+  --replication-group-id az-metadata-test \
+  --replication-group-description "AZ routing test" \
+  --engine valkey \
+  --cache-node-type cache.t3.micro \
+  --num-node-groups 1 \
+  --replicas-per-node-group 2 \
+  --cache-subnet-group-name az-test-subnet \
+  --security-group-ids $SG_ID \
+  --multi-az-enabled \
+  --automatic-failover-enabled \
+  --transit-encryption-enabled
+# Wait ~10 minutes until status is "available"
+```
+
+```bash title="Terminal (Lambda)"
+# IAM role with VPC execution permissions
+aws iam create-role --role-name lambda-az-test-role \
+  --assume-role-policy-document '{
+    "Version":"2012-10-17",
+    "Statement":[{"Effect":"Allow","Principal":{"Service":"lambda.amazonaws.com"},"Action":"sts:AssumeRole"}]
+  }'
+aws iam attach-role-policy --role-name lambda-az-test-role \
+  --policy-arn arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole
+
+# Lambda function (VPC-attached, 3 subnets)
+zip lambda.zip lambda_same_az_routing.py
+aws lambda create-function \
+  --function-name az-routing-test \
+  --runtime python3.13 \
+  --handler lambda_same_az_routing.handler \
+  --role arn:aws:iam::<ACCOUNT_ID>:role/lambda-az-test-role \
+  --zip-file fileb://lambda.zip \
+  --timeout 120 --memory-size 512 \
+  --vpc-config SubnetIds=<SUBNET_1a>,<SUBNET_1c>,<SUBNET_1d>,SecurityGroupIds=$SG_ID \
+  --environment "Variables={CACHE_NODES=<CACHE_NODES_VALUE>}"
+```
+
+The `CACHE_NODES` environment variable uses the format `cluster_id|address|port|az_id|az_name|role`, comma-separated. Retrieve node info from `aws elasticache describe-replication-groups` and AZ ID mapping from `aws ec2 describe-availability-zones`.
+
+```text title="CACHE_NODES value (example)"
+az-metadata-test-001|az-metadata-test-001.xxx.apne1.cache.amazonaws.com|6379|apne1-az4|ap-northeast-1a|primary,az-metadata-test-002|az-metadata-test-002.xxx.apne1.cache.amazonaws.com|6379|apne1-az1|ap-northeast-1c|replica,az-metadata-test-003|az-metadata-test-003.xxx.apne1.cache.amazonaws.com|6379|apne1-az2|ap-northeast-1d|replica
+```
+
+</details>
+
+### Results
+
+16 invocations (including 10 forced cold starts via concurrent execution), measured from all 3 AZs. Each invocation measures PING latency (50 iterations) to all 3 nodes.
+
+| Metric | Same-AZ | Cross-AZ |
+|---|---|---|
+| Average | 0.663 ms | 1.663 ms |
+| Minimum | 0.496 ms | 1.323 ms |
+| Maximum | 0.908 ms | 2.014 ms |
+
+**Same-AZ routing reduces average latency by ~60% (1.663ms to 0.663ms).** Cross-AZ is roughly 2.5x slower. This was measured with minimal-payload Valkey PING over TLS; actual cache operations with larger payloads may show even larger differences.
+
+The trend holds consistently across all 3 AZs (apne1-az1, apne1-az2, apne1-az4).
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">Full measurement data (all 16 runs)</summary>
+
+| Run | Lambda AZ | Same-AZ avg (ms) | Cross-AZ avg (ms) | Overhead |
+|---|---|---|---|---|
+| 1 | apne1-az1 | 0.538 | 1.719 | +219% |
+| 2 | apne1-az1 | 0.693 | 1.627 | +135% |
+| 3 | apne1-az1 | 0.908 | 1.812 | +100% |
+| 4 | apne1-az1 | 0.782 | 1.604 | +105% |
+| 5 | apne1-az1 | 0.704 | 1.796 | +155% |
+| 6 | apne1-az1 | 0.799 | 1.662 | +108% |
+| 7 | apne1-az1 | 0.524 | 1.917 | +266% |
+| 8 | apne1-az2 | 0.717 | 1.323 | +85% |
+| 9 | apne1-az2 | 0.671 | 1.446 | +116% |
+| 10 | apne1-az2 | 0.717 | 1.443 | +101% |
+| 11 | apne1-az2 | 0.689 | 1.448 | +110% |
+| 12 | apne1-az2 | 0.621 | 1.562 | +152% |
+| 13 | apne1-az4 | 0.496 | 1.798 | +263% |
+| 14 | apne1-az1 | 0.581 | 2.014 | +247% |
+| 15 | apne1-az1 | 0.544 | 1.549 | +185% |
+| 16 | apne1-az4 | 0.626 | 1.885 | +201% |
+
+Even in the worst same-AZ case (0.908ms), it was still faster than the best cross-AZ case (1.323ms). Same-AZ routing wins without exception.
+
+</details>
+
+## Implementation Pattern
+
+Based on the results, here's how to implement same-AZ routing. The key is fetching the AZ ID once during Init and caching it at module level.
+
+```python title="Python"
+import json
+import os
+import urllib.request
+
+_az_id = None  # Cache at module level (Init phase)
+
+def get_lambda_az_id():
+    global _az_id
+    if _az_id is None:
+        api = os.environ["AWS_LAMBDA_METADATA_API"]
+        token = os.environ["AWS_LAMBDA_METADATA_TOKEN"]
+        url = f"http://{api}/2026-01-15/metadata/execution-environment"
+        req = urllib.request.Request(
+            url, headers={"Authorization": f"Bearer {token}"}
+        )
+        with urllib.request.urlopen(req) as resp:
+            _az_id = json.loads(resp.read())["AvailabilityZoneID"]
+    return _az_id
+
+def select_same_az_endpoint(endpoints, lambda_az_id):
+    """Prefer same-AZ endpoint, fall back to any available."""
+    same_az = [ep for ep in endpoints if ep["az_id"] == lambda_az_id]
+    return same_az[0] if same_az else endpoints[0]
+```
+
+### Powertools for AWS Lambda Support
+
+The [official documentation](https://docs.aws.amazon.com/lambda/latest/dg/configuration-metadata-endpoint.html) describes Powertools metadata utilities for Python that automate HTTP request construction, auth token handling, caching, and SnapStart support.
+
+```python title="Python (Powertools — available after release)"
+from aws_lambda_powertools.utilities.lambda_metadata import get_lambda_metadata
+
+def handler(event, context):
+    metadata = get_lambda_metadata()
+    az_id = metadata.availability_zone_id  # e.g., "apne1-az2"
+    # ...
+```
+
+However, as of this writing (March 20, 2026), the latest Python Powertools release (3.25.0, released March 4, 2026) does not yet include the `lambda_metadata` module. Running `pip install "aws-lambda-powertools"` and importing `from aws_lambda_powertools.utilities.lambda_metadata import get_lambda_metadata` raises `ModuleNotFoundError`. Since the AZ metadata feature was announced on March 19 — after the latest Powertools release — a new version with this module has not been published yet. Use direct API access in the meantime.
+
+## Takeaways
+
+- **Cross-AZ overhead is ~2.5x in practice** — Same-AZ averaged 0.66ms vs 1.66ms cross-AZ. For latency-sensitive workloads like caching, this directly impacts overall response time.
+- **Fetch AZ ID once during Init** — The response is `immutable` and never changes within an execution environment. Cache it in a module-level variable.
+- **AZ ID vs AZ name matters** — The metadata returns AZ IDs (`apne1-az2`), while ElastiCache reports AZ names (`ap-northeast-1d`). You'll need `ec2:DescribeAvailabilityZones` or a pre-built mapping table to bridge them.
+- **Works in VPC without extra infrastructure** — The metadata endpoint runs on a link-local address, so no NAT gateway or VPC endpoint is needed.
+- **Python Powertools support is documented but not yet released** — The official docs describe Powertools integration, but as of March 20, 2026, the latest Python version (3.25.0) does not include the `lambda_metadata` module. Use direct API access for now.
+
+## Cleanup
+
+Delete resources in dependency order. ElastiCache deletion takes a few minutes; wait for it before removing the security group and subnet group.
+
+```bash title="Terminal"
+# Lambda function
+aws lambda delete-function --function-name az-routing-test
+
+# ElastiCache replication group
+aws elasticache delete-replication-group \
+  --replication-group-id az-metadata-test \
+  --no-retain-primary-cluster
+# Wait for completion, then:
+
+# Subnet group and security group
+aws elasticache delete-cache-subnet-group \
+  --cache-subnet-group-name az-test-subnet
+aws ec2 delete-security-group --group-id <SG_ID>
+
+# IAM role
+aws iam detach-role-policy --role-name lambda-az-test-role \
+  --policy-arn arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole
+aws iam delete-role --role-name lambda-az-test-role
+```

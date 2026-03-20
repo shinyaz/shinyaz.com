@@ -1,0 +1,27 @@
+---
+title: "Lambda AZメタデータのPowertools対応はPython版未リリース・TypeScript版は利用可能"
+description: "公式ドキュメントにはPython/TypeScript両方のPowertoolsコード例があるが、Python版3.25.0にはlambda_metadataモジュールが未収録でModuleNotFoundErrorになる。TypeScript版は@aws-lambda-powertools/commons 2.32.0で対応済み。"
+date: "2026-03-20"
+published: true
+tags: ["aws", "lambda", "powertools"]
+---
+
+Lambda AZメタデータエンドポイント（2026年3月19日発表）を[公式ドキュメント](https://docs.aws.amazon.com/lambda/latest/dg/configuration-metadata-endpoint.html)の通りにPowertoolsで使おうとしたら、Python版でいきなりエラーになった。
+
+```python title="Python"
+from aws_lambda_powertools.utilities.lambda_metadata import get_lambda_metadata
+# → ModuleNotFoundError: No module named 'aws_lambda_powertools.utilities.lambda_metadata'
+```
+
+`pip install "aws-lambda-powertools"` でインストールされる最新版は3.25.0（2026年3月4日リリース）で、AZメタデータ機能の発表（3月19日）より前だ。`utilities/` ディレクトリに `lambda_metadata` モジュール自体が存在しない。
+
+一方、TypeScript版は `@aws-lambda-powertools/commons` 2.32.0 で既に対応済みだった。
+
+```typescript title="TypeScript"
+import { getMetadata } from '@aws-lambda-powertools/commons/utils/metadata';
+
+const metadata = await getMetadata();
+const azId = metadata.AvailabilityZoneID; // e.g., "apne1-az2"
+```
+
+Python版はPowertoolsの対応リリースを待つか、直接APIアクセスで実装する必要がある。ドキュメントにコード例があるからといって即座に使えるとは限らない、という教訓。

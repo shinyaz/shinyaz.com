@@ -1,0 +1,281 @@
+---
+title: "Powertools で Lambda AZ メタデータを取得する — Same-AZ ルーティングを3行で実装"
+description: "Powertools for AWS Lambda の getMetadata() を使った Same-AZ ルーティングを TypeScript で実装・検証。キャッシュ動作や clearMetadataCache() の挙動を実測データとともに共有する。"
+date: "2026-03-20"
+published: true
+featured: false
+categories: [infrastructure]
+tags: ["aws", "lambda", "elasticache", "valkey", "powertools", "typescript"]
+series: "lambda-az-metadata"
+seriesOrder: 2
+---
+
+## はじめに
+
+[前回の記事](/ja/posts/lambda-az-metadata-same-az-routing)では、Lambda AZメタデータエンドポイントを直接呼び出してSame-AZルーティングの効果を検証した。結果としてクロスAZレイテンシが同一AZの約2.5倍であることを実測で確認できたが、直接APIアクセスではHTTPリクエスト構築、認証トークン処理、キャッシュ実装をすべて自前で行う必要があった。
+
+本記事では、Powertools for AWS Lambda（TypeScript版）の `getMetadata()` を使い、Same-AZルーティングをより簡潔に実装する。加えて、Powertoolsのキャッシュ動作についても検証結果を共有する。
+
+前提条件:
+
+- [前回の記事](/ja/posts/lambda-az-metadata-same-az-routing)の検証環境と同等の構成（ElastiCache Valkey 3AZ、VPC内Lambda）
+- Node.js 22.x ランタイム
+- `@aws-lambda-powertools/commons` パッケージ
+
+## Powertools の getMetadata()
+
+`@aws-lambda-powertools/commons` パッケージの `utils/metadata` から `getMetadata()` をインポートするだけでAZ IDを取得できる。
+
+```typescript title="TypeScript"
+import { getMetadata } from "@aws-lambda-powertools/commons/utils/metadata";
+
+const metadata = await getMetadata();
+const azId = metadata.AvailabilityZoneID; // e.g., "apne1-az2"
+```
+
+直接APIアクセスと比較すると差は明らかだ。
+
+```typescript title="直接APIアクセス（比較用）"
+const api = process.env.AWS_LAMBDA_METADATA_API!;
+const token = process.env.AWS_LAMBDA_METADATA_TOKEN!;
+const res = await fetch(
+  `http://${api}/2026-01-15/metadata/execution-environment`,
+  { headers: { Authorization: `Bearer ${token}` } },
+);
+const { AvailabilityZoneID: azId } = await res.json();
+```
+
+環境変数の参照、URLの構築、認証ヘッダの設定がすべて `getMetadata()` の1行に集約される。
+
+## Powertools の内部実装
+
+[ソースコード](https://github.com/aws-powertools/powertools-lambda-typescript)を確認すると、`getMetadata()` は以下の設計になっている。
+
+| 項目             | 動作                                                                                         |
+| ---------------- | -------------------------------------------------------------------------------------------- |
+| キャッシュ       | モジュールレベルのオブジェクトに結果を保持。2回目以降はHTTPリクエストなし                    |
+| キャッシュクリア | `clearMetadataCache()` で明示的にクリア可能                                                  |
+| ローカル開発     | `POWERTOOLS_DEV=true` または `AWS_LAMBDA_INITIALIZATION_TYPE` 未設定時は空オブジェクトを返す |
+| タイムアウト     | デフォルト1000ms（`AbortSignal.timeout`）。オプションで変更可能                              |
+| HTTPクライアント | Node.js 組み込みの `fetch` API を使用                                                        |
+
+注目すべきは `clearMetadataCache()` の存在だ。SnapStart環境ではRestore後にキャッシュを破棄して新しいAZ IDを取得する必要があるが、この関数を使えばそのハンドリングが明示的に行える。
+
+## キャッシュ動作の検証
+
+非VPCのLambda関数で `getMetadata()` のレイテンシを計測した。
+
+```typescript title="TypeScript"
+// 1回目: 初回呼び出し
+const metadata1 = await getMetadata();
+
+// 2回目: キャッシュヒット
+const metadata2 = await getMetadata();
+
+// clearMetadataCache() 後: 再取得
+clearMetadataCache();
+const metadata3 = await getMetadata();
+```
+
+| 計測                      | コールドスタート | ウォームスタート                       |
+| ------------------------- | ---------------- | -------------------------------------- |
+| 初回呼び出し              | 605ms            | 0.05〜0.19ms（前回のキャッシュヒット） |
+| キャッシュヒット          | 0.07ms           | 0.015〜0.024ms                         |
+| `clearMetadataCache()` 後 | 20ms             | 1.9〜158ms                             |
+
+コールドスタート時の初回呼び出しは約600msかかるが、これはLambda実行環境の初期化オーバーヘッドも含む値だ。ウォームスタート時はモジュールレベルのキャッシュが前回の呼び出しから引き継がれるため、初回呼び出しでも0.05ms程度で完了する。
+
+`clearMetadataCache()` 後の再取得は1.9〜158msとばらつきが大きい。メタデータエンドポイントへの新規HTTP接続の確立が毎回必要になるため、通常のコードパスでは `clearMetadataCache()` を呼ぶべきではない。SnapStartのRestore時など、明確にキャッシュ破棄が必要な場合にのみ使用する。
+
+## Same-AZ ルーティング検証
+
+[前回の記事](/ja/posts/lambda-az-metadata-same-az-routing)と同条件（ElastiCache Valkey 3AZ、TLS、PING 50回）で、TypeScript Powertools版のSame-AZルーティングを検証した。
+
+### 検証用Lambda関数
+
+Lambda関数の `handler` 部分はシンプルだ。`getMetadata()` でAZ IDを取得し、各ノードへのレイテンシを計測して同一AZ/クロスAZに分類する。
+
+```typescript title="index.ts（handler部分）"
+import { getMetadata } from "@aws-lambda-powertools/commons/utils/metadata";
+
+export const handler = async () => {
+  const metadata = await getMetadata();
+  const lambdaAzId = (metadata as Record<string, unknown>)
+    .AvailabilityZoneID as string;
+
+  const nodes = process.env.CACHE_NODES!.split(",").map((e) => {
+    const [id, address, port, azId, azName, role] = e.split("|");
+    return { id, address, port: parseInt(port), azId, azName, role };
+  });
+
+  const results = await Promise.all(
+    nodes.map(async (node) => ({
+      ...node,
+      latency: await measureValkeyLatency(node.address, node.port),
+      sameAz: node.azId === lambdaAzId,
+    })),
+  );
+
+  return { lambdaAzId, results };
+};
+```
+
+AZ IDの取得が `getMetadata()` の1行で完結しているのがポイントだ。esbuild でバンドルすると関数全体がわずか5.3KBになる。
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">完全なLambda関数コード（レイテンシ計測ロジック含む）</summary>
+
+```typescript title="index.ts"
+import { getMetadata } from "@aws-lambda-powertools/commons/utils/metadata";
+import * as tls from "tls";
+
+function measureValkeyLatency(
+  host: string,
+  port: number,
+  iterations = 50,
+): Promise<{ avgMs: number }> {
+  return new Promise((resolve, reject) => {
+    const socket = tls.connect({ host, port, servername: host }, () => {
+      const latencies: number[] = [];
+      let i = 0;
+      const ping = () => {
+        if (i >= iterations) {
+          socket.destroy();
+          latencies.sort((a, b) => a - b);
+          resolve({
+            avgMs:
+              Math.round(
+                (latencies.reduce((a, b) => a + b, 0) / latencies.length) *
+                  1000,
+              ) / 1000,
+          });
+          return;
+        }
+        const start = performance.now();
+        socket.write("*1\r\n$4\r\nPING\r\n");
+        socket.once("data", () => {
+          latencies.push(performance.now() - start);
+          i++;
+          ping();
+        });
+      };
+      ping();
+    });
+    socket.on("error", reject);
+  });
+}
+
+export const handler = async () => {
+  const metadata = await getMetadata();
+  const lambdaAzId = (metadata as Record<string, unknown>)
+    .AvailabilityZoneID as string;
+
+  const nodes = process.env.CACHE_NODES!.split(",").map((e) => {
+    const [id, address, port, azId, azName, role] = e.split("|");
+    return { id, address, port: parseInt(port), azId, azName, role };
+  });
+
+  const results = await Promise.all(
+    nodes.map(async (node) => ({
+      ...node,
+      latency: await measureValkeyLatency(node.address, node.port),
+      sameAz: node.azId === lambdaAzId,
+    })),
+  );
+
+  return { lambdaAzId, results };
+};
+```
+
+</details>
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">デプロイ手順</summary>
+
+ElastiCache Valkey クラスターは[前回の記事](/ja/posts/lambda-az-metadata-same-az-routing)のデプロイ手順で構築する。TypeScript Lambda のビルドとデプロイは以下の通り。
+
+```bash title="ターミナル（ビルド）"
+npm init -y
+npm install @aws-lambda-powertools/commons esbuild
+npx esbuild index.ts --bundle --platform=node --target=node22 --outfile=dist/index.js --format=cjs --minify
+cd dist && zip function.zip index.js
+```
+
+```bash title="ターミナル（Lambda作成）"
+aws lambda create-function \
+  --function-name az-ts-routing-test \
+  --runtime nodejs22.x \
+  --handler index.handler \
+  --role arn:aws:iam::<ACCOUNT_ID>:role/<ROLE_NAME> \
+  --zip-file fileb://function.zip \
+  --timeout 120 --memory-size 512 \
+  --vpc-config SubnetIds=<SUBNET_1a>,<SUBNET_1c>,<SUBNET_1d>,SecurityGroupIds=<SG_ID> \
+  --environment '{"Variables":{"CACHE_NODES":"<CACHE_NODES値>"}}'
+```
+
+`CACHE_NODES` の形式は[前回の記事](/ja/posts/lambda-az-metadata-same-az-routing)を参照。
+
+</details>
+
+### 計測結果
+
+16回の呼び出し結果：
+
+| メトリクス | 同一AZ   | クロスAZ |
+| ---------- | -------- | -------- |
+| 平均       | 0.739 ms | 1.894 ms |
+| 最小       | 0.428 ms | 1.579 ms |
+| 最大       | 1.634 ms | 2.141 ms |
+
+**同一AZルーティングにより、平均レイテンシが約61%削減された（1.894ms → 0.739ms）。** クロスAZは同一AZの約2.6倍のレイテンシとなる。
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">全16回の計測詳細データ</summary>
+
+| 実行# | Lambda AZ | 同一AZ avg (ms) | クロスAZ avg (ms) | オーバーヘッド |
+| ----- | --------- | --------------- | ----------------- | -------------- |
+| 1     | apne1-az4 | 0.428           | 1.855             | +333%          |
+| 2     | apne1-az4 | 0.581           | 1.926             | +232%          |
+| 3     | apne1-az4 | 0.539           | 1.883             | +249%          |
+| 4     | apne1-az4 | 1.634           | 2.130             | +30%           |
+| 5     | apne1-az4 | 0.697           | 2.141             | +207%          |
+| 6     | apne1-az4 | 0.752           | 2.014             | +168%          |
+| 7     | apne1-az2 | 0.538           | 1.707             | +217%          |
+| 8     | apne1-az4 | 0.577           | 1.905             | +230%          |
+| 9     | apne1-az4 | 0.652           | 2.055             | +215%          |
+| 10    | apne1-az4 | 0.607           | 2.036             | +235%          |
+| 11    | apne1-az2 | 0.679           | 1.579             | +133%          |
+| 12    | apne1-az4 | 0.749           | 2.014             | +169%          |
+| 13    | apne1-az2 | 0.584           | 1.637             | +180%          |
+| 14    | apne1-az1 | 1.131           | 1.929             | +71%           |
+| 15    | apne1-az4 | 0.525           | 1.889             | +260%          |
+| 16    | apne1-az1 | 1.158           | 1.599             | +38%           |
+
+</details>
+
+### Python版（前回記事）との比較
+
+| 指標         | Python（直接API） | TypeScript（Powertools） |
+| ------------ | ----------------- | ------------------------ |
+| Same-AZ avg  | 0.663 ms          | 0.739 ms                 |
+| Cross-AZ avg | 1.663 ms          | 1.894 ms                 |
+| 比率         | 2.5x              | 2.6x                     |
+| 削減率       | ~60%              | ~61%                     |
+
+同一AZ/クロスAZの比率はほぼ同等だ。絶対値の差（TypeScript版がやや遅い）はランタイムの違いやElastiCacheクラスターの再構築による配置変更が影響している可能性がある。重要なのは、**Powertoolsを使っても同一AZルーティングの効果は変わらない**ということだ。
+
+## まとめ
+
+- **TypeScript版 Powertools は `getMetadata()` で即座に利用可能** — `@aws-lambda-powertools/commons` 2.32.0でAZメタデータに対応済み。キャッシュも自動で行われる。
+- **Same-AZルーティングの効果はランタイムに依存しない** — Python直接APIでもTypeScript Powertoolsでも、同一AZは約2.5倍高速という傾向は一貫している。
+- **`clearMetadataCache()` は通常コードパスでは不要** — キャッシュクリア後の再取得は1.9〜158msとばらつきが大きい。SnapStart Restore時など明確な理由がある場合にのみ使用する。
+
+## クリーンアップ
+
+[前回の記事](/ja/posts/lambda-az-metadata-same-az-routing)と同じ手順でリソースを削除する。TypeScript版のLambda関数名のみ異なる。
+
+```bash title="ターミナル"
+aws lambda delete-function --function-name az-ts-routing-test
+aws lambda delete-function --function-name az-ts-powertools-test
+# ElastiCache、サブネットグループ、SG、IAMロールの削除は前回記事を参照
+```

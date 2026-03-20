@@ -1,0 +1,263 @@
+---
+title: "Lambda AZ Metadata with TypeScript Powertools — Same-AZ Routing in 3 Lines"
+description: "Implement same-AZ routing using Powertools getMetadata() in TypeScript. Verified caching behavior and clearMetadataCache() with real measurement data."
+date: "2026-03-20"
+published: true
+featured: false
+categories: [infrastructure]
+tags: ["aws", "lambda", "elasticache", "valkey", "powertools", "typescript"]
+series: "lambda-az-metadata"
+seriesOrder: 2
+---
+
+## Introduction
+
+In the [previous post](/en/posts/lambda-az-metadata-same-az-routing), I verified same-AZ routing using Lambda's AZ metadata endpoint with direct API access in Python. The results showed cross-AZ latency is ~2.5x higher than same-AZ. However, direct API access requires manual HTTP request construction, auth token handling, and cache implementation.
+
+This post implements the same pattern using Powertools for AWS Lambda (TypeScript) `getMetadata()`, verifies its caching behavior, and compares results with the Python approach.
+
+Prerequisites:
+
+- Same test environment as [Part 1](/en/posts/lambda-az-metadata-same-az-routing) (ElastiCache Valkey 3AZ, VPC Lambda)
+- Node.js 22.x runtime
+- `@aws-lambda-powertools/commons` package
+
+## Powertools getMetadata()
+
+Import `getMetadata()` from `@aws-lambda-powertools/commons/utils/metadata` and you're done:
+
+```typescript title="TypeScript"
+import { getMetadata } from '@aws-lambda-powertools/commons/utils/metadata';
+
+const metadata = await getMetadata();
+const azId = metadata.AvailabilityZoneID; // e.g., "apne1-az2"
+```
+
+Compare with direct API access:
+
+```typescript title="Direct API access (for comparison)"
+const api = process.env.AWS_LAMBDA_METADATA_API!;
+const token = process.env.AWS_LAMBDA_METADATA_TOKEN!;
+const res = await fetch(
+  `http://${api}/2026-01-15/metadata/execution-environment`,
+  { headers: { Authorization: `Bearer ${token}` } }
+);
+const { AvailabilityZoneID: azId } = await res.json();
+```
+
+Environment variable lookup, URL construction, and auth header — all collapsed into one `getMetadata()` call.
+
+## Powertools Internals
+
+Examining the [source code](https://github.com/aws-powertools/powertools-lambda-typescript):
+
+| Aspect | Behavior |
+|---|---|
+| Caching | Module-level object stores the result. No HTTP request on subsequent calls |
+| Cache clear | `clearMetadataCache()` for explicit invalidation |
+| Local dev | Returns empty object when `POWERTOOLS_DEV=true` or `AWS_LAMBDA_INITIALIZATION_TYPE` is unset |
+| Timeout | Default 1000ms (`AbortSignal.timeout`), configurable via options |
+| HTTP client | Node.js built-in `fetch` API |
+
+Notable is `clearMetadataCache()`. In SnapStart environments, you need to invalidate the cache after Restore to get the new AZ ID.
+
+## Caching Behavior Verification
+
+Measured `getMetadata()` latency in a non-VPC Lambda:
+
+```typescript title="TypeScript"
+// 1st: Initial call
+const metadata1 = await getMetadata();
+
+// 2nd: Cache hit
+const metadata2 = await getMetadata();
+
+// After clearMetadataCache(): Re-fetch
+clearMetadataCache();
+const metadata3 = await getMetadata();
+```
+
+| Measurement | Cold Start | Warm Start |
+|---|---|---|
+| First call | 605ms | 0.05–0.19ms (cache from previous invocation) |
+| Cache hit | 0.07ms | 0.015–0.024ms |
+| After `clearMetadataCache()` | 20ms | 1.9–158ms |
+
+The cold start first call (~600ms) includes Lambda initialization overhead. On warm starts, the module-level cache persists across invocations, so even the "first call" completes in ~0.05ms.
+
+The post-`clearMetadataCache()` variance (1.9–158ms) reflects the cost of establishing a new HTTP connection each time. Avoid calling `clearMetadataCache()` in normal code paths — use it only when cache invalidation is genuinely needed, such as after SnapStart Restore.
+
+## Same-AZ Routing Verification
+
+Tested under the same conditions as [Part 1](/en/posts/lambda-az-metadata-same-az-routing) (ElastiCache Valkey 3AZ, TLS, 50 PING iterations).
+
+### Lambda Function
+
+The `handler` is straightforward: `getMetadata()` for the AZ ID, then measure latency to each node and classify by same-AZ vs cross-AZ.
+
+```typescript title="index.ts (handler)"
+import { getMetadata } from '@aws-lambda-powertools/commons/utils/metadata';
+
+export const handler = async () => {
+  const metadata = await getMetadata();
+  const lambdaAzId = (metadata as Record<string, unknown>).AvailabilityZoneID as string;
+
+  const nodes = process.env.CACHE_NODES!.split(',').map(e => {
+    const [id, address, port, azId, azName, role] = e.split('|');
+    return { id, address, port: parseInt(port), azId, azName, role };
+  });
+
+  const results = await Promise.all(nodes.map(async node => ({
+    ...node,
+    latency: await measureValkeyLatency(node.address, node.port),
+    sameAz: node.azId === lambdaAzId,
+  })));
+
+  return { lambdaAzId, results };
+};
+```
+
+AZ ID retrieval is a single `getMetadata()` call. The entire function bundles to just 5.3KB with esbuild.
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">Full Lambda function code (including latency measurement)</summary>
+
+```typescript title="index.ts"
+import { getMetadata } from '@aws-lambda-powertools/commons/utils/metadata';
+import * as tls from 'tls';
+
+function measureValkeyLatency(host: string, port: number, iterations = 50): Promise<{avgMs: number}> {
+  return new Promise((resolve, reject) => {
+    const socket = tls.connect({ host, port, servername: host }, () => {
+      const latencies: number[] = [];
+      let i = 0;
+      const ping = () => {
+        if (i >= iterations) {
+          socket.destroy();
+          latencies.sort((a, b) => a - b);
+          resolve({
+            avgMs: Math.round((latencies.reduce((a, b) => a + b, 0) / latencies.length) * 1000) / 1000,
+          });
+          return;
+        }
+        const start = performance.now();
+        socket.write('*1\r\n$4\r\nPING\r\n');
+        socket.once('data', () => { latencies.push(performance.now() - start); i++; ping(); });
+      };
+      ping();
+    });
+    socket.on('error', reject);
+  });
+}
+
+export const handler = async () => {
+  const metadata = await getMetadata();
+  const lambdaAzId = (metadata as Record<string, unknown>).AvailabilityZoneID as string;
+
+  const nodes = process.env.CACHE_NODES!.split(',').map(e => {
+    const [id, address, port, azId, azName, role] = e.split('|');
+    return { id, address, port: parseInt(port), azId, azName, role };
+  });
+
+  const results = await Promise.all(nodes.map(async node => ({
+    ...node,
+    latency: await measureValkeyLatency(node.address, node.port),
+    sameAz: node.azId === lambdaAzId,
+  })));
+
+  return { lambdaAzId, results };
+};
+```
+
+</details>
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">Deployment steps</summary>
+
+Build the ElastiCache Valkey cluster using the deployment steps from [Part 1](/en/posts/lambda-az-metadata-same-az-routing). For the TypeScript Lambda:
+
+```bash title="Terminal (build)"
+npm init -y
+npm install @aws-lambda-powertools/commons esbuild
+npx esbuild index.ts --bundle --platform=node --target=node22 --outfile=dist/index.js --format=cjs --minify
+cd dist && zip function.zip index.js
+```
+
+```bash title="Terminal (Lambda creation)"
+aws lambda create-function \
+  --function-name az-ts-routing-test \
+  --runtime nodejs22.x \
+  --handler index.handler \
+  --role arn:aws:iam::<ACCOUNT_ID>:role/<ROLE_NAME> \
+  --zip-file fileb://function.zip \
+  --timeout 120 --memory-size 512 \
+  --vpc-config SubnetIds=<SUBNET_1a>,<SUBNET_1c>,<SUBNET_1d>,SecurityGroupIds=<SG_ID> \
+  --environment '{"Variables":{"CACHE_NODES":"<CACHE_NODES_VALUE>"}}'
+```
+
+See [Part 1](/en/posts/lambda-az-metadata-same-az-routing) for the `CACHE_NODES` format.
+
+</details>
+
+### Results
+
+16 invocations across all 3 AZs:
+
+| Metric | Same-AZ | Cross-AZ |
+|---|---|---|
+| Average | 0.739 ms | 1.894 ms |
+| Minimum | 0.428 ms | 1.579 ms |
+| Maximum | 1.634 ms | 2.141 ms |
+
+**Same-AZ routing reduces average latency by ~61% (1.894ms to 0.739ms).** Cross-AZ is roughly 2.6x slower.
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">Full measurement data (all 16 runs)</summary>
+
+| Run | Lambda AZ | Same-AZ avg (ms) | Cross-AZ avg (ms) | Overhead |
+|---|---|---|---|---|
+| 1 | apne1-az4 | 0.428 | 1.855 | +333% |
+| 2 | apne1-az4 | 0.581 | 1.926 | +232% |
+| 3 | apne1-az4 | 0.539 | 1.883 | +249% |
+| 4 | apne1-az4 | 1.634 | 2.130 | +30% |
+| 5 | apne1-az4 | 0.697 | 2.141 | +207% |
+| 6 | apne1-az4 | 0.752 | 2.014 | +168% |
+| 7 | apne1-az2 | 0.538 | 1.707 | +217% |
+| 8 | apne1-az4 | 0.577 | 1.905 | +230% |
+| 9 | apne1-az4 | 0.652 | 2.055 | +215% |
+| 10 | apne1-az4 | 0.607 | 2.036 | +235% |
+| 11 | apne1-az2 | 0.679 | 1.579 | +133% |
+| 12 | apne1-az4 | 0.749 | 2.014 | +169% |
+| 13 | apne1-az2 | 0.584 | 1.637 | +180% |
+| 14 | apne1-az1 | 1.131 | 1.929 | +71% |
+| 15 | apne1-az4 | 0.525 | 1.889 | +260% |
+| 16 | apne1-az1 | 1.158 | 1.599 | +38% |
+
+</details>
+
+### Comparison with Python ([Part 1](/en/posts/lambda-az-metadata-same-az-routing))
+
+| Metric | Python (Direct API) | TypeScript (Powertools) |
+|---|---|---|
+| Same-AZ avg | 0.663 ms | 0.739 ms |
+| Cross-AZ avg | 1.663 ms | 1.894 ms |
+| Ratio | 2.5x | 2.6x |
+| Reduction | ~60% | ~61% |
+
+The same-AZ vs cross-AZ ratio is virtually identical. The absolute difference (TypeScript slightly slower) likely reflects runtime differences and ElastiCache cluster re-provisioning. The key takeaway: **Powertools adds no measurable overhead to routing effectiveness.**
+
+## Takeaways
+
+- **TypeScript Powertools works now** — `@aws-lambda-powertools/commons` 2.32.0 includes `getMetadata()` with automatic caching.
+- **Same-AZ routing benefit is runtime-agnostic** — Both Python direct API and TypeScript Powertools show ~2.5x cross-AZ overhead consistently.
+- **`clearMetadataCache()` is not for normal code paths** — Post-clear re-fetch takes 1.9–158ms with high variance. Reserve for SnapStart Restore or similar scenarios.
+
+## Cleanup
+
+Same procedure as [Part 1](/en/posts/lambda-az-metadata-same-az-routing), with the TypeScript Lambda function names:
+
+```bash title="Terminal"
+aws lambda delete-function --function-name az-ts-routing-test
+aws lambda delete-function --function-name az-ts-powertools-test
+# For ElastiCache, subnet group, SG, and IAM role cleanup, see Part 1:
+```

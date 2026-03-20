@@ -1,0 +1,27 @@
+---
+title: "Lambda AZ metadata Powertools support: Python not yet released, TypeScript available"
+description: "AWS docs show Powertools code for both Python and TypeScript, but Python 3.25.0 lacks the lambda_metadata module (ModuleNotFoundError). TypeScript @aws-lambda-powertools/commons 2.32.0 works."
+date: "2026-03-20"
+published: true
+tags: ["aws", "lambda", "powertools"]
+---
+
+Tried using Powertools to fetch Lambda AZ metadata (announced March 19, 2026) following the [official docs](https://docs.aws.amazon.com/lambda/latest/dg/configuration-metadata-endpoint.html). Python failed immediately.
+
+```python title="Python"
+from aws_lambda_powertools.utilities.lambda_metadata import get_lambda_metadata
+# → ModuleNotFoundError: No module named 'aws_lambda_powertools.utilities.lambda_metadata'
+```
+
+The latest version via `pip install "aws-lambda-powertools"` is 3.25.0 (released March 4, 2026) — before the AZ metadata feature announcement on March 19. The `lambda_metadata` module simply doesn't exist in the package yet.
+
+Meanwhile, TypeScript works out of the box with `@aws-lambda-powertools/commons` 2.32.0:
+
+```typescript title="TypeScript"
+import { getMetadata } from '@aws-lambda-powertools/commons/utils/metadata';
+
+const metadata = await getMetadata();
+const azId = metadata.AvailabilityZoneID; // e.g., "apne1-az2"
+```
+
+Until the Python Powertools release catches up, use direct API access. A reminder that code examples in AWS docs don't always mean the library has shipped.

@@ -1,0 +1,414 @@
+---
+title: "Lambda AZメタデータで同一AZルーティングを実現する — ElastiCacheのレイテンシを半減"
+description: "Lambda の新しい AZ メタデータエンドポイントを検証。ElastiCache Valkey クラスターへの同一AZ / クロスAZ接続レイテンシを実測し、Same-AZ ルーティングの効果を定量的に示す。"
+date: "2026-03-20"
+published: true
+featured: false
+categories: [infrastructure]
+tags: ["aws", "lambda", "elasticache", "valkey", "networking"]
+series: "lambda-az-metadata"
+seriesOrder: 1
+---
+
+## はじめに
+
+2026年3月19日、AWSは[Lambda関数が実行中のアベイラビリティゾーン（AZ）のIDを取得できるメタデータエンドポイント](https://aws.amazon.com/about-aws/whats-new/2026/03/lambda-availability-zone-metadata/)を発表した。これまでLambdaには自身がどのAZで動作しているかを知る手段がなく、ElastiCacheやRDSといったマルチAZ構成のリソースに対して、ネットワーク的に最も近いノードを選択することができなかった。
+
+本記事では、このメタデータエンドポイントのAPI仕様と挙動を検証した上で、ElastiCache Valkey クラスター（3AZ構成）への接続レイテンシを実測し、Same-AZルーティングの定量的な効果を示す。検証結果だけ読みたい場合は[Same-AZルーティング検証](#same-azルーティング検証)まで飛ばしてよい。
+
+前提条件:
+
+- AWS CLIセットアップ済み（`lambda:*`、`elasticache:*`、`ec2:*`、`iam:*`の操作権限）
+- デフォルトVPCが存在し、3つ以上のAZにサブネットがあること
+- 検証リージョン: ap-northeast-1（東京）
+
+## メタデータエンドポイントの仕組み
+
+Lambda実行環境に2つの環境変数が自動設定される。
+
+| 環境変数                    | 説明                       | 値の例               |
+| --------------------------- | -------------------------- | -------------------- |
+| `AWS_LAMBDA_METADATA_API`   | メタデータサーバのアドレス | `169.254.100.1:9001` |
+| `AWS_LAMBDA_METADATA_TOKEN` | 実行環境固有の認証トークン | （自動生成）         |
+
+これらを使い、以下のHTTPリクエストでAZ IDを取得する。
+
+```bash title="リクエスト"
+curl -s \
+  -H "Authorization: Bearer ${AWS_LAMBDA_METADATA_TOKEN}" \
+  "http://${AWS_LAMBDA_METADATA_API}/2026-01-15/metadata/execution-environment"
+```
+
+```json title="レスポンス"
+{
+  "AvailabilityZoneID": "apne1-az2"
+}
+```
+
+レスポンスヘッダには `Cache-Control: private, max-age=43200, immutable` が含まれ、同一実行環境内ではキャッシュが推奨される。追加設定やIAM権限は不要で、すべてのランタイム（カスタムランタイム・コンテナイメージ含む）で利用できる。
+
+ここで返される値はAZ名（`ap-northeast-1a`等）ではなくAZ ID（`apne1-az2`等）である点に注意が必要だ。AZ名はAWSアカウントごとに物理ゾーンへのマッピングが異なるが、AZ IDはアカウント間で一貫した物理ゾーンを指す。クロスアカウントでリソースのAZ配置を比較する際にも正確な判断ができる。
+
+## API挙動の検証
+
+本題のSame-AZルーティング検証に入る前に、メタデータエンドポイント自体の応答特性を確認しておく。ここでは非VPCの単純なLambda関数を使い、エンドポイントのレイテンシ、キャッシュ動作、エラーハンドリング、AZ分布を調べた。
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">API検証用Lambda関数（lambda_az_metadata.py）</summary>
+
+```python title="lambda_az_metadata.py"
+import json
+import os
+import urllib.request
+import time
+
+def handler(event, context):
+    metadata_api = os.environ.get("AWS_LAMBDA_METADATA_API")
+    metadata_token = os.environ.get("AWS_LAMBDA_METADATA_TOKEN")
+    test_mode = event.get("test_mode", "basic")
+
+    url = f"http://{metadata_api}/2026-01-15/metadata/execution-environment"
+
+    if test_mode == "basic":
+        req = urllib.request.Request(
+            url, headers={"Authorization": f"Bearer {metadata_token}"}
+        )
+        start = time.time()
+        with urllib.request.urlopen(req) as resp:
+            elapsed_ms = (time.time() - start) * 1000
+            body = json.loads(resp.read())
+            return {
+                "az_id": body["AvailabilityZoneID"],
+                "latency_ms": round(elapsed_ms, 3),
+                "headers": dict(resp.headers),
+            }
+
+    elif test_mode == "cache_test":
+        latencies = []
+        for _ in range(3):
+            req = urllib.request.Request(
+                url, headers={"Authorization": f"Bearer {metadata_token}"}
+            )
+            start = time.time()
+            with urllib.request.urlopen(req) as resp:
+                json.loads(resp.read())
+                latencies.append(round((time.time() - start) * 1000, 3))
+        return {"latencies_ms": latencies}
+
+    elif test_mode == "error_bad_token":
+        req = urllib.request.Request(
+            url, headers={"Authorization": "Bearer invalid-token"}
+        )
+        try:
+            urllib.request.urlopen(req)
+        except urllib.error.HTTPError as e:
+            return {"status": e.code, "reason": e.reason}
+```
+
+非VPCのLambda（Python 3.13、メモリ256MB）としてデプロイし、`test_mode` を切り替えて各テストを実行した。
+
+</details>
+
+### 基本動作とキャッシュ
+
+```json title="出力結果（test_mode: basic）"
+{
+  "az_id": "apne1-az2",
+  "latency_ms": 180.221,
+  "headers": {
+    "Cache-Control": "private, max-age=43200, immutable",
+    "Content-Type": "application/json",
+    "Content-Length": "34"
+  }
+}
+```
+
+初回呼び出しのレイテンシは約180ms。同一実行環境内で3回連続呼び出すと `[0.676, 0.342, 0.393]` msとなり、約250倍高速になった。レスポンスの `immutable` ディレクティブが示す通り、AZ IDは実行環境のライフサイクル中に変わることはない。**Init フェーズで一度取得してモジュールレベル変数にキャッシュするのが最も効率的な実装パターンだ。**
+
+### エラーハンドリングとAZ分布
+
+エラーレスポンスはドキュメント通りの挙動を確認した。
+
+| テストケース            | ステータスコード       | 説明                  |
+| ----------------------- | ---------------------- | --------------------- |
+| 不正なトークン          | 401 Unauthorized       | Bearer トークンが無効 |
+| Authorizationヘッダなし | 401 Unauthorized       | ヘッダ自体が欠落      |
+| POSTメソッド            | 405 Method Not Allowed | GETのみ許可           |
+
+同時実行によりコールドスタートを強制し、50回の呼び出しで観測したAZ分布は apne1-az2 が40回、apne1-az4 が10回だった。LambdaのスケジューラがどのようにAZへ分散するかは公開されていないが、少なくとも複数AZにまたがって配置されることが確認できた。
+
+## Same-AZルーティング検証
+
+ここからが本記事の核心だ。Lambda が自身のAZ IDを知ることで、同一AZのキャッシュノードを優先的に選択するルーティングが実装できる。このオーバーヘッド差を定量的に計測する。
+
+### 検証環境
+
+ap-northeast-1（東京）リージョンに以下の構成を構築した。
+
+- **ElastiCache Valkey クラスター**: 1 primary + 2 replica（3AZ分散配置、TLS有効、cache.t3.micro）
+- **Lambda関数**: VPC内配置、3つのサブネット（各AZ）に接続、Python 3.13、メモリ512MB
+- **計測方法**: 各ノードへのValkey `PING` コマンドのRTTを50回ずつ計測
+
+```text title="ノード配置"
+az-metadata-test-001 | ap-northeast-1a (apne1-az4) | primary
+az-metadata-test-002 | ap-northeast-1c (apne1-az1) | replica
+az-metadata-test-003 | ap-northeast-1d (apne1-az2) | replica
+```
+
+### 検証用Lambda関数
+
+Lambda関数はメタデータエンドポイントから自身のAZ IDを取得し、各ElastiCacheノードへのPINGレイテンシを計測する。VPC内のLambdaはNATゲートウェイなしではAWS API（`elasticache:DescribeReplicationGroups`等）を呼べないため、ノード情報は環境変数で渡している。
+
+```python title="lambda_same_az_routing.py"
+import json
+import os
+import socket
+import ssl
+import time
+import urllib.request
+
+
+def get_az_id():
+    api = os.environ["AWS_LAMBDA_METADATA_API"]
+    token = os.environ["AWS_LAMBDA_METADATA_TOKEN"]
+    url = f"http://{api}/2026-01-15/metadata/execution-environment"
+    req = urllib.request.Request(
+        url, headers={"Authorization": f"Bearer {token}"}
+    )
+    with urllib.request.urlopen(req) as resp:
+        return json.loads(resp.read())["AvailabilityZoneID"]
+
+
+def measure_valkey_latency(host, port, iterations=50):
+    ctx = ssl.create_default_context()
+    sock = socket.create_connection((host, port), timeout=5)
+    tls_sock = ctx.wrap_socket(sock, server_hostname=host)
+    latencies = []
+    try:
+        for _ in range(iterations):
+            start = time.perf_counter()
+            tls_sock.sendall(b"*1\r\n$4\r\nPING\r\n")
+            tls_sock.recv(64)
+            latencies.append((time.perf_counter() - start) * 1000)
+    finally:
+        tls_sock.close()
+    latencies.sort()
+    return {
+        "avg_ms": round(sum(latencies) / len(latencies), 3),
+        "p50_ms": round(latencies[len(latencies) // 2], 3),
+        "min_ms": round(latencies[0], 3),
+    }
+
+
+def handler(event, context):
+    lambda_az_id = get_az_id()
+
+    # 環境変数からノード情報を取得
+    # 形式: cluster_id|address|port|az_id|az_name|role,...
+    nodes = []
+    for entry in os.environ["CACHE_NODES"].split(","):
+        parts = entry.split("|")
+        nodes.append({
+            "id": parts[0], "address": parts[1], "port": int(parts[2]),
+            "az_id": parts[3], "az_name": parts[4], "role": parts[5],
+        })
+
+    results = {"lambda_az_id": lambda_az_id, "same_az": [], "cross_az": []}
+    for node in nodes:
+        latency = measure_valkey_latency(node["address"], node["port"])
+        entry = {**node, "latency": latency}
+        if node["az_id"] == lambda_az_id:
+            results["same_az"].append(entry)
+        else:
+            results["cross_az"].append(entry)
+    return results
+```
+
+メタデータエンドポイントはリンクローカルアドレス（`169.254.100.1`）上で動作するため、VPC内LambdaでもNATゲートウェイなしで呼び出せる点がこの機能の大きな利点だ。
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">デプロイ手順（検証環境の再現）</summary>
+
+以下のコマンドで検証環境を再現できる。ElastiCacheクラスターの作成に約10分かかる。
+
+```bash title="ターミナル（ElastiCache構築）"
+# セキュリティグループ作成（Valkey用ポート6379を自己参照で許可）
+SG_ID=$(aws ec2 create-security-group \
+  --group-name az-test-sg --description "AZ test" \
+  --vpc-id <VPC_ID> --query 'GroupId' --output text)
+aws ec2 authorize-security-group-ingress \
+  --group-id $SG_ID --protocol tcp --port 6379 --source-group $SG_ID
+
+# ElastiCache サブネットグループ（3AZのサブネットを指定）
+aws elasticache create-cache-subnet-group \
+  --cache-subnet-group-name az-test-subnet \
+  --cache-subnet-group-description "AZ test" \
+  --subnet-ids <SUBNET_1a> <SUBNET_1c> <SUBNET_1d>
+
+# Valkey レプリケーショングループ（3AZ、TLS有効）
+aws elasticache create-replication-group \
+  --replication-group-id az-metadata-test \
+  --replication-group-description "AZ routing test" \
+  --engine valkey \
+  --cache-node-type cache.t3.micro \
+  --num-node-groups 1 \
+  --replicas-per-node-group 2 \
+  --cache-subnet-group-name az-test-subnet \
+  --security-group-ids $SG_ID \
+  --multi-az-enabled \
+  --automatic-failover-enabled \
+  --transit-encryption-enabled
+# → "available" になるまで約10分待つ
+```
+
+```bash title="ターミナル（Lambda構築）"
+# IAMロール作成（VPC実行権限）
+aws iam create-role --role-name lambda-az-test-role \
+  --assume-role-policy-document '{
+    "Version":"2012-10-17",
+    "Statement":[{"Effect":"Allow","Principal":{"Service":"lambda.amazonaws.com"},"Action":"sts:AssumeRole"}]
+  }'
+aws iam attach-role-policy --role-name lambda-az-test-role \
+  --policy-arn arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole
+
+# Lambda関数作成（VPC内、3サブネットに配置）
+zip lambda.zip lambda_same_az_routing.py
+aws lambda create-function \
+  --function-name az-routing-test \
+  --runtime python3.13 \
+  --handler lambda_same_az_routing.handler \
+  --role arn:aws:iam::<ACCOUNT_ID>:role/lambda-az-test-role \
+  --zip-file fileb://lambda.zip \
+  --timeout 120 --memory-size 512 \
+  --vpc-config SubnetIds=<SUBNET_1a>,<SUBNET_1c>,<SUBNET_1d>,SecurityGroupIds=$SG_ID \
+  --environment "Variables={CACHE_NODES=<CACHE_NODES値>}"
+```
+
+`CACHE_NODES` 環境変数は `cluster_id|address|port|az_id|az_name|role` をカンマ区切りで指定する。ノード情報は `aws elasticache describe-replication-groups` と `aws ec2 describe-availability-zones` から取得し、AZ名→AZ IDのマッピングを行う。
+
+```text title="CACHE_NODES の値（例）"
+az-metadata-test-001|az-metadata-test-001.xxx.apne1.cache.amazonaws.com|6379|apne1-az4|ap-northeast-1a|primary,az-metadata-test-002|az-metadata-test-002.xxx.apne1.cache.amazonaws.com|6379|apne1-az1|ap-northeast-1c|replica,az-metadata-test-003|az-metadata-test-003.xxx.apne1.cache.amazonaws.com|6379|apne1-az2|ap-northeast-1d|replica
+```
+
+</details>
+
+### 計測結果
+
+16回の呼び出し（うち同時実行によるコールドスタート10回を含む）で、3つの全AZからの計測を実施した。各呼び出しで3ノード（同一AZ×1、クロスAZ×2）に対してPINGを50回ずつ実行し、平均レイテンシを算出している。
+
+| メトリクス | 同一AZ   | クロスAZ |
+| ---------- | -------- | -------- |
+| 平均       | 0.663 ms | 1.663 ms |
+| 最小       | 0.496 ms | 1.323 ms |
+| 最大       | 0.908 ms | 2.014 ms |
+
+**同一AZルーティングにより、平均レイテンシが約60%削減された（1.663ms → 0.663ms）。** クロスAZは同一AZの約2.5倍のレイテンシとなる。この差はTLS上のValkey PINGという最小ペイロードでの計測であり、実際のキャッシュ操作（GET/SET）ではペイロードサイズに応じてさらに差が開く可能性がある。
+
+3つの全AZ（apne1-az1, apne1-az2, apne1-az4）から計測を実施しており、特定AZに依存しない一貫した傾向が確認できた。
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">全16回の計測詳細データ</summary>
+
+| 実行# | Lambda AZ | 同一AZ avg (ms) | クロスAZ avg (ms) | オーバーヘッド |
+| ----- | --------- | --------------- | ----------------- | -------------- |
+| 1     | apne1-az1 | 0.538           | 1.719             | +219%          |
+| 2     | apne1-az1 | 0.693           | 1.627             | +135%          |
+| 3     | apne1-az1 | 0.908           | 1.812             | +100%          |
+| 4     | apne1-az1 | 0.782           | 1.604             | +105%          |
+| 5     | apne1-az1 | 0.704           | 1.796             | +155%          |
+| 6     | apne1-az1 | 0.799           | 1.662             | +108%          |
+| 7     | apne1-az1 | 0.524           | 1.917             | +266%          |
+| 8     | apne1-az2 | 0.717           | 1.323             | +85%           |
+| 9     | apne1-az2 | 0.671           | 1.446             | +116%          |
+| 10    | apne1-az2 | 0.717           | 1.443             | +101%          |
+| 11    | apne1-az2 | 0.689           | 1.448             | +110%          |
+| 12    | apne1-az2 | 0.621           | 1.562             | +152%          |
+| 13    | apne1-az4 | 0.496           | 1.798             | +263%          |
+| 14    | apne1-az1 | 0.581           | 2.014             | +247%          |
+| 15    | apne1-az1 | 0.544           | 1.549             | +185%          |
+| 16    | apne1-az4 | 0.626           | 1.885             | +201%          |
+
+全16回を通じて、同一AZが最も遅いケース（0.908ms）でもクロスAZの最速ケース（1.323ms）より高速であり、例外なく同一AZルーティングが有利だった。
+
+</details>
+
+## 実装パターン
+
+検証結果を踏まえ、Same-AZルーティングの実装パターンを示す。ポイントはInit フェーズで一度だけAZ IDを取得してモジュールレベルにキャッシュすることだ。
+
+```python title="Python"
+import json
+import os
+import urllib.request
+
+# Init フェーズで一度だけ取得してキャッシュ
+_az_id = None
+
+def get_lambda_az_id():
+    global _az_id
+    if _az_id is None:
+        api = os.environ["AWS_LAMBDA_METADATA_API"]
+        token = os.environ["AWS_LAMBDA_METADATA_TOKEN"]
+        url = f"http://{api}/2026-01-15/metadata/execution-environment"
+        req = urllib.request.Request(
+            url, headers={"Authorization": f"Bearer {token}"}
+        )
+        with urllib.request.urlopen(req) as resp:
+            _az_id = json.loads(resp.read())["AvailabilityZoneID"]
+    return _az_id
+
+def select_same_az_endpoint(endpoints, lambda_az_id):
+    """同一AZのエンドポイントを優先し、なければフォールバック。"""
+    same_az = [ep for ep in endpoints if ep["az_id"] == lambda_az_id]
+    return same_az[0] if same_az else endpoints[0]
+```
+
+### Powertools for AWS Lambda の対応状況
+
+[公式ドキュメント](https://docs.aws.amazon.com/lambda/latest/dg/configuration-metadata-endpoint.html)では、Powertools for AWS Lambda のメタデータユーティリティが紹介されている。Python版ではHTTPリクエスト構築、認証トークン処理、キャッシュ、SnapStart対応がすべて自動化される想定だ。
+
+```python title="Python（Powertools — 対応版リリース後に利用可能）"
+from aws_lambda_powertools.utilities.lambda_metadata import get_lambda_metadata
+
+def handler(event, context):
+    metadata = get_lambda_metadata()
+    az_id = metadata.availability_zone_id  # e.g., "apne1-az2"
+    # ...
+```
+
+ただし、本記事の検証時点（2026年3月20日）では、Python版 Powertools の最新版（3.25.0、2026年3月4日リリース）に `lambda_metadata` モジュールはまだ含まれていなかった。`pip install "aws-lambda-powertools"` でインストールしても `from aws_lambda_powertools.utilities.lambda_metadata import get_lambda_metadata` は `ModuleNotFoundError` になる。AZメタデータ機能の発表（3月19日）がPowertoolsの最新リリースより後であるため、対応版のリリースを待つ必要がある。それまでは上記の直接APIアクセスで実装できる。
+
+## まとめ
+
+- **クロスAZレイテンシのオーバーヘッドは実測で約2.5倍** — 同一AZ平均0.66msに対しクロスAZ平均1.66ms。キャッシュのように低レイテンシが求められるワークロードでは、この差が全体のレスポンスタイムに直接影響する。
+- **AZ IDはInit時に一度取得するだけでよい** — レスポンスは`immutable`であり、同一実行環境では変わらない。後続呼び出しは0.3〜0.7msで完了するが、そもそもキャッシュすべきだ。
+- **AZ IDとAZ名の違いを意識する** — メタデータが返すのはAZ ID（`apne1-az2`）であり、AZ名（`ap-northeast-1d`）ではない。ElastiCacheのノード情報はAZ名で返されるため、`ec2:DescribeAvailabilityZones`でマッピングするか、事前にマッピングテーブルを用意する必要がある。
+- **VPC内Lambdaでも追加インフラなしで利用可能** — メタデータエンドポイントはリンクローカルアドレス上で動作するため、NATゲートウェイやVPCエンドポイントなしで呼び出せる。
+- **Python版Powertoolsの対応リリースはまだ** — 公式ドキュメントにはPowertools連携が記載されているが、検証時点（2026年3月20日）のPython版最新版（3.25.0）には`lambda_metadata`モジュールが未収録。現時点では直接APIアクセスで実装する。
+
+## クリーンアップ
+
+検証後は以下の順序でリソースを削除する。ElastiCacheの削除に数分かかるため、完了を待ってからセキュリティグループとサブネットグループを削除する。
+
+```bash title="ターミナル"
+# Lambda関数削除
+aws lambda delete-function --function-name az-routing-test
+
+# ElastiCacheレプリケーショングループ削除
+aws elasticache delete-replication-group \
+  --replication-group-id az-metadata-test \
+  --no-retain-primary-cluster
+# → 完了まで数分待つ
+
+# ElastiCacheサブネットグループ削除
+aws elasticache delete-cache-subnet-group \
+  --cache-subnet-group-name az-test-subnet
+
+# セキュリティグループ削除
+aws ec2 delete-security-group --group-id <SG_ID>
+
+# IAMロール削除
+aws iam detach-role-policy --role-name lambda-az-test-role \
+  --policy-arn arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole
+aws iam delete-role --role-name lambda-az-test-role
+```
