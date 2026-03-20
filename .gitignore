@@ -48,4 +48,5 @@ next-env.d.ts
 
 # claude local settings
 .claude/skills/*.local/
+.claude/settings.local.json
 CLAUDE.local.md
