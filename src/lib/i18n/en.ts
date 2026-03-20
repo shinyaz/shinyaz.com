@@ -1,7 +1,7 @@
 export const en = {
   site: {
     name: "@shinyaz",
-    description: "A personal tech blog by shinyaz",
+    description: "Tech notes by shinyaz",
   },
   home: {
     subtitle: "A blog where I record notes and learnings about technology.",

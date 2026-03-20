@@ -1,7 +1,7 @@
 export const ja = {
   site: {
     name: "@shinyaz",
-    description: "shinyazの個人技術ブログ",
+    description: "shinyaz の技術ノート",
   },
   home: {
     subtitle: "技術に関するメモや学びを記録するブログです。",

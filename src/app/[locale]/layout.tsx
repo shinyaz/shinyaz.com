@@ -54,6 +54,7 @@ export async function generateMetadata({
       template: `%s | ${t.site.name}`,
     },
     description: t.site.description,
+    manifest: `/${locale}/manifest.webmanifest`,
     metadataBase: new URL(SITE_URL),
     openGraph: {
       title: t.site.name,
