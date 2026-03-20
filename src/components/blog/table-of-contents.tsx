@@ -13,12 +13,10 @@ interface TableOfContentsProps {
 export function TableOfContents({ headings, locale }: TableOfContentsProps) {
   const t = getDictionary(locale);
   const [activeId, setActiveId] = useState<string>("");
-  const [isOpen, setIsOpen] = useState(true);
+  const [isOpen, setIsOpen] = useState(() =>
+    typeof window !== "undefined" ? window.innerWidth >= 768 : true
+  );
   const observerRef = useRef<IntersectionObserver | null>(null);
-
-  useEffect(() => {
-    setIsOpen(window.innerWidth >= 768);
-  }, []);
 
   useEffect(() => {
     const elements = headings
