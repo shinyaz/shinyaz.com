@@ -1,0 +1,501 @@
+---
+title: "Lambda Durable Functions を実際に動かして分かった4つの特徴"
+description: "Step・Wait・Callback・Parallel の4パターンを AWS CLI で検証。チェックポイント＆リプレイの挙動、Step Functions との使い分けを実測データとともに整理する。"
+date: "2026-03-10"
+published: true
+featured: false
+categories: [infrastructure]
+tags: ["aws", "lambda", "serverless", "step-functions"]
+---
+
+## はじめに
+
+2025年12月、AWS Lambda に Durable Functions が追加された。Step Functions を使わずに、Lambda 関数のコード内でマルチステップのワークフローを記述できる機能だ。チェックポイント＆リプレイによる自動復旧、最大1年間の実行一時停止、wait 中のコンピュート課金なしという特徴を持つ。
+
+「Step Functions と何が違うのか」「実際の開発体験はどうなのか」を確かめるため、4つのパターンを AWS CLI で検証した。本記事ではその結果と知見を共有する。検証結果だけ読みたい場合は[検証1](#検証-基本の-step--wait)まで飛ばしてよい。
+
+前提条件:
+
+- AWS CLI セットアップ済み（`lambda:*`、`iam:*`、`logs:*` の操作権限）
+- Node.js 24.x ランタイムが利用可能なリージョン
+- 検証リージョン: ap-northeast-1（東京）
+
+## なぜ Durable Functions が必要か
+
+Lambda でマルチステップの処理を実装する場合、従来は2つの選択肢があった。
+
+1. **Lambda 関数内で自前管理** — DynamoDB 等に中間状態を保存し、エラー時のリトライや冪等性を自前で実装する。コードが複雑化し、状態管理のバグが入りやすい
+2. **Step Functions で外部オーケストレーション** — ASL（Amazon States Language）でワークフローを定義する。堅牢だが、ビジネスロジックと密結合したワークフローでは ASL とコードの二重管理になる
+
+Durable Functions はこの間を埋める。通常の逐次コードを書くだけで、SDK がチェックポイント管理・リトライ・状態復旧を自動で行う。
+
+## Durable Functions の仕組み
+
+Durable Functions は **チェックポイント＆リプレイ** モデルで動作する。
+
+1. 関数内の各 `step()` が完了するたびに、結果が永続ストレージにチェックポイントされる
+2. `wait()` や障害で関数が中断されると、実行環境は解放される
+3. 再開時、関数は **最初から再実行** される。ただし完了済みの step はスキップされ、保存済みの結果が返される
+
+この仕組みにより、開発者は通常の逐次コードを書くだけで、耐障害性のあるワークフローが実現できる。SDK は JavaScript/TypeScript（Node.js 22/24）、Python（3.13/3.14）、Java（Preview）に対応している。
+
+## 検証環境
+
+- リージョン: `ap-northeast-1`（東京）
+- ランタイム: Node.js 24.x
+- メモリ: 256 MB
+- Durable 設定: `RetentionPeriodInDays: 1`, `ExecutionTimeout: 120`秒
+- デプロイ: AWS CLI（`create-function` + `--durable-config`）
+
+## 事前準備
+
+### IAM ロールの作成
+
+Durable Functions 用の IAM ロールを作成する。通常の Lambda 実行ロールに加え、チェックポイントとコールバック用の権限が必要だ。
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">IAM ロール作成手順</summary>
+
+```bash title="ターミナル（信頼ポリシー作成）"
+cat <<'EOF' > trust-policy.json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Principal": { "Service": "lambda.amazonaws.com" },
+      "Action": "sts:AssumeRole"
+    }
+  ]
+}
+EOF
+
+aws iam create-role \
+  --role-name lambda-durable-test-role \
+  --assume-role-policy-document file://trust-policy.json
+```
+
+```bash title="ターミナル（ポリシーのアタッチ）"
+aws iam attach-role-policy \
+  --role-name lambda-durable-test-role \
+  --policy-arn arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+```
+
+Durable Functions 固有の権限をインラインポリシーで追加する。
+
+```bash title="ターミナル（Durable 用インラインポリシー）"
+cat <<'EOF' > durable-policy.json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": [
+        "lambda:CheckpointDurableExecution",
+        "lambda:GetDurableExecutionState",
+        "lambda:SendDurableExecutionCallbackSuccess",
+        "lambda:SendDurableExecutionCallbackFailure"
+      ],
+      "Resource": "arn:aws:lambda:<REGION>:<ACCOUNT_ID>:function:durable-*"
+    }
+  ]
+}
+EOF
+
+aws iam put-role-policy \
+  --role-name lambda-durable-test-role \
+  --policy-name DurableFunctionPermissions \
+  --policy-document file://durable-policy.json
+```
+
+</details>
+
+ここで一つハマりポイントがある。ドキュメントでは `CheckpointDurableExecutions`（複数形）と記載されている箇所があるが、実際に必要なアクション名は `CheckpointDurableExecution`（単数形）だ。複数形で設定すると権限エラーになる。
+
+### 関数の作成とデプロイ
+
+通常の Lambda 関数に `--durable-config` を追加するだけで Durable Function になる。
+
+```bash title="ターミナル"
+aws lambda create-function \
+  --function-name durable-basic-test \
+  --runtime nodejs24.x \
+  --handler index.handler \
+  --role arn:aws:iam::<ACCOUNT_ID>:role/lambda-durable-test-role \
+  --zip-file fileb://function.zip \
+  --timeout 30 --memory-size 256 \
+  --durable-config '{"RetentionPeriodInDays":1,"ExecutionTimeout":120}'
+```
+
+重要なのは、**呼び出し時にバージョン付き ARN が必要** という点だ。`$LATEST` では Durable Execution が開始されない。
+
+```bash title="ターミナル"
+aws lambda publish-version --function-name durable-basic-test
+
+aws lambda invoke \
+  --function-name "arn:aws:lambda:ap-northeast-1:<ACCOUNT_ID>:function:durable-basic-test:1" \
+  --payload '{"orderId": "ORD-001"}' \
+  --cli-binary-format raw-in-base64-out \
+  response.json
+```
+
+以降の検証2〜4でも同じ手順（コードを `.mjs` で保存 → `zip` でパッケージ → `create-function` → `publish-version` → `invoke`）でデプロイ・実行する。関数名とハンドラ名のみ変更すればよい。
+
+## 検証結果の概要
+
+以下の4パターンを検証した。
+
+1. **Step + Wait** — チェックポイントと一時停止の基本動作。wait 中のリプレイ挙動
+2. **障害復旧とリトライ** — step 失敗時の自動リトライ。完了済み step のスキップ
+3. **Callback** — 外部イベント待ちの Human-in-the-loop パターン。同期/非同期呼び出しの違い
+4. **Parallel / Map** — 並列実行のオーバーヘッド。CPU バウンド vs I/O バウンドの差
+
+## 検証1: 基本の Step + Wait
+
+注文処理を模した3ステップ＋wait のシンプルな関数。`context.step()` でチェックポイントを作成し、`context.wait()` で一時停止する基本動作を確認する。コードを `index.mjs` として保存し、`zip function.zip index.mjs` でパッケージする。
+
+```javascript title="index.mjs"
+import { withDurableExecution } from "@aws/durable-execution-sdk-js";
+
+export const handler = withDurableExecution(
+  async (event, context) => {
+    const orderId = event.orderId || "ORD-001";
+
+    const validation = await context.step("validate-order", async (stepCtx) => {
+      stepCtx.logger.info(`Validating order ${orderId}`);
+      return { orderId, status: "validated", timestamp: Date.now() };
+    });
+
+    const payment = await context.step("process-payment", async (stepCtx) => {
+      stepCtx.logger.info(`Processing payment for ${orderId}`);
+      return { orderId, status: "paid", amount: 4980, timestamp: Date.now() };
+    });
+
+    await context.wait({ seconds: 10 }); // この間コンピュート課金なし
+
+    const confirmation = await context.step("confirm-order", async (stepCtx) => {
+      stepCtx.logger.info(`Confirming order ${orderId}`);
+      return { orderId, status: "confirmed", timestamp: Date.now() };
+    });
+
+    return { orderId, steps: { validation, payment, confirmation } };
+  }
+);
+```
+
+SDK のパッケージ名は `@aws/durable-execution-sdk-js` で、Lambda ランタイムにプリインストールされている。`withDurableExecution` でハンドラをラップすると、第2引数が通常の Lambda context ではなく `DurableContext` になり、`step()` や `wait()` が使えるようになる。
+
+### 実行結果
+
+```json title="出力結果"
+{
+  "orderId": "ORD-TEST-002",
+  "steps": {
+    "validation": {
+      "orderId": "ORD-TEST-002", "status": "validated", "timestamp": 1774019546545
+    },
+    "payment": {
+      "orderId": "ORD-TEST-002", "status": "paid", "amount": 4980, "timestamp": 1774019546623
+    },
+    "confirmation": {
+      "orderId": "ORD-TEST-002", "status": "confirmed", "timestamp": 1774019556800
+    }
+  },
+  "totalElapsedMs": 99
+}
+```
+
+**payment と confirmation の timestamp 差が約10.2秒で、wait が正確に動作している。** 一方で `totalElapsedMs` は 99ms しかない。これは wait 後にリプレイが走り、`Date.now()` がリプレイ時点で再評価されるためだ。
+
+### 知見
+
+- `Date.now()` のような非決定的な処理を step の外に置くと、リプレイ時に不整合が起きる。これはドキュメントの「Write deterministic code」セクションでも強調されている
+- レスポンスに `DurableExecutionArn` が含まれ、実行の追跡に使える
+- SDK は Lambda ランタイムにプリインストールされているため、zip に含める必要はない。ただし本番環境ではバージョン固定のためにバンドルが推奨される
+
+## 検証2: 障害復旧とリトライ
+
+Step 内でエラーが発生した場合の自動リトライとチェックポイントからの復旧を確認する。`index-retry.mjs` として保存し、`--handler index-retry.handler` で関数を作成する。
+
+```javascript title="index-retry.mjs"
+import { withDurableExecution } from "@aws/durable-execution-sdk-js";
+
+let callCount = 0;
+
+export const handler = withDurableExecution(
+  async (event, context) => {
+    const orderId = event.orderId || "ORD-001";
+
+    const step1 = await context.step("step1-validate", async (stepCtx) => {
+      stepCtx.logger.info(`Step 1: Validating ${orderId}`);
+      return { status: "validated", timestamp: Date.now() };
+    });
+
+    const step2 = await context.step("step2-flaky-payment", async (stepCtx) => {
+      callCount++;
+      if (callCount <= 1) {
+        throw new Error(`Payment service unavailable (attempt ${callCount})`);
+      }
+      return { status: "paid", attempt: callCount, timestamp: Date.now() };
+    });
+
+    const step3 = await context.step("step3-confirm", async (stepCtx) => {
+      return { status: "confirmed", timestamp: Date.now() };
+    });
+
+    return { orderId, step1, step2, step3 };
+  }
+);
+```
+
+step2 は初回呼び出しで意図的にエラーを投げ、リトライ時に成功する。グローバル変数 `callCount` はリプレイ時にリセットされるため、この判定が機能する。
+
+### 実行結果
+
+```json title="出力結果"
+{
+  "orderId": "ORD-RETRY-001",
+  "step1": { "status": "validated", "timestamp": 1774019591142 },
+  "step2": { "status": "paid", "attempt": 2, "timestamp": 1774019593796 },
+  "step3": { "status": "confirmed", "timestamp": 1774019593882 }
+}
+```
+
+**`step2.attempt` が `2` で、初回失敗後に自動リトライされ2回目で成功した。** step1 はリプレイ時にスキップされ、チェックポイントから結果が復元されている。
+
+### 知見
+
+- step1（591142）と step2（593796）の timestamp 差は約2.6秒 → リトライ間にバックオフが入っている
+- 完了済みの step1 は再実行されず、保存済みの結果が返される。これがチェックポイント＆リプレイの核心だ
+- グローバル変数はリプレイ時にリセットされるため、リトライ判定には使えるが、ベストプラクティスとしては step の返り値で状態を管理すべきだ
+
+## 検証3: Callback（外部イベント待ち）
+
+外部システムからの承認を待つ Human-in-the-loop パターン。`context.createCallback()` で一時停止し、外部から `send-durable-execution-callback-success` API で再開する。`index-callback.mjs` として保存する。
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">index-callback.mjs（全体コード）</summary>
+
+```javascript title="index-callback.mjs"
+import { withDurableExecution } from "@aws/durable-execution-sdk-js";
+
+export const handler = withDurableExecution(
+  async (event, context) => {
+    const orderId = event.orderId || "ORD-001";
+
+    const doc = await context.step("prepare-document", async (stepCtx) => {
+      stepCtx.logger.info(`Preparing document for ${orderId}`);
+      return { orderId, status: "prepared", timestamp: Date.now() };
+    });
+
+    // コールバック待ちを作成（タイムアウト60秒）
+    const [approvalPromise, callbackId] = await context.createCallback(
+      "approval",
+      { timeout: { seconds: 60 } }
+    );
+
+    // コールバック ID を外部に通知
+    await context.step("notify-approver", async (stepCtx) => {
+      stepCtx.logger.info(`Callback ID for approval: ${callbackId}`);
+      return { callbackId, notifiedAt: Date.now() };
+    });
+
+    // ここで実行が一時停止（コンピュート課金なし）
+    const approval = await approvalPromise;
+
+    // 承認後に再開
+    const result = await context.step("process-approval", async (stepCtx) => {
+      return { orderId, approved: true, approvalData: approval };
+    });
+
+    return { orderId, doc, result };
+  }
+);
+```
+
+</details>
+
+ポイントは `createCallback()` が `[Promise, callbackId]` のタプルを返す点だ。`callbackId` を外部システムに渡し、`approvalPromise` を `await` した時点で関数が一時停止する。
+
+### 実行手順
+
+この検証は3ステップに分かれる。
+
+**1. 非同期で関数を呼び出す**
+
+同期呼び出しはコールバック待ちでタイムアウトするため、`--invocation-type Event` が必須だ。
+
+```bash title="ターミナル"
+aws lambda invoke \
+  --function-name "arn:aws:lambda:ap-northeast-1:<ACCOUNT_ID>:function:durable-callback-test:1" \
+  --payload '{"orderId": "ORD-CALLBACK-001"}' \
+  --invocation-type Event \
+  --cli-binary-format raw-in-base64-out \
+  response.json
+```
+
+**2. CloudWatch Logs からコールバック ID を取得**
+
+```bash title="ターミナル"
+aws logs filter-log-events \
+  --log-group-name /aws/lambda/durable-callback-test \
+  --filter-pattern "Callback ID"
+```
+
+ログに出力されたコールバック ID は Base64 エンコードされた長い文字列で、Durable Execution ARN とオペレーション ID を含んでいる。
+
+**3. コールバックを送信して実行を再開**
+
+```bash title="ターミナル"
+aws lambda send-durable-execution-callback-success \
+  --callback-id "<CALLBACK_ID>" \
+  --result '{"approved": true, "approver": "manager@example.com"}'
+```
+
+**送信後、数秒以内に関数が再開され `process-approval` ステップが実行された。** コールバック待ち中はコンピュート課金が発生しない。
+
+### 知見
+
+- **同期 invoke はコールバック待ちでタイムアウトする** → `--invocation-type Event` での非同期呼び出しが必須。これは検証中に最初にハマったポイントだ
+- コールバック待ち中はコンピュート課金が発生しない → Human-in-the-loop ワークフローに最適
+- タイムアウトを設定しないとコールバックが永遠に待機するため、必ず `timeout` を指定すべきだ
+
+## 検証4: Parallel / Map
+
+`parallel()` と `map()` による並列実行パターン。`index-parallel.mjs` として保存する。
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">index-parallel.mjs（全体コード）</summary>
+
+```javascript title="index-parallel.mjs"
+import { withDurableExecution } from "@aws/durable-execution-sdk-js";
+
+export const handler = withDurableExecution(
+  async (event, context) => {
+    // parallel(): 独立した3タスクを並列実行
+    const parallelResults = await context.parallel([
+      async (ctx) => ctx.step("check-inventory", async () => {
+        const start = Date.now();
+        while (Date.now() - start < 500) {} // 500ms の処理
+        return { available: true, timestamp: Date.now() };
+      }),
+      async (ctx) => ctx.step("check-fraud", async () => {
+        const start = Date.now();
+        while (Date.now() - start < 300) {} // 300ms の処理
+        return { passed: true, timestamp: Date.now() };
+      }),
+      async (ctx) => ctx.step("check-credit", async () => {
+        const start = Date.now();
+        while (Date.now() - start < 400) {} // 400ms の処理
+        return { approved: true, timestamp: Date.now() };
+      }),
+    ]);
+
+    // map(): 配列の各要素を並列処理
+    const items = [
+      { id: "ITEM-1", price: 1000 },
+      { id: "ITEM-2", price: 2000 },
+      { id: "ITEM-3", price: 3000 },
+    ];
+    const mapResults = await context.map(items, async (ctx, item, index) => {
+      return ctx.step(`process-item-${index}`, async () => {
+        const start = Date.now();
+        while (Date.now() - start < 200) {} // 200ms の処理
+        return { ...item, processed: true, timestamp: Date.now() };
+      });
+    });
+
+    return {
+      parallel: { results: parallelResults.getResults() },
+      map: { results: mapResults.getResults() },
+    };
+  }
+);
+```
+
+</details>
+
+`parallel()` に渡す各関数は独自の `ctx`（子コンテキスト）を受け取る。`map()` は配列の各要素に対して同じ処理を適用する。結果は `getResults()` で配列として取得し、エラーは `getErrors()` で取得できる。
+
+### 実行結果
+
+| パターン | 逐次実行の理論値 | 実測値 | オーバーヘッド |
+| -------- | ---------------- | ------ | -------------- |
+| parallel（500+300+400ms） | 1200ms | 1983ms | +783ms |
+| map（200ms×3） | 600ms | 1001ms | +401ms |
+
+**チェックポイント保存のオーバーヘッドが各 step あたり数百ms あり、軽量タスクの並列化では支配的になる。**
+
+### 知見
+
+- timestamp を見ると、parallel の3タスクは約300ms間隔で順次完了している → CPU バウンドな処理では、parallel でも実質的に逐次実行になる。ドキュメントでは child context による並列実行で「複数の CPU コアを効率的に活用できる」と記載されているが、今回のように busy-wait で CPU を占有するケースでは恩恵がない。I/O 待ち（API 呼び出し、DB クエリ等）を含む処理であれば並列化の効果が出る
+- parallel/map は「軽量タスクを大量に並列化する」用途ではなく、「I/O バウンドな独立タスクを同時に走らせる」用途に向いている
+
+## ユースケースと設計パターン
+
+検証結果から見えてきた実践的なパターンは以下の通りだ。
+
+**決済・注文処理の耐障害性** — 検証1・2で確認した通り、step のチェックポイントと自動リトライにより、外部サービス呼び出しの一時的な障害を透過的に処理できる。DynamoDB への中間状態保存や自前のリトライロジックが不要になる。
+
+**承認ワークフローのサーバーレス化** — 検証3の Callback パターンにより、人間の承認待ちを最大1年間、コンピュート課金なしで実現できる。従来は SQS + Lambda + DynamoDB で状態管理する必要があったが、Durable Functions なら関数内の `await` 一行で済む。
+
+**設計上の注意点** — 検証4で判明した通り、チェックポイント保存のオーバーヘッドは各 step あたり数百ms ある。step の粒度は「外部サービス呼び出し1回」程度が適切で、ループ内の軽量処理を個別に step 化するのは避けるべきだ。ドキュメントの「Design effective steps」セクションでも、step の粒度のバランスが推奨されている。
+
+## Step Functions との使い分け
+
+| 観点 | Durable Functions | Step Functions |
+| ---- | ----------------- | -------------- |
+| 定義方法 | コード（JS/Python/Java） | ASL（JSON/YAML）、CDK、またはビジュアルデザイナー |
+| 開発体験 | IDE + 単体テスト + LLM エージェント | コンソールのビジュアルエディタ |
+| AWS サービス連携 | Lambda 内から SDK で呼び出し | 220+ サービスとネイティブ統合 |
+| 状態管理 | SDK が自動管理（チェックポイント） | サービスが完全管理 |
+| デバッグ | CloudWatch Logs + 通常のデバッガ | 実行履歴のビジュアル表示 |
+| 向いているケース | ビジネスロジックと密結合したワークフロー | 複数サービスのオーケストレーション |
+
+**Durable Functions が向いているケース:**
+- Lambda 関数内でワークフローとビジネスロジックが密結合している
+- 既存の Lambda 関数に耐障害性を追加したい
+- IDE でのコードファーストな開発を好む
+
+**Step Functions が向いているケース:**
+- 複数の AWS サービスをまたぐオーケストレーション
+- 非エンジニアがワークフローを理解・検証する必要がある
+- ゼロメンテナンスのインフラを求める
+
+## まとめ
+
+- **チェックポイント＆リプレイは強力だが、コードの決定性が求められる** — `Date.now()` や `Math.random()` は必ず step 内に置く。step 外の非決定的コードはリプレイ時に不整合を起こす。
+- **Callback は Human-in-the-loop の実装を劇的に簡素化する** — wait 中のコンピュート課金なしで、外部イベントを最大1年間待てる。ただし同期 invoke ではタイムアウトするため非同期呼び出しが必須。
+- **parallel/map のオーバーヘッドを理解して設計する** — チェックポイント保存に数百ms かかるため、軽量タスクの大量並列化には向かない。I/O バウンドな処理や、各 step が数秒以上かかるケースで効果を発揮する。
+- **Step Functions の代替ではなく、補完的な選択肢** — コードファーストで Lambda 内に閉じたワークフローには Durable Functions、複数サービスのオーケストレーションには Step Functions という使い分けが妥当だ。
+
+## クリーンアップ
+
+検証後は Lambda 関数、CloudWatch ロググループ、IAM ロールの順で削除する。Durable Functions 固有のリソース（チェックポイントデータ等）は `RetentionPeriodInDays` で設定した保持期間後に自動削除されるため、手動での対応は不要だ。
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">リソース削除コマンド</summary>
+
+```bash title="ターミナル"
+# Lambda 関数の削除
+aws lambda delete-function --function-name durable-basic-test
+aws lambda delete-function --function-name durable-retry-test
+aws lambda delete-function --function-name durable-callback-test
+aws lambda delete-function --function-name durable-parallel-test
+
+# CloudWatch ロググループの削除
+for fn in durable-basic-test durable-retry-test durable-callback-test durable-parallel-test; do
+  aws logs delete-log-group --log-group-name "/aws/lambda/$fn"
+done
+
+# IAM ロールの削除
+aws iam delete-role-policy \
+  --role-name lambda-durable-test-role \
+  --policy-name DurableFunctionPermissions
+aws iam detach-role-policy \
+  --role-name lambda-durable-test-role \
+  --policy-arn arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+aws iam delete-role --role-name lambda-durable-test-role
+```
+
+</details>

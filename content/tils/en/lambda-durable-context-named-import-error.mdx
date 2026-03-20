@@ -1,0 +1,29 @@
+---
+title: "Lambda Durable Functions SDK DurableContext cannot be named-imported in .mjs"
+description: "import { DurableContext } from '@aws/durable-execution-sdk-js' throws SyntaxError at runtime. Only import withDurableExecution for .mjs deployments."
+date: "2026-03-10"
+published: true
+tags: ["aws", "lambda", "typescript"]
+---
+
+The official TypeScript sample shows `import { withDurableExecution, DurableContext }`, so I used it as-is. Lambda threw this at runtime:
+
+```text title="Output"
+SyntaxError: The requested module '@aws/durable-execution-sdk-js'
+does not provide an export named 'DurableContext'
+```
+
+`DurableContext` is a TypeScript type-only export — it has no runtime representation in the ESM module. When deploying `.mjs` files directly, only import `withDurableExecution`:
+
+```javascript title="JavaScript (.mjs)"
+import { withDurableExecution } from "@aws/durable-execution-sdk-js";
+
+export const handler = withDurableExecution(
+  async (event, context) => {
+    // context is automatically DurableContext
+    await context.step("my-step", async () => { /* ... */ });
+  }
+);
+```
+
+If you're building with TypeScript, use `import type { DurableContext }` for type checking. This only bites you when deploying raw `.mjs` to Lambda.

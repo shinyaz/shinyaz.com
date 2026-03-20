@@ -1,0 +1,506 @@
+---
+title: "4 Things I Learned from Hands-On Testing Lambda Durable Functions"
+description: "Verified Step, Wait, Callback, and Parallel patterns via AWS CLI. Sharing checkpoint-replay behavior, gotchas, and when to choose Durable Functions over Step Functions."
+date: "2026-03-10"
+published: true
+featured: false
+categories: [infrastructure]
+tags: ["aws", "lambda", "serverless", "step-functions"]
+---
+
+## Introduction
+
+In December 2025, AWS added Durable Functions to Lambda. This feature lets you write multi-step workflows directly in Lambda function code without Step Functions. It uses a checkpoint-and-replay model for automatic recovery, supports execution suspension for up to one year, and incurs no compute charges during wait periods.
+
+To answer "how does it actually differ from Step Functions?" and "what's the real developer experience like?", I tested four patterns using the AWS CLI. Here's what I found. If you just want the results, skip ahead to [Test 1](#test-1-basic-step--wait).
+
+Prerequisites:
+
+- AWS CLI configured (`lambda:*`, `iam:*`, `logs:*` permissions)
+- A region where Node.js 24.x runtime is available
+- Test region: ap-northeast-1 (Tokyo)
+
+## Why Durable Functions?
+
+When implementing multi-step processing in Lambda, there were traditionally two options:
+
+1. **Self-managed within Lambda** — Save intermediate state to DynamoDB, implement retry and idempotency yourself. Code gets complex and state management bugs creep in
+2. **External orchestration with Step Functions** — Define workflows in ASL (Amazon States Language). Robust, but tightly coupled business logic means dual maintenance of ASL and code
+
+Durable Functions fill this gap. You write normal sequential code, and the SDK handles checkpoint management, retries, and state recovery automatically.
+
+## How Durable Functions Work
+
+Durable Functions operate on a **checkpoint-and-replay** model:
+
+1. Each `step()` completion persists its result to durable storage as a checkpoint
+2. When the function suspends via `wait()` or fails, the execution environment is released
+3. On resume, the function **re-executes from the beginning**, but completed steps are skipped — stored results are returned instead
+
+This means you write normal sequential code, and the SDK handles fault tolerance automatically.
+
+The SDK supports JavaScript/TypeScript (Node.js 22/24), Python (3.13/3.14), and Java (Preview).
+
+## Test Environment
+
+- Region: `ap-northeast-1` (Tokyo)
+- Runtime: Node.js 24.x
+- Memory: 256 MB
+- Durable config: `RetentionPeriodInDays: 1`, `ExecutionTimeout: 120` seconds
+- Deployment: AWS CLI (`create-function` + `--durable-config`)
+
+## Setup
+
+### IAM Role Setup
+
+Create an IAM role for Durable Functions. Beyond the standard Lambda execution role, checkpoint and callback permissions are required.
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">IAM role setup steps</summary>
+
+```bash title="Terminal (trust policy)"
+cat <<'EOF' > trust-policy.json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Principal": { "Service": "lambda.amazonaws.com" },
+      "Action": "sts:AssumeRole"
+    }
+  ]
+}
+EOF
+
+aws iam create-role \
+  --role-name lambda-durable-test-role \
+  --assume-role-policy-document file://trust-policy.json
+```
+
+```bash title="Terminal (attach policies)"
+aws iam attach-role-policy \
+  --role-name lambda-durable-test-role \
+  --policy-arn arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+```
+
+Add Durable Functions-specific permissions as an inline policy:
+
+```bash title="Terminal (durable inline policy)"
+cat <<'EOF' > durable-policy.json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": [
+        "lambda:CheckpointDurableExecution",
+        "lambda:GetDurableExecutionState",
+        "lambda:SendDurableExecutionCallbackSuccess",
+        "lambda:SendDurableExecutionCallbackFailure"
+      ],
+      "Resource": "arn:aws:lambda:<REGION>:<ACCOUNT_ID>:function:durable-*"
+    }
+  ]
+}
+EOF
+
+aws iam put-role-policy \
+  --role-name lambda-durable-test-role \
+  --policy-name DurableFunctionPermissions \
+  --policy-document file://durable-policy.json
+```
+
+</details>
+
+One gotcha here: some documentation references `CheckpointDurableExecutions` (plural), but the actual required action is `CheckpointDurableExecution` (singular). Using the plural form results in a permission error.
+
+### Creating and Deploying Functions
+
+Add `--durable-config` to a standard Lambda function creation — that's it.
+
+```bash title="Terminal (create function)"
+aws lambda create-function \
+  --function-name durable-basic-test \
+  --runtime nodejs24.x \
+  --handler index.handler \
+  --role arn:aws:iam::<ACCOUNT_ID>:role/lambda-durable-test-role \
+  --zip-file fileb://function.zip \
+  --timeout 30 --memory-size 256 \
+  --durable-config '{"RetentionPeriodInDays":1,"ExecutionTimeout":120}'
+```
+
+Critical: **invocation requires a versioned ARN**. `$LATEST` won't start a Durable Execution.
+
+```bash title="Terminal (publish version and invoke)"
+aws lambda publish-version --function-name durable-basic-test
+
+aws lambda invoke \
+  --function-name "arn:aws:lambda:ap-northeast-1:<ACCOUNT_ID>:function:durable-basic-test:1" \
+  --payload '{"orderId": "ORD-001"}' \
+  --cli-binary-format raw-in-base64-out \
+  response.json
+```
+
+For tests 2–4 below, the same workflow applies: save the code, `zip function.zip <filename>.mjs`, then `create-function` → `publish-version` → `invoke`. Only the function name and handler change.
+
+## Test Results Overview
+
+I tested four patterns:
+
+1. **Step + Wait** — Basic checkpoint and suspension behavior. Replay mechanics during wait
+2. **Failure Recovery and Retry** — Automatic retry on step failure. Skipping completed steps
+3. **Callback** — Human-in-the-loop pattern with external event wait. Sync vs async invocation
+4. **Parallel / Map** — Parallel execution overhead. CPU-bound vs I/O-bound differences
+
+## Test 1: Basic Step + Wait
+
+A simple 3-step order processing function with a wait. Save as `index.mjs` and package with `zip function.zip index.mjs`.
+
+```javascript title="index.mjs"
+import { withDurableExecution } from "@aws/durable-execution-sdk-js";
+
+export const handler = withDurableExecution(
+  async (event, context) => {
+    const orderId = event.orderId || "ORD-001";
+
+    // Step 1: Validate
+    const validation = await context.step("validate-order", async (stepCtx) => {
+      stepCtx.logger.info(`Validating order ${orderId}`);
+      return { orderId, status: "validated", timestamp: Date.now() };
+    });
+
+    // Step 2: Payment
+    const payment = await context.step("process-payment", async (stepCtx) => {
+      stepCtx.logger.info(`Processing payment for ${orderId}`);
+      return { orderId, status: "paid", amount: 4980, timestamp: Date.now() };
+    });
+
+    // Wait 10 seconds (no compute charges)
+    await context.wait({ seconds: 10 });
+
+    // Step 3: Confirm (runs after wait resumes)
+    const confirmation = await context.step("confirm-order", async (stepCtx) => {
+      stepCtx.logger.info(`Confirming order ${orderId}`);
+      return { orderId, status: "confirmed", timestamp: Date.now() };
+    });
+
+    return { orderId, steps: { validation, payment, confirmation } };
+  }
+);
+```
+
+The SDK package `@aws/durable-execution-sdk-js` is pre-installed in the Lambda runtime. Wrapping the handler with `withDurableExecution` replaces the standard Lambda context with a `DurableContext`, giving access to `step()`, `wait()`, and other durable operations.
+
+### Results
+
+```json title="Output"
+{
+  "orderId": "ORD-TEST-002",
+  "steps": {
+    "validation": {
+      "orderId": "ORD-TEST-002", "status": "validated", "timestamp": 1774019546545
+    },
+    "payment": {
+      "orderId": "ORD-TEST-002", "status": "paid", "amount": 4980, "timestamp": 1774019546623
+    },
+    "confirmation": {
+      "orderId": "ORD-TEST-002", "status": "confirmed", "timestamp": 1774019556800
+    }
+  },
+  "totalElapsedMs": 99
+}
+```
+
+### Findings
+
+**The gap between payment (546623) and confirmation (556800) timestamps is ~10.2 seconds — wait works accurately.** Meanwhile, `totalElapsedMs` is only 99ms. This is because replay runs after the wait, and `Date.now()` is re-evaluated at replay time.
+
+- Non-deterministic operations like `Date.now()` outside steps produce inconsistent values during replay. This aligns with the "Write deterministic code" section in the official documentation
+- The response includes a `DurableExecutionArn` for execution tracking
+- The SDK is pre-installed in the Lambda runtime, so no need to include it in the zip. However, bundling is recommended for production to pin the SDK version
+
+## Test 2: Failure Recovery and Retry
+
+Step 2 intentionally fails on the first attempt and succeeds on retry. Save as `index-retry.mjs` and deploy with `--handler index-retry.handler`.
+
+```javascript title="index-retry.mjs"
+import { withDurableExecution } from "@aws/durable-execution-sdk-js";
+
+let callCount = 0;
+
+export const handler = withDurableExecution(
+  async (event, context) => {
+    const orderId = event.orderId || "ORD-001";
+
+    const step1 = await context.step("step1-validate", async (stepCtx) => {
+      stepCtx.logger.info(`Step 1: Validating ${orderId}`);
+      return { status: "validated", timestamp: Date.now() };
+    });
+
+    // Fails first, succeeds on retry
+    const step2 = await context.step("step2-flaky-payment", async (stepCtx) => {
+      callCount++;
+      if (callCount <= 1) {
+        throw new Error(`Payment service unavailable (attempt ${callCount})`);
+      }
+      return { status: "paid", attempt: callCount, timestamp: Date.now() };
+    });
+
+    const step3 = await context.step("step3-confirm", async (stepCtx) => {
+      return { status: "confirmed", timestamp: Date.now() };
+    });
+
+    return { orderId, step1, step2, step3 };
+  }
+);
+```
+
+step2 intentionally throws on the first call and succeeds on retry. The global variable `callCount` resets on replay, which is why this logic works.
+
+### Results
+
+```json title="Output"
+{
+  "orderId": "ORD-RETRY-001",
+  "step1": { "status": "validated", "timestamp": 1774019591142 },
+  "step2": { "status": "paid", "attempt": 2, "timestamp": 1774019593796 },
+  "step3": { "status": "confirmed", "timestamp": 1774019593882 }
+}
+```
+
+### Findings
+
+**`step2.attempt` is `2` — automatic retry after the first failure, succeeded on the second attempt.** Step 1 was skipped during replay, with its result restored from the checkpoint.
+
+- The ~2.6 second gap between step1 and step2 timestamps shows backoff between retries
+- Completed step1 is never re-executed — stored results are returned. This is the core of checkpoint-and-replay
+- Global variables reset on replay, so they can be used for retry logic. However, best practice is to manage state through step return values
+
+## Test 3: Callback (External Event Wait)
+
+A human-in-the-loop approval pattern using callbacks. `context.createCallback()` suspends execution, and an external system resumes it via the `send-durable-execution-callback-success` API. Save as `index-callback.mjs`.
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">index-callback.mjs (full code)</summary>
+
+```javascript title="index-callback.mjs"
+import { withDurableExecution } from "@aws/durable-execution-sdk-js";
+
+export const handler = withDurableExecution(
+  async (event, context) => {
+    const orderId = event.orderId || "ORD-001";
+
+    const doc = await context.step("prepare-document", async (stepCtx) => {
+      stepCtx.logger.info(`Preparing document for ${orderId}`);
+      return { orderId, status: "prepared", timestamp: Date.now() };
+    });
+
+    // Create callback wait (60s timeout)
+    const [approvalPromise, callbackId] = await context.createCallback(
+      "approval",
+      { timeout: { seconds: 60 } }
+    );
+
+    // Notify external system with callback ID
+    await context.step("notify-approver", async (stepCtx) => {
+      stepCtx.logger.info(`Callback ID for approval: ${callbackId}`);
+      return { callbackId, notifiedAt: Date.now() };
+    });
+
+    // Execution suspends here (no compute charges)
+    const approval = await approvalPromise;
+
+    // Resumes after callback
+    const result = await context.step("process-approval", async (stepCtx) => {
+      return { orderId, approved: true, approvalData: approval };
+    });
+
+    return { orderId, doc, result };
+  }
+);
+```
+
+</details>
+
+The key point is that `createCallback()` returns a `[Promise, callbackId]` tuple. You pass the `callbackId` to an external system, and the function suspends when you `await` the promise.
+
+### Execution Steps
+
+**1. Invoke asynchronously**
+
+Synchronous invoke times out during callback wait, so `--invocation-type Event` is required.
+
+```bash title="Terminal"
+aws lambda invoke \
+  --function-name "arn:aws:lambda:ap-northeast-1:<ACCOUNT_ID>:function:durable-callback-test:1" \
+  --payload '{"orderId": "ORD-CALLBACK-001"}' \
+  --invocation-type Event \
+  --cli-binary-format raw-in-base64-out \
+  response.json
+```
+
+**2. Get the callback ID from CloudWatch Logs**
+
+```bash title="Terminal"
+aws logs filter-log-events \
+  --log-group-name /aws/lambda/durable-callback-test \
+  --filter-pattern "Callback ID"
+```
+
+The callback ID in the logs is a long Base64-encoded string containing the Durable Execution ARN and operation ID.
+
+**3. Send the callback to resume execution**
+
+```bash title="Terminal"
+aws lambda send-durable-execution-callback-success \
+  --callback-id "<CALLBACK_ID>" \
+  --result '{"approved": true, "approver": "manager@example.com"}'
+```
+
+**Within seconds of sending the callback, the function resumed and the `process-approval` step executed.** No compute charges during the callback wait.
+
+### Findings
+
+- **Synchronous invoke times out during callback wait** — `--invocation-type Event` (async) is required. This was the first gotcha I hit in this test
+- No compute charges during callback wait — ideal for human-in-the-loop workflows
+- Always set a `timeout` — without one, the callback waits indefinitely
+
+## Test 4: Parallel / Map
+
+Concurrent execution with `parallel()` and `map()`. Save as `index-parallel.mjs`.
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">index-parallel.mjs (full code)</summary>
+
+```javascript title="index-parallel.mjs"
+import { withDurableExecution } from "@aws/durable-execution-sdk-js";
+
+export const handler = withDurableExecution(
+  async (event, context) => {
+    // parallel(): 3 independent tasks
+    const parallelResults = await context.parallel([
+      async (ctx) => ctx.step("check-inventory", async () => {
+        const start = Date.now();
+        while (Date.now() - start < 500) {} // 500ms work
+        return { available: true, timestamp: Date.now() };
+      }),
+      async (ctx) => ctx.step("check-fraud", async () => {
+        const start = Date.now();
+        while (Date.now() - start < 300) {} // 300ms work
+        return { passed: true, timestamp: Date.now() };
+      }),
+      async (ctx) => ctx.step("check-credit", async () => {
+        const start = Date.now();
+        while (Date.now() - start < 400) {} // 400ms work
+        return { approved: true, timestamp: Date.now() };
+      }),
+    ]);
+
+    // map(): process array items
+    const items = [
+      { id: "ITEM-1", price: 1000 },
+      { id: "ITEM-2", price: 2000 },
+      { id: "ITEM-3", price: 3000 },
+    ];
+    const mapResults = await context.map(items, async (ctx, item, index) => {
+      return ctx.step(`process-item-${index}`, async () => {
+        const start = Date.now();
+        while (Date.now() - start < 200) {} // 200ms work
+        return { ...item, processed: true, timestamp: Date.now() };
+      });
+    });
+
+    return {
+      parallel: { results: parallelResults.getResults() },
+      map: { results: mapResults.getResults() },
+    };
+  }
+);
+```
+
+</details>
+
+The key point is that each function passed to `parallel()` receives its own `ctx` (child context). `map()` applies the same operation to each array element. Results are retrieved with `getResults()` as an array, and errors with `getErrors()`.
+
+### Results
+
+| Pattern | Sequential (theoretical) | Actual | Overhead |
+| ------- | ------------------------ | ------ | -------- |
+| parallel (500+300+400ms) | 1200ms | 1983ms | +783ms |
+| map (200ms×3) | 600ms | 1001ms | +401ms |
+
+**Checkpoint persistence overhead is hundreds of milliseconds per step, making it dominant for lightweight parallel tasks.**
+
+### Findings
+
+- Timestamps show the 3 parallel tasks completed ~300ms apart sequentially — for CPU-bound work, parallel effectively runs sequentially. The documentation mentions child contexts can "efficiently utilize multiple CPU cores", but busy-wait loops that monopolize the CPU don't benefit. I/O-bound operations (e.g., API calls, database queries) would see real parallelism
+- parallel/map is best suited for "running independent I/O-bound tasks concurrently", not "mass-parallelizing lightweight tasks"
+
+## Use Cases and Design Patterns
+
+Practical patterns that emerged from testing:
+
+**Fault-tolerant payment/order processing** — As confirmed in Tests 1 and 2, step checkpointing and automatic retry handle transient external service failures transparently. No need for DynamoDB intermediate state or custom retry logic.
+
+**Serverless approval workflows** — The Callback pattern from Test 3 enables human approval waits for up to one year with no compute charges. Previously this required SQS + Lambda + DynamoDB for state management; with Durable Functions, a single `await` line suffices.
+
+**Design considerations** — As Test 4 revealed, checkpoint persistence overhead is hundreds of milliseconds per step. The right step granularity is roughly "one external service call per step". Avoid wrapping lightweight loop iterations as individual steps. The documentation's "Design effective steps" section also recommends balancing step granularity.
+
+## Durable Functions vs Step Functions
+
+| Aspect | Durable Functions | Step Functions |
+| ------ | ----------------- | -------------- |
+| Definition | Code (JS/Python/Java) | ASL (JSON/YAML), CDK, or visual designer |
+| Dev experience | IDE + unit tests + LLM agents | Console visual editor |
+| AWS integrations | SDK calls from within Lambda | 220+ native service integrations |
+| State management | SDK-managed (checkpoints) | Fully managed by service |
+| Debugging | CloudWatch Logs + standard debuggers | Visual execution history |
+| Best for | Workflows tightly coupled with business logic | Multi-service orchestration |
+
+**Choose Durable Functions when:**
+- Workflow and business logic are tightly coupled within Lambda
+- You want to add fault tolerance to existing Lambda functions
+- You prefer code-first development in your IDE
+
+**Choose Step Functions when:**
+- Orchestrating across multiple AWS services
+- Non-engineers need to understand and validate workflows
+- You want zero-maintenance infrastructure
+
+## Takeaways
+
+- **Checkpoint-and-replay is powerful but demands deterministic code** — `Date.now()` and `Math.random()` must go inside steps. Non-deterministic code outside steps breaks during replay.
+- **Callbacks dramatically simplify human-in-the-loop implementations** — Wait up to one year with no compute charges. But synchronous invoke times out, so async invocation is required.
+- **Understand parallel/map overhead before designing** — Checkpoint persistence costs hundreds of milliseconds per step. Not ideal for mass-parallelizing lightweight tasks. Best for I/O-bound operations or steps taking several seconds each.
+- **Not a Step Functions replacement, but a complementary option** — Code-first Lambda-contained workflows → Durable Functions. Multi-service orchestration → Step Functions.
+
+## Cleanup
+
+Delete Lambda functions, CloudWatch log groups, and the IAM role in that order. Durable Functions-specific resources (checkpoint data, etc.) are automatically deleted after the `RetentionPeriodInDays` retention period, so no manual cleanup is needed for those.
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">Resource deletion commands</summary>
+
+```bash title="Terminal"
+# Delete Lambda functions
+aws lambda delete-function --function-name durable-basic-test
+aws lambda delete-function --function-name durable-retry-test
+aws lambda delete-function --function-name durable-callback-test
+aws lambda delete-function --function-name durable-parallel-test
+
+# Delete CloudWatch log groups
+for fn in durable-basic-test durable-retry-test durable-callback-test durable-parallel-test; do
+  aws logs delete-log-group --log-group-name "/aws/lambda/$fn"
+done
+
+# Delete IAM role
+aws iam delete-role-policy \
+  --role-name lambda-durable-test-role \
+  --policy-name DurableFunctionPermissions
+aws iam detach-role-policy \
+  --role-name lambda-durable-test-role \
+  --policy-arn arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+aws iam delete-role --role-name lambda-durable-test-role
+```
+
+</details>

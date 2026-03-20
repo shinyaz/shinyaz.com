@@ -1,0 +1,28 @@
+---
+title: "Lambda Durable Functions の IAM アクション名は CheckpointDurableExecution（単数形）"
+description: "ドキュメントの一部に CheckpointDurableExecutions（複数形）と記載があるが、実際に必要なのは単数形。複数形だと権限エラーになる。"
+date: "2026-03-10"
+published: true
+tags: ["aws", "lambda", "iam"]
+---
+
+Lambda Durable Functions を AWS CLI でデプロイした際、IAM ポリシーに `lambda:CheckpointDurableExecutions`（複数形）を設定したら以下のエラーが出た。
+
+```text title="出力結果"
+User: arn:aws:sts::XXXX:assumed-role/lambda-durable-test-role/durable-basic-test
+is not authorized to perform: lambda:CheckpointDurableExecution on resource: ...
+because no identity-based policy allows the lambda:CheckpointDurableExecution action
+```
+
+エラーメッセージ自体が `CheckpointDurableExecution`（単数形）を要求していると教えてくれている。ポリシーを単数形に修正したら解決した。
+
+```json title="正しいポリシー"
+{
+  "Action": [
+    "lambda:CheckpointDurableExecution",
+    "lambda:GetDurableExecutionState"
+  ]
+}
+```
+
+ドキュメントの[Getting Started](https://docs.aws.amazon.com/lambda/latest/dg/durable-getting-started.html)ページではコンソールから作成すると自動で正しい権限が付与されるが、CLI や IaC で手動設定する場合はアクション名の単数/複数に注意が必要だ。

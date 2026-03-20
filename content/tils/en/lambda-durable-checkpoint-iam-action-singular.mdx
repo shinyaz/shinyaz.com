@@ -1,0 +1,28 @@
+---
+title: "Lambda Durable Functions IAM action is CheckpointDurableExecution (singular)"
+description: "Some docs reference CheckpointDurableExecutions (plural), but the actual required action is singular. Plural form causes permission errors."
+date: "2026-03-10"
+published: true
+tags: ["aws", "lambda", "iam"]
+---
+
+When deploying Lambda Durable Functions via AWS CLI, I set `lambda:CheckpointDurableExecutions` (plural) in the IAM policy and got this error:
+
+```text title="Output"
+User: arn:aws:sts::XXXX:assumed-role/lambda-durable-test-role/durable-basic-test
+is not authorized to perform: lambda:CheckpointDurableExecution on resource: ...
+because no identity-based policy allows the lambda:CheckpointDurableExecution action
+```
+
+The error message itself tells you the correct action name — `CheckpointDurableExecution` (singular). Fixing the policy to singular resolved it.
+
+```json title="Correct policy"
+{
+  "Action": [
+    "lambda:CheckpointDurableExecution",
+    "lambda:GetDurableExecutionState"
+  ]
+}
+```
+
+The [Getting Started](https://docs.aws.amazon.com/lambda/latest/dg/durable-getting-started.html) console flow auto-assigns the correct permissions, but when using CLI or IaC, watch the singular/plural on action names.

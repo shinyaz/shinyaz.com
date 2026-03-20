@@ -1,0 +1,29 @@
+---
+title: "Lambda Durable Functions SDK の DurableContext は named import できない"
+description: "import { DurableContext } from '@aws/durable-execution-sdk-js' は SyntaxError になる。withDurableExecution のみ import し、型は推論に任せる。"
+date: "2026-03-10"
+published: true
+tags: ["aws", "lambda", "typescript"]
+---
+
+Durable Functions の公式ドキュメントの TypeScript サンプルに `import { withDurableExecution, DurableContext }` と書いてあったのでそのまま使ったら、Lambda 実行時に以下のエラーが出た。
+
+```text title="出力結果"
+SyntaxError: The requested module '@aws/durable-execution-sdk-js'
+does not provide an export named 'DurableContext'
+```
+
+`DurableContext` は TypeScript の型としてのみエクスポートされており、ランタイムの ESM モジュールには実体がない。`.mjs` ファイルで直接デプロイする場合は `withDurableExecution` のみ import する。
+
+```javascript title="JavaScript（.mjs）"
+import { withDurableExecution } from "@aws/durable-execution-sdk-js";
+
+export const handler = withDurableExecution(
+  async (event, context) => {
+    // context は自動的に DurableContext 型になる
+    await context.step("my-step", async () => { /* ... */ });
+  }
+);
+```
+
+TypeScript でビルドする場合は `import type { DurableContext }` を使えば型チェックが効く。ランタイムに `.mjs` を直接デプロイするケースでのみ問題になる。
