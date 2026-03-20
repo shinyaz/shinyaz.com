@@ -20,7 +20,7 @@ describe("manifest.webmanifest route", () => {
     it("returns Japanese description and start_url", async () => {
       const result = await getManifest("ja");
       expect(result.name).toBe("@shinyaz");
-      expect(result.description).toBe("shinyaz の技術ノート");
+      expect(result.description).toBe("shinyaz の技術ノート - 技術を学び、記録し、共有する");
       expect(result.start_url).toBe("/ja");
       expect(result.lang).toBe("ja");
     });
@@ -30,7 +30,7 @@ describe("manifest.webmanifest route", () => {
     it("returns English description and start_url", async () => {
       const result = await getManifest("en");
       expect(result.name).toBe("@shinyaz");
-      expect(result.description).toBe("Tech notes by shinyaz");
+      expect(result.description).toBe("Tech notes by shinyaz - Learn, document, and share technology");
       expect(result.start_url).toBe("/en");
       expect(result.lang).toBe("en");
     });
