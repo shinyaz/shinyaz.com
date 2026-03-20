@@ -13,8 +13,9 @@ Blog post writing guide: $ARGUMENTS
 - **Anchor Insight** — ONE core insight per post. No common thread → split posts
 - **Body** — Descriptive `##` headings, choose structure by article type
 - **Content** — Include gotchas, design decisions, before/after. Omit file dumps, boilerplate
-- **Code blocks** — Target 3-5. Over 7 → consolidate. Always specify a language (e.g. `tsx`, `bash`, `text`); bare ` ``` ` breaks `rehype-pretty-code`
+- **Code blocks** — Target 3-5. Over 7 → consolidate. Always specify a language (e.g. `tsx`, `bash`, `text`); bare ` ``` ` breaks `rehype-pretty-code`. Add `title=` to distinguish code types: language name for source code (`title="Python"`, `title="TypeScript"` etc.), `title="ターミナル"` / `title="Terminal"` for shell commands, `title="出力結果"` / `title="Output"` for execution results. Use file names when specific (`title="main.py"`) or add context (`title="ターミナル（事前準備）"`)
 - **Closing** — Transferable insights (not action listing). Bold phrase + dash + explanation, 3-4 items
+- **Internal links** — Posts: `/{locale}/blog/{YYYY}/{MM}/{DD}/{slug}`, TILs: `/{locale}/til/{YYYY}/{MM}/{DD}/{slug}`. NEVER use `/{locale}/posts/{slug}` or `/{locale}/tils/{slug}`. Get dates from the target's frontmatter `date` field
 - **Length** — Japanese: 800-1500 words, English: 600-1200 words
 
 ## Article Types

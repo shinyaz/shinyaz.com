@@ -10,7 +10,7 @@ tags: ["aws", "eks", "kubernetes", "argocd", "gitops", "eksctl", "devops"]
 
 ## はじめに
 
-[前回の記事](/ja/posts/eks-argocd-capability)では、AWS CLI を使って EKS ArgoCD Capability を構築した。CLI は細かい制御が効くが、JSON のインラインパラメータが長くなりがちだ。
+[前回の記事](/ja/blog/2026/03/21/eks-argocd-capability)では、AWS CLI を使って EKS ArgoCD Capability を構築した。CLI は細かい制御が効くが、JSON のインラインパラメータが長くなりがちだ。
 
 eksctl を使えば、同じ構成を YAML 設定ファイル1枚で宣言的に管理できる。クラスター構成と Capability 設定を同じフォーマットで扱えるため、IaC としての見通しがよくなる。
 
@@ -18,7 +18,7 @@ eksctl を使えば、同じ構成を YAML 設定ファイル1枚で宣言的に
 
 ## 前提条件
 
-- EKS クラスター（Auto Mode）が稼働中であること（[クラスター構築手順](/ja/posts/eks-auto-mode-cluster-setup)を参照）
+- EKS クラスター（Auto Mode）が稼働中であること（[クラスター構築手順](/ja/blog/2026/03/18/eks-auto-mode-cluster-setup)を参照）
 - eksctl v0.220.0 以上（`eksctl version` で確認）
 - AWS CLI v2.12.3 以上
 - kubectl が設定済みであること
@@ -28,7 +28,7 @@ eksctl を使えば、同じ構成を YAML 設定ファイル1枚で宣言的に
 
 ## Step 1: IAM Capability ロールの作成
 
-[前回の記事](/ja/posts/eks-argocd-capability)と同じ手順で、ArgoCD Capability 用の [IAM ロール](https://docs.aws.amazon.com/eks/latest/userguide/capability-role.html)を作成する。
+[前回の記事](/ja/blog/2026/03/21/eks-argocd-capability)と同じ手順で、ArgoCD Capability 用の [IAM ロール](https://docs.aws.amazon.com/eks/latest/userguide/capability-role.html)を作成する。
 
 ```bash
 cat > argocd-trust-policy.json << 'EOF'
@@ -56,7 +56,7 @@ aws iam create-role \
 
 ## Step 2: Identity Center 情報の取得
 
-Identity Center のインスタンス ARN、Identity Store ID、ユーザー ID を取得する。Identity Center のホームリージョンの特定方法は[前回の記事](/ja/posts/eks-argocd-capability)を参照。
+Identity Center のインスタンス ARN、Identity Store ID、ユーザー ID を取得する。Identity Center のホームリージョンの特定方法は[前回の記事](/ja/blog/2026/03/21/eks-argocd-capability)を参照。
 
 ```bash
 # インスタンス情報の取得
@@ -149,7 +149,7 @@ appprojects        appproj        argoproj.io/v1alpha1   true   AppProject
 
 ## Step 5: ターゲットクラスターの登録
 
-[前回の記事](/ja/posts/eks-argocd-capability)と同様に、アクセスポリシーの関連付けとクラスター登録を行う。
+[前回の記事](/ja/blog/2026/03/21/eks-argocd-capability)と同様に、アクセスポリシーの関連付けとクラスター登録を行う。
 
 ```bash
 # アクセスポリシーの関連付け

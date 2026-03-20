@@ -12,13 +12,13 @@ seriesOrder: 2
 
 ## はじめに
 
-[前回の記事](/ja/posts/lambda-az-metadata-same-az-routing)では、Lambda AZメタデータエンドポイントを直接呼び出してSame-AZルーティングの効果を検証した。結果としてクロスAZレイテンシが同一AZの約2.5倍であることを実測で確認できたが、直接APIアクセスではHTTPリクエスト構築、認証トークン処理、キャッシュ実装をすべて自前で行う必要があった。
+[前回の記事](/ja/blog/2026/03/20/lambda-az-metadata-same-az-routing)では、Lambda AZメタデータエンドポイントを直接呼び出してSame-AZルーティングの効果を検証した。結果としてクロスAZレイテンシが同一AZの約2.5倍であることを実測で確認できたが、直接APIアクセスではHTTPリクエスト構築、認証トークン処理、キャッシュ実装をすべて自前で行う必要があった。
 
 本記事では、Powertools for AWS Lambda（TypeScript版）の `getMetadata()` を使い、Same-AZルーティングをより簡潔に実装する。加えて、Powertoolsのキャッシュ動作についても検証結果を共有する。
 
 前提条件:
 
-- [前回の記事](/ja/posts/lambda-az-metadata-same-az-routing)の検証環境と同等の構成（ElastiCache Valkey 3AZ、VPC内Lambda）
+- [前回の記事](/ja/blog/2026/03/20/lambda-az-metadata-same-az-routing)の検証環境と同等の構成（ElastiCache Valkey 3AZ、VPC内Lambda）
 - Node.js 22.x ランタイム
 - `@aws-lambda-powertools/commons` パッケージ
 
@@ -89,7 +89,7 @@ const metadata3 = await getMetadata();
 
 ## Same-AZ ルーティング検証
 
-[前回の記事](/ja/posts/lambda-az-metadata-same-az-routing)と同条件（ElastiCache Valkey 3AZ、TLS、PING 50回）で、TypeScript Powertools版のSame-AZルーティングを検証した。
+[前回の記事](/ja/blog/2026/03/20/lambda-az-metadata-same-az-routing)と同条件（ElastiCache Valkey 3AZ、TLS、PING 50回）で、TypeScript Powertools版のSame-AZルーティングを検証した。
 
 ### 検証用Lambda関数
 
@@ -192,7 +192,7 @@ export const handler = async () => {
 <details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
 <summary className="cursor-pointer font-medium">デプロイ手順</summary>
 
-ElastiCache Valkey クラスターは[前回の記事](/ja/posts/lambda-az-metadata-same-az-routing)のデプロイ手順で構築する。TypeScript Lambda のビルドとデプロイは以下の通り。
+ElastiCache Valkey クラスターは[前回の記事](/ja/blog/2026/03/20/lambda-az-metadata-same-az-routing)のデプロイ手順で構築する。TypeScript Lambda のビルドとデプロイは以下の通り。
 
 ```bash title="ターミナル（ビルド）"
 npm init -y
@@ -213,7 +213,7 @@ aws lambda create-function \
   --environment '{"Variables":{"CACHE_NODES":"<CACHE_NODES値>"}}'
 ```
 
-`CACHE_NODES` の形式は[前回の記事](/ja/posts/lambda-az-metadata-same-az-routing)を参照。
+`CACHE_NODES` の形式は[前回の記事](/ja/blog/2026/03/20/lambda-az-metadata-same-az-routing)を参照。
 
 </details>
 
@@ -272,7 +272,7 @@ aws lambda create-function \
 
 ## クリーンアップ
 
-[前回の記事](/ja/posts/lambda-az-metadata-same-az-routing)と同じ手順でリソースを削除する。TypeScript版のLambda関数名のみ異なる。
+[前回の記事](/ja/blog/2026/03/20/lambda-az-metadata-same-az-routing)と同じ手順でリソースを削除する。TypeScript版のLambda関数名のみ異なる。
 
 ```bash title="ターミナル"
 aws lambda delete-function --function-name az-ts-routing-test

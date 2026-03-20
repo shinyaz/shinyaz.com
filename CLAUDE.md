@@ -53,6 +53,7 @@ src/app/[locale]/                   → Pages (all under locale prefix)
 - **Lint clean** — Commit前に `/fixing-lint` でエラーゼロを確認
 - **Test clean** — コード変更時は既存テストの更新も行い `npm test` パスを確認
 - **Content writing** — Posts → `/writing-posts`, TILs → `/writing-tils`, Pages → `/writing-pages`
+- **Internal links** — Posts use `/{locale}/blog/{YYYY}/{MM}/{DD}/{slug}`, TILs use `/{locale}/til/{YYYY}/{MM}/{DD}/{slug}`. NEVER use `/{locale}/posts/{slug}` or `/{locale}/tils/{slug}`. Get dates from the target's frontmatter `date` field.
 - **Branch rule** — NEVER commit code directly to main. Code changes (src/, __tests__/, config, etc.) MUST go through a feature branch. Only `content/` changes may be committed directly to main.
 
 ## Git Workflow

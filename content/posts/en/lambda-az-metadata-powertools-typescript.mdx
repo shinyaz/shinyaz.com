@@ -12,13 +12,13 @@ seriesOrder: 2
 
 ## Introduction
 
-In the [previous post](/en/posts/lambda-az-metadata-same-az-routing), I verified same-AZ routing using Lambda's AZ metadata endpoint with direct API access in Python. The results showed cross-AZ latency is ~2.5x higher than same-AZ. However, direct API access requires manual HTTP request construction, auth token handling, and cache implementation.
+In the [previous post](/en/blog/2026/03/20/lambda-az-metadata-same-az-routing), I verified same-AZ routing using Lambda's AZ metadata endpoint with direct API access in Python. The results showed cross-AZ latency is ~2.5x higher than same-AZ. However, direct API access requires manual HTTP request construction, auth token handling, and cache implementation.
 
 This post implements the same pattern using Powertools for AWS Lambda (TypeScript) `getMetadata()`, verifies its caching behavior, and compares results with the Python approach.
 
 Prerequisites:
 
-- Same test environment as [Part 1](/en/posts/lambda-az-metadata-same-az-routing) (ElastiCache Valkey 3AZ, VPC Lambda)
+- Same test environment as [Part 1](/en/blog/2026/03/20/lambda-az-metadata-same-az-routing) (ElastiCache Valkey 3AZ, VPC Lambda)
 - Node.js 22.x runtime
 - `@aws-lambda-powertools/commons` package
 
@@ -89,7 +89,7 @@ The post-`clearMetadataCache()` variance (1.9–158ms) reflects the cost of esta
 
 ## Same-AZ Routing Verification
 
-Tested under the same conditions as [Part 1](/en/posts/lambda-az-metadata-same-az-routing) (ElastiCache Valkey 3AZ, TLS, 50 PING iterations).
+Tested under the same conditions as [Part 1](/en/blog/2026/03/20/lambda-az-metadata-same-az-routing) (ElastiCache Valkey 3AZ, TLS, 50 PING iterations).
 
 ### Lambda Function
 
@@ -174,7 +174,7 @@ export const handler = async () => {
 <details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
 <summary className="cursor-pointer font-medium">Deployment steps</summary>
 
-Build the ElastiCache Valkey cluster using the deployment steps from [Part 1](/en/posts/lambda-az-metadata-same-az-routing). For the TypeScript Lambda:
+Build the ElastiCache Valkey cluster using the deployment steps from [Part 1](/en/blog/2026/03/20/lambda-az-metadata-same-az-routing). For the TypeScript Lambda:
 
 ```bash title="Terminal (build)"
 npm init -y
@@ -195,7 +195,7 @@ aws lambda create-function \
   --environment '{"Variables":{"CACHE_NODES":"<CACHE_NODES_VALUE>"}}'
 ```
 
-See [Part 1](/en/posts/lambda-az-metadata-same-az-routing) for the `CACHE_NODES` format.
+See [Part 1](/en/blog/2026/03/20/lambda-az-metadata-same-az-routing) for the `CACHE_NODES` format.
 
 </details>
 
@@ -235,7 +235,7 @@ See [Part 1](/en/posts/lambda-az-metadata-same-az-routing) for the `CACHE_NODES`
 
 </details>
 
-### Comparison with Python ([Part 1](/en/posts/lambda-az-metadata-same-az-routing))
+### Comparison with Python ([Part 1](/en/blog/2026/03/20/lambda-az-metadata-same-az-routing))
 
 | Metric | Python (Direct API) | TypeScript (Powertools) |
 |---|---|---|
@@ -254,7 +254,7 @@ The same-AZ vs cross-AZ ratio is virtually identical. The absolute difference (T
 
 ## Cleanup
 
-Same procedure as [Part 1](/en/posts/lambda-az-metadata-same-az-routing), with the TypeScript Lambda function names:
+Same procedure as [Part 1](/en/blog/2026/03/20/lambda-az-metadata-same-az-routing), with the TypeScript Lambda function names:
 
 ```bash title="Terminal"
 aws lambda delete-function --function-name az-ts-routing-test

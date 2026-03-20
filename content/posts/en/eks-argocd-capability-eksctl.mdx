@@ -10,7 +10,7 @@ tags: ["aws", "eks", "kubernetes", "argocd", "gitops", "eksctl", "devops"]
 
 ## Introduction
 
-In the [previous post](/en/posts/eks-argocd-capability), I set up EKS ArgoCD Capability using AWS CLI. The CLI gives fine-grained control, but the inline JSON parameters get unwieldy.
+In the [previous post](/en/blog/2026/03/21/eks-argocd-capability), I set up EKS ArgoCD Capability using AWS CLI. The CLI gives fine-grained control, but the inline JSON parameters get unwieldy.
 
 With eksctl, the same setup fits in a single YAML config file. Cluster configuration and Capability settings live in the same format, making the overall IaC picture cleaner.
 
@@ -18,7 +18,7 @@ This post walks through adding ArgoCD Capability to an existing EKS Auto Mode cl
 
 ## Prerequisites
 
-- An EKS Auto Mode cluster up and running (see [cluster setup guide](/en/posts/eks-auto-mode-cluster-setup))
+- An EKS Auto Mode cluster up and running (see [cluster setup guide](/en/blog/2026/03/18/eks-auto-mode-cluster-setup))
 - eksctl v0.220.0+ (`eksctl version` to verify)
 - AWS CLI v2.12.3+
 - kubectl configured
@@ -28,7 +28,7 @@ I'm working with `sandbox-cluster` (v1.32, ap-northeast-1).
 
 ## Step 1: Create the IAM Capability Role
 
-Same as the [previous post](/en/posts/eks-argocd-capability)—create a [dedicated IAM role](https://docs.aws.amazon.com/eks/latest/userguide/capability-role.html) with the Capabilities trust policy.
+Same as the [previous post](/en/blog/2026/03/21/eks-argocd-capability)—create a [dedicated IAM role](https://docs.aws.amazon.com/eks/latest/userguide/capability-role.html) with the Capabilities trust policy.
 
 ```bash
 cat > argocd-trust-policy.json << 'EOF'
@@ -56,7 +56,7 @@ aws iam create-role \
 
 ## Step 2: Get Identity Center Information
 
-Retrieve the instance ARN, Identity Store ID, and user ID. See the [previous post](/en/posts/eks-argocd-capability) for how to identify the Identity Center home region.
+Retrieve the instance ARN, Identity Store ID, and user ID. See the [previous post](/en/blog/2026/03/21/eks-argocd-capability) for how to identify the Identity Center home region.
 
 ```bash
 aws sso-admin list-instances \
@@ -147,7 +147,7 @@ Open the `serverUrl` (from `aws eks describe-capability`) in a browser. It redir
 
 ## Step 5: Register Target Cluster
 
-Same as the [previous post](/en/posts/eks-argocd-capability)—associate an access policy and register the cluster.
+Same as the [previous post](/en/blog/2026/03/21/eks-argocd-capability)—associate an access policy and register the cluster.
 
 ```bash
 aws eks associate-access-policy \
