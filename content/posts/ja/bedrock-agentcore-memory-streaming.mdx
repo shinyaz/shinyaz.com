@@ -1,0 +1,486 @@
+---
+title: "Bedrock AgentCore Memory のストリーミング通知で長期メモリの変更をリアルタイムに検知する"
+description: "AgentCore Memory の新機能 Memory Record Streaming を検証。Kinesis Data Streams へのプッシュ配信、FULL_CONTENT / METADATA_ONLY の挙動差、非同期抽出イベントの実測結果を共有する。"
+date: "2026-03-12"
+published: true
+featured: false
+categories: [ai-agents]
+tags: ["bedrock", "agentcore", "kinesis", "ai-agents", "streaming"]
+---
+
+## はじめに
+
+AI エージェントにパーソナライズされた体験を提供するには、過去の会話から抽出した長期メモリが不可欠だ。Amazon Bedrock AgentCore Memory はこの長期メモリの管理を担うが、これまでメモリレコードの変更を検知するにはポーリングが必要だった。
+
+2026年3月12日、AgentCore Memory に **[ストリーミング通知](https://aws.amazon.com/about-aws/whats-new/2026/03/agentcore-memory-streaming-ltm/)** 機能が追加された。メモリレコードの作成・更新・削除を Amazon Kinesis Data Streams にリアルタイムでプッシュ配信する。ポーリングが不要になり、イベント駆動アーキテクチャの構築が容易になる。
+
+本記事では、この機能を東京リージョン（ap-northeast-1）で実際に検証し、セットアップ手順、各イベントタイプの挙動、コンテンツレベルの違いを実測データとともに共有する。
+
+前提条件:
+
+- AWS CLI v2（bedrock-agentcore サブコマンドが利用可能なバージョン）
+- AgentCore Memory へのアクセス権限を持つ AWS アカウント
+- jq（Kinesis レコードのデコードに使用）
+
+## Memory Record Streaming の概要
+
+ストリーミング通知は、メモリレコードのライフサイクルイベントを Kinesis Data Streams に配信するプッシュベースの仕組みだ。
+
+| イベントタイプ | トリガー |
+| --- | --- |
+| `StreamingEnabled` | ストリーミング設定の有効化・変更時 |
+| `MemoryRecordCreated` | 長期メモリ抽出、`BatchCreateMemoryRecords` API |
+| `MemoryRecordUpdated` | `BatchUpdateMemoryRecords` API |
+| `MemoryRecordDeleted` | `DeleteMemoryRecord`、`BatchDeleteMemoryRecords` API、統合ワークフロー |
+
+コンテンツレベルは2種類ある。
+
+- **FULL_CONTENT** — メタデータに加えて `memoryRecordText`（レコード本文）を含む
+- **METADATA_ONLY** — メタデータのみ。本文が必要な場合は別途 API で取得
+
+活用シーンとしては、データレイクへのメモリ集約、下流ワークフローのトリガー、メモリ変更の監査ログなどが考えられる。
+
+## 検証環境のセットアップ
+
+検証に必要なリソースは3つ: Kinesis Data Stream、IAM ロール、Memory だ。
+
+### Kinesis Data Stream の作成
+
+```bash title="ターミナル"
+aws kinesis create-stream \
+  --stream-name agentcore-memory-stream \
+  --stream-mode-details '{"StreamMode": "ON_DEMAND"}' \
+  --region ap-northeast-1
+```
+
+ON_DEMAND モードを選択すれば、シャード数の事前設計は不要だ。
+
+### IAM ロールの作成
+
+AgentCore が Kinesis にイベントを書き込むための IAM ロールを作成する。信頼ポリシーで `bedrock-agentcore.amazonaws.com` を許可し、権限ポリシーで Kinesis への `PutRecords` と `DescribeStream` を許可する。
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">IAM ポリシーとロール作成コマンド</summary>
+
+```json title="trust-policy.json"
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Principal": {
+        "Service": "bedrock-agentcore.amazonaws.com"
+      },
+      "Action": "sts:AssumeRole"
+    }
+  ]
+}
+```
+
+```json title="kinesis-policy.json"
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": [
+        "kinesis:PutRecords",
+        "kinesis:DescribeStream"
+      ],
+      "Resource": "arn:aws:kinesis:ap-northeast-1:<ACCOUNT_ID>:stream/agentcore-memory-stream"
+    }
+  ]
+}
+```
+
+```bash title="ターミナル"
+aws iam create-role \
+  --role-name AgentCoreMemoryStreamRole \
+  --assume-role-policy-document file://trust-policy.json
+
+aws iam put-role-policy \
+  --role-name AgentCoreMemoryStreamRole \
+  --policy-name AgentCoreKinesisAccess \
+  --policy-document file://kinesis-policy.json
+```
+
+Kinesis Data Stream でサーバーサイド暗号化（SSE）を有効にしている場合は、`kms:GenerateDataKey` 権限も追加する必要がある。
+
+</details>
+
+### Memory の作成（ストリーミング有効）
+
+`create-memory` の `--stream-delivery-resources` でストリーミングを有効化する。`--memory-execution-role-arn` の指定が必須だ。
+
+```bash title="ターミナル"
+aws bedrock-agentcore-control create-memory \
+  --name "StreamingTestMemory" \
+  --description "Memory with streaming enabled" \
+  --event-expiry-duration 30 \
+  --memory-execution-role-arn "arn:aws:iam::<ACCOUNT_ID>:role/AgentCoreMemoryStreamRole" \
+  --stream-delivery-resources '{
+    "resources": [
+      {
+        "kinesis": {
+          "dataStreamArn": "arn:aws:kinesis:ap-northeast-1:<ACCOUNT_ID>:stream/agentcore-memory-stream",
+          "contentConfigurations": [
+            {
+              "type": "MEMORY_RECORDS",
+              "level": "FULL_CONTENT"
+            }
+          ]
+        }
+      }
+    ]
+  }' \
+  --region ap-northeast-1
+```
+
+レスポンスの `memory.id` を以降のコマンドで `<MEMORY_ID>` として使用する。ステータスが `CREATING` → `ACTIVE` になるまで約3分かかった。
+
+```bash title="ターミナル（ステータス確認）"
+aws bedrock-agentcore-control get-memory \
+  --memory-id "<MEMORY_ID>" \
+  --region ap-northeast-1 \
+  --query 'memory.status' --output text
+```
+
+これでセットアップは完了だ。次のセクションから実際にイベントを発生させて検証する。
+
+## イベント配信の検証
+
+### Kinesis からのイベント読み取り
+
+本記事では Lambda コンシューマーを使わず、AWS CLI で直接 Kinesis からイベントを読み取る。以下のスクリプトで全シャードのイベントを一括確認できる。各検証ステップの後にこのスクリプトを実行してイベントを確認する。
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">read-stream.sh（Kinesis イベント読み取りスクリプト）</summary>
+
+```bash title="read-stream.sh"
+#!/bin/bash
+STREAM_NAME="agentcore-memory-stream"
+REGION="ap-northeast-1"
+
+SHARDS=$(aws kinesis list-shards \
+  --stream-name "$STREAM_NAME" --region "$REGION" \
+  --query 'Shards[].ShardId' --output text)
+
+for SHARD_ID in $SHARDS; do
+  ITERATOR=$(aws kinesis get-shard-iterator \
+    --stream-name "$STREAM_NAME" --shard-id "$SHARD_ID" \
+    --shard-iterator-type TRIM_HORIZON --region "$REGION" \
+    --query 'ShardIterator' --output text)
+
+  RESULT=$(aws kinesis get-records \
+    --shard-iterator "$ITERATOR" --region "$REGION")
+
+  COUNT=$(echo "$RESULT" | jq '.Records | length')
+  if [ "$COUNT" -gt 0 ]; then
+    echo "=== $SHARD_ID ($COUNT records) ==="
+    echo "$RESULT" | jq -r '.Records[].Data' | while read -r data; do
+      echo "$data" | base64 -d | jq .
+    done
+  fi
+done
+```
+
+Kinesis のレコードは Base64 エンコードされているため、デコードが必要だ。`TRIM_HORIZON` を指定するとストリームの先頭から全レコードを読み取る。
+
+</details>
+
+### StreamingEnabled
+
+Memory が ACTIVE になった時点で、最初のイベントとして `StreamingEnabled` が Kinesis に配信される。
+
+```json title="StreamingEnabled イベント"
+{
+  "memoryStreamEvent": {
+    "eventType": "StreamingEnabled",
+    "eventTime": "2026-03-20T13:43:44.520995805Z",
+    "memoryId": "StreamingTestMemory-Vwl4GD9vJS",
+    "message": "Streaming enabled for memory resource: StreamingTestMemory-Vwl4GD9vJS"
+  }
+}
+```
+
+このイベントが確認できれば、ストリーミングの設定は正常に完了している。
+
+### MemoryRecordCreated（直接作成）
+
+`batch-create-memory-records` でレコードを直接作成する。
+
+```bash title="ターミナル"
+aws bedrock-agentcore batch-create-memory-records \
+  --memory-id "<MEMORY_ID>" \
+  --records '[
+    {
+      "requestIdentifier": "direct-test-001",
+      "content": {"text": "User prefers dark mode in all applications"},
+      "namespaces": ["preferences/test-user-001"],
+      "timestamp": "'$(date +%s)'"
+    }
+  ]' \
+  --region ap-northeast-1
+```
+
+数秒後に Kinesis で `MemoryRecordCreated` イベントを受信した。
+
+```json title="MemoryRecordCreated イベント（FULL_CONTENT）"
+{
+  "memoryStreamEvent": {
+    "eventType": "MemoryRecordCreated",
+    "eventTime": "2026-03-20T13:48:01.822867426Z",
+    "memoryId": "StreamingTestMemory-Vwl4GD9vJS",
+    "memoryRecordId": "mem-234829a0-6aae-4844-9e05-ab5dd6823545",
+    "memoryRecordText": "User prefers dark mode in all applications",
+    "namespaces": ["preferences/test-user-001"],
+    "createdAt": 1774014477000,
+    "memoryStrategyType": "NONE"
+  }
+}
+```
+
+`FULL_CONTENT` 設定のため `memoryRecordText` にレコード本文が含まれている。`memoryStrategyType` は直接作成のため `NONE` だ。なお、[公式ドキュメント](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/memory-record-streaming.html)のスキーマには `memoryStrategyId` や `metadata` フィールドも定義されている。
+
+### MemoryRecordUpdated と MemoryRecordDeleted
+
+続けて更新と削除を検証する。
+
+更新は `batch-update-memory-records` で行う。`timestamp` フィールドが必須である点に注意。
+
+```bash title="ターミナル（更新）"
+aws bedrock-agentcore batch-update-memory-records \
+  --memory-id "<MEMORY_ID>" \
+  --records '[
+    {
+      "memoryRecordId": "<MEMORY_RECORD_ID>",
+      "content": {"text": "User prefers dark mode and uses Catppuccin Mocha theme"},
+      "namespaces": ["preferences/test-user-001"],
+      "timestamp": "'$(date +%s)'"
+    }
+  ]' \
+  --region ap-northeast-1
+```
+
+削除は `delete-memory-record` で行う。
+
+```bash title="ターミナル（削除）"
+aws bedrock-agentcore delete-memory-record \
+  --memory-id "<MEMORY_ID>" \
+  --memory-record-id "<MEMORY_RECORD_ID>" \
+  --region ap-northeast-1
+```
+
+それぞれ対応するイベントが Kinesis に配信された。
+
+```json title="MemoryRecordUpdated イベント"
+{
+  "memoryStreamEvent": {
+    "eventType": "MemoryRecordUpdated",
+    "eventTime": "2026-03-20T13:49:26.975705431Z",
+    "memoryId": "StreamingTestMemory-Vwl4GD9vJS",
+    "memoryRecordId": "mem-234829a0-6aae-4844-9e05-ab5dd6823545",
+    "memoryRecordText": "User prefers dark mode and uses Catppuccin Mocha theme",
+    "namespaces": ["preferences/test-user-001"],
+    "createdAt": 1774014477000,
+    "memoryStrategyType": "NONE"
+  }
+}
+```
+
+```json title="MemoryRecordDeleted イベント"
+{
+  "memoryStreamEvent": {
+    "eventType": "MemoryRecordDeleted",
+    "eventTime": "2026-03-20T13:49:35.451689599Z",
+    "memoryId": "StreamingTestMemory-Vwl4GD9vJS",
+    "memoryRecordId": "mem-271588a7-1a77-4580-b4ed-8734db426a26"
+  }
+}
+```
+
+Updated イベントには更新後のテキストが反映されており、同じ `memoryRecordId` で Create → Update のライフサイクルを追跡できる。一方、Deleted イベントには `memoryRecordText` は含まれない。コンテンツレベルに関係なく、ID のみが配信される。
+
+## セマンティック抽出からのストリーミング
+
+ここまでは直接 API でレコードを操作した場合のイベントだ。実際のユースケースでは、会話データ（短期メモリ）から長期メモリが非同期に抽出される。この抽出プロセスからもストリーミングイベントが発火するかを検証した。
+
+セマンティックメモリストラテジーを設定した Memory を新たに作成する。
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">ストラテジー付き Memory の作成コマンド</summary>
+
+```bash title="ターミナル"
+aws bedrock-agentcore-control create-memory \
+  --name "StreamingTestWithStrategy" \
+  --description "Memory with strategy and streaming" \
+  --event-expiry-duration 30 \
+  --memory-execution-role-arn "arn:aws:iam::<ACCOUNT_ID>:role/AgentCoreMemoryStreamRole" \
+  --memory-strategies '[
+    {
+      "semanticMemoryStrategy": {
+        "name": "UserPreferences",
+        "description": "Extract user preferences",
+        "namespaceTemplates": ["{actorId}"]
+      }
+    }
+  ]' \
+  --stream-delivery-resources '{
+    "resources": [
+      {
+        "kinesis": {
+          "dataStreamArn": "arn:aws:kinesis:ap-northeast-1:<ACCOUNT_ID>:stream/agentcore-memory-stream",
+          "contentConfigurations": [
+            {
+              "type": "MEMORY_RECORDS",
+              "level": "FULL_CONTENT"
+            }
+          ]
+        }
+      }
+    ]
+  }' \
+  --region ap-northeast-1
+```
+
+`namespaceTemplates` には `{actorId}`, `{sessionId}`, `{memoryStrategyId}` のプレースホルダーが使える。ここでは `{actorId}` を指定し、ユーザーごとに namespace を自動分離する。
+
+</details>
+
+Memory が ACTIVE になったら、会話データを投入する。
+
+```bash title="ターミナル"
+aws bedrock-agentcore create-event \
+  --memory-id "<MEMORY_ID>" \
+  --actor-id "test-user-002" \
+  --session-id "test-session-002" \
+  --event-timestamp "$(date -u +"%Y-%m-%dT%H:%M:%S.%3NZ")" \
+  --payload '[
+    {
+      "conversational": {
+        "content": {"text": "I am learning Rust and I find the borrow checker challenging but rewarding. I also enjoy writing technical blog posts."},
+        "role": "USER"
+      }
+    },
+    {
+      "conversational": {
+        "content": {"text": "Rust borrow checker is a steep learning curve but it leads to safer code. Writing about your learning is excellent."},
+        "role": "ASSISTANT"
+      }
+    }
+  ]' \
+  --region ap-northeast-1
+```
+
+約25秒後、3件の `MemoryRecordCreated` イベントが Kinesis に到着した。
+
+| # | memoryRecordText | memoryStrategyType |
+| --- | --- | --- |
+| 1 | The user is learning Rust programming language. | SEMANTIC |
+| 2 | The user finds Rust's borrow checker challenging but rewarding. | SEMANTIC |
+| 3 | The user enjoys writing technical blog posts about their learning journey. | SEMANTIC |
+
+注目すべき点:
+
+- **`memoryStrategyType` が `SEMANTIC`** — 直接作成の `NONE` と区別できる。イベント消費側でストラテジー由来のレコードをフィルタリング可能
+- **会話から意味的に分解された個別の事実が抽出される** — 1つの会話ターンから複数のメモリレコードが生成される
+- **抽出完了までの遅延は約25秒** — リアルタイムではあるが、即時ではない。非同期抽出プロセスの完了を待つ必要がある
+
+## FULL_CONTENT vs METADATA_ONLY
+
+`update-memory` でコンテンツレベルを `METADATA_ONLY` に切り替えて、同じ操作を行った。
+
+```bash title="ターミナル"
+aws bedrock-agentcore-control update-memory \
+  --memory-id "<MEMORY_ID>" \
+  --stream-delivery-resources '{
+    "resources": [
+      {
+        "kinesis": {
+          "dataStreamArn": "arn:aws:kinesis:ap-northeast-1:<ACCOUNT_ID>:stream/agentcore-memory-stream",
+          "contentConfigurations": [
+            {
+              "type": "MEMORY_RECORDS",
+              "level": "METADATA_ONLY"
+            }
+          ]
+        }
+      }
+    ]
+  }' \
+  --region ap-northeast-1
+```
+
+切り替え後に新しい会話データを投入すると、抽出されたイベントの `memoryRecordText` が `null` になっていた。
+
+```json title="MemoryRecordCreated イベント（METADATA_ONLY）"
+{
+  "memoryStreamEvent": {
+    "eventType": "MemoryRecordCreated",
+    "eventTime": "2026-03-20T13:56:09.765875198Z",
+    "memoryRecordId": "mem-c9bf440b-d9d8-4a98-9267-851bdac3e6b8",
+    "memoryRecordText": null,
+    "memoryStrategyType": "SEMANTIC",
+    "memoryId": "StreamingTestWithStrategy-47sXyZ92KK"
+  }
+}
+```
+
+| 項目 | FULL_CONTENT | METADATA_ONLY |
+| --- | --- | --- |
+| `memoryRecordText` | レコード本文を含む | `null` |
+| メタデータ（ID, namespace, strategy 等） | 含む | 含む |
+| 削除イベント | ID のみ（同一） | ID のみ（同一） |
+| ユースケース | 下流処理でテキストが必要な場合 | 変更通知のみで十分な場合 |
+
+もう1つの発見として、コンテンツレベルを変更すると `StreamingEnabled` イベントが再発行される。ストリーミング設定の変更履歴を追跡できる。
+
+## CloudWatch による監視
+
+AgentCore Memory は CloudWatch の `AWS/Bedrock-AgentCore` ネームスペースにストリーミング配信のメトリクスを自動で記録する。
+
+| メトリクス | 意味 |
+| --- | --- |
+| `StreamPublishingSuccess` | Kinesis への配信成功数 |
+| `StreamPublishingFailure` | 配信失敗数（リトライ後も失敗したもの） |
+| `StreamUserError` | IAM 権限不足や KMS キー無効など、ユーザー側の設定に起因する失敗数 |
+
+今回の検証では `StreamPublishingSuccess` が合計11件、`StreamPublishingFailure` と `StreamUserError` は0件だった。
+
+```bash title="ターミナル"
+aws cloudwatch get-metric-statistics \
+  --namespace "AWS/Bedrock-AgentCore" \
+  --metric-name "StreamPublishingSuccess" \
+  --dimensions Name=Operation,Value=MemoryStreamEvent \
+  --start-time "2026-03-20T13:40:00Z" \
+  --end-time "2026-03-20T14:00:00Z" \
+  --period 60 --statistics Sum \
+  --region ap-northeast-1
+```
+
+運用では `StreamPublishingFailure > 0` と `StreamUserError > 0` に CloudWatch Alarm を設定しておくとよい。特定の Memory に絞り込む場合は `Resource` ディメンションに Memory ARN を指定する。配信失敗時は CloudWatch Logs にエラーコード・エラーメッセージ・対象の `memoryRecordId` が記録されるため、原因特定も容易だ。
+
+## まとめ
+
+- **ポーリング不要のイベント駆動が実現する** — メモリレコードの全ライフサイクル（Create / Update / Delete）が Kinesis にプッシュ配信される。ポーリング間隔の設計やリトライロジックの実装が不要になる。
+- **非同期抽出イベントも配信される** — セマンティックストラテジーによる自動抽出でも `MemoryRecordCreated` が発火する。`memoryStrategyType` フィールドで直接作成（`NONE`）と抽出（`SEMANTIC`）を区別できる。
+- **FULL_CONTENT と METADATA_ONLY は運用中に切り替え可能** — `update-memory` で即座に変更でき、切り替え時に `StreamingEnabled` イベントが再発行される。下流処理の要件に応じて柔軟に選択できる。
+- **Observability は CloudWatch に統合済み** — `StreamPublishingSuccess` / `StreamPublishingFailure` / `StreamUserError` メトリクスと、失敗時のログが自動で記録される。`Failure > 0` のアラームを設定しておけば配信異常を即座に検知できる。
+
+## クリーンアップ
+
+```bash title="ターミナル"
+# Memory の削除（ストラテジー付きも同様）
+aws bedrock-agentcore-control delete-memory \
+  --memory-id "<MEMORY_ID>" --region ap-northeast-1
+
+# Kinesis Data Stream の削除
+aws kinesis delete-stream \
+  --stream-name agentcore-memory-stream --region ap-northeast-1
+
+# IAM ロールの削除
+aws iam delete-role-policy \
+  --role-name AgentCoreMemoryStreamRole \
+  --policy-name AgentCoreKinesisAccess
+aws iam delete-role --role-name AgentCoreMemoryStreamRole
+```

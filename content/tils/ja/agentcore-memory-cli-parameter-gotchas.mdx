@@ -1,0 +1,23 @@
+---
+title: "AgentCore Memory の CLI パラメータ名はドキュメントのスキーマと異なる箇所がある"
+description: "batch-update-memory-records の timestamp 必須や、memory-strategies のキー名 semanticMemoryStrategy / namespaceTemplates など、ドキュメントと AWS CLI の差異をまとめた。"
+date: "2026-03-12"
+published: true
+tags: ["agentcore", "bedrock", "aws", "cli"]
+---
+
+[AgentCore Memory のストリーミング通知を検証](/ja/blog/2026/03/12/bedrock-agentcore-memory-streaming)していて、CLI のパラメータ名がドキュメントのスキーマ例と微妙に異なる箇所にいくつかハマった。
+
+`batch-update-memory-records` は `timestamp` フィールドを省略すると `ParamValidation` エラーになる。ドキュメントのスキーマ例には必須と明記されていないが、CLI では必須だ。
+
+```text title="エラーメッセージ"
+Missing required parameter in records[0]: "timestamp"
+```
+
+`--memory-strategies` のキー名も罠がある。ドキュメントの概念名は `semanticMemory` だが、CLI では `semanticMemoryStrategy` を使う。同様に `namespaceConfiguration` ではなく `namespaceTemplates` が正しい。テンプレートの構文も `{{actorId}}` ではなく `{actorId}` だ。いずれもエラーメッセージに正しいキー名が表示されるので、まずは試してエラーを読むのが早い。
+
+```text title="エラーメッセージ（キー名）"
+Unknown parameter in memoryStrategies[0]: "semanticMemory",
+must be one of: semanticMemoryStrategy, summaryMemoryStrategy,
+userPreferenceMemoryStrategy, customMemoryStrategy, episodicMemoryStrategy
+```

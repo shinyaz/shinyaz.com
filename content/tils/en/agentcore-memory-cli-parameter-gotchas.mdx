@@ -1,0 +1,23 @@
+---
+title: "AgentCore Memory CLI parameter names differ from the documentation schema"
+description: "batch-update-memory-records requires timestamp, and memory-strategies uses semanticMemoryStrategy / namespaceTemplates — not what the docs suggest."
+date: "2026-03-12"
+published: true
+tags: ["agentcore", "bedrock", "aws", "cli"]
+---
+
+While [verifying AgentCore Memory streaming notifications](/en/blog/2026/03/12/bedrock-agentcore-memory-streaming), I hit several cases where CLI parameter names didn't match the documentation schema examples.
+
+`batch-update-memory-records` fails with `ParamValidation` if you omit the `timestamp` field. The docs schema doesn't explicitly mark it as required, but the CLI does.
+
+```text title="Error message"
+Missing required parameter in records[0]: "timestamp"
+```
+
+The `--memory-strategies` key names are also tricky. The docs use `semanticMemory` conceptually, but the CLI expects `semanticMemoryStrategy`. Similarly, `namespaceConfiguration` should be `namespaceTemplates`, and the template syntax is `{actorId}` not `{{actorId}}`. The error messages helpfully list the valid key names, so the fastest approach is to try and read the error.
+
+```text title="Error message (key name)"
+Unknown parameter in memoryStrategies[0]: "semanticMemory",
+must be one of: semanticMemoryStrategy, summaryMemoryStrategy,
+userPreferenceMemoryStrategy, customMemoryStrategy, episodicMemoryStrategy
+```
