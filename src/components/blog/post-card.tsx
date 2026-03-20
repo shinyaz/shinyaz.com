@@ -2,7 +2,7 @@ import Link from "next/link";
 import { formatDate, formatReadingTime } from "@/lib/utils";
 import { CategoryBadge } from "./category-badge";
 import { TagBadge } from "./tag-badge";
-import type { Locale } from "@/lib/i18n";
+import { type Locale, getDictionary } from "@/lib/i18n";
 
 interface PostCardProps {
   title: string;
@@ -18,11 +18,12 @@ interface PostCardProps {
 const MAX_TAGS = 3;
 
 export function PostCard({ title, description, date, permalink, categories, tags, locale, readingTime }: PostCardProps) {
+  const t = getDictionary(locale);
   return (
     <article className="group border-b border-border py-6 first:pt-0 last:border-b-0 border-l-3 border-l-foreground pl-4">
       <div className="flex items-center gap-2 mb-1.5">
         <span className="inline-flex items-center rounded-sm bg-foreground/10 px-1.5 py-0.5 text-xs font-semibold text-foreground">
-          Blog
+          {t.blog.title}
         </span>
       </div>
       <Link href={permalink} className="block">
