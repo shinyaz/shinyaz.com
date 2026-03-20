@@ -1,7 +1,7 @@
 import Link from "next/link";
 import { formatDate, formatReadingTime } from "@/lib/utils";
 import { TagBadge } from "./tag-badge";
-import type { Locale } from "@/lib/i18n";
+import { type Locale, getDictionary } from "@/lib/i18n";
 
 interface TilCardProps {
   title: string;
@@ -16,11 +16,12 @@ interface TilCardProps {
 const MAX_TAGS = 3;
 
 export function TilCard({ title, description, date, permalink, tags, locale, readingTime }: TilCardProps) {
+  const t = getDictionary(locale);
   return (
     <article className="group border-b border-border py-6 first:pt-0 last:border-b-0 border-l-3 border-l-muted-foreground/40 pl-4">
       <div className="flex items-center gap-2 mb-1.5">
         <span className="inline-flex items-center rounded-sm bg-muted-foreground/15 px-1.5 py-0.5 text-xs font-semibold text-muted-foreground">
-          TIL
+          {t.til.title}
         </span>
       </div>
       <Link href={permalink} className="block">
