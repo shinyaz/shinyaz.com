@@ -1,30 +1,67 @@
-import { describe, it, expect } from "vitest";
-import manifest from "@/app/manifest";
+import { describe, it, expect, vi } from "vitest";
+import { NextRequest } from "next/server";
 
-describe("manifest", () => {
-  const result = manifest();
+// Mock next/server NextResponse
+vi.mock("next/server", async () => {
+  const actual = await vi.importActual("next/server");
+  return { ...actual };
+});
 
-  it("returns required PWA fields", () => {
-    expect(result.name).toBe("@shinyaz");
-    expect(result.short_name).toBe("@shinyaz");
-    expect(result.display).toBe("standalone");
+const { GET } = await import("@/app/[locale]/manifest.webmanifest/route");
+
+async function getManifest(locale: string) {
+  const request = new NextRequest(`http://localhost/${locale}/manifest.webmanifest`);
+  const response = await GET(request, { params: Promise.resolve({ locale }) });
+  return response.json();
+}
+
+describe("manifest.webmanifest route", () => {
+  describe("Japanese manifest", () => {
+    it("returns Japanese description and start_url", async () => {
+      const result = await getManifest("ja");
+      expect(result.name).toBe("@shinyaz");
+      expect(result.description).toBe("shinyaz の技術ノート");
+      expect(result.start_url).toBe("/ja");
+      expect(result.lang).toBe("ja");
+    });
   });
 
-  it("includes 192x192 icon as PNG", () => {
-    const icon192 = result.icons?.find((i) => i.sizes === "192x192");
-    expect(icon192).toBeDefined();
-    expect(icon192?.src).toBe("/icons/icon-192");
-    expect(icon192?.type).toBe("image/png");
+  describe("English manifest", () => {
+    it("returns English description and start_url", async () => {
+      const result = await getManifest("en");
+      expect(result.name).toBe("@shinyaz");
+      expect(result.description).toBe("Tech notes by shinyaz");
+      expect(result.start_url).toBe("/en");
+      expect(result.lang).toBe("en");
+    });
   });
 
-  it("includes 512x512 icon as PNG", () => {
-    const icon512 = result.icons?.find((i) => i.sizes === "512x512");
-    expect(icon512).toBeDefined();
-    expect(icon512?.src).toBe("/icons/icon-512");
-    expect(icon512?.type).toBe("image/png");
+  describe("common fields", () => {
+    it("returns required PWA fields", async () => {
+      const result = await getManifest("en");
+      expect(result.short_name).toBe("@shinyaz");
+      expect(result.display).toBe("standalone");
+      expect(result.background_color).toBe("#ffffff");
+      expect(result.theme_color).toBe("#111111");
+    });
+
+    it("includes 192x192 and 512x512 icons", async () => {
+      const result = await getManifest("en");
+      expect(result.icons).toHaveLength(2);
+
+      const icon192 = result.icons.find((i: { sizes: string }) => i.sizes === "192x192");
+      expect(icon192).toEqual({ src: "/icons/icon-192", sizes: "192x192", type: "image/png" });
+
+      const icon512 = result.icons.find((i: { sizes: string }) => i.sizes === "512x512");
+      expect(icon512).toEqual({ src: "/icons/icon-512", sizes: "512x512", type: "image/png" });
+    });
   });
 
-  it("has exactly 2 icons", () => {
-    expect(result.icons).toHaveLength(2);
+  describe("invalid locale", () => {
+    it("returns 404 for invalid locale", async () => {
+      const request = new NextRequest("http://localhost/xx/manifest.webmanifest");
+      const response = await GET(request, { params: Promise.resolve({ locale: "xx" }) });
+      expect(response.status).toBe(404);
+    });
   });
 });
