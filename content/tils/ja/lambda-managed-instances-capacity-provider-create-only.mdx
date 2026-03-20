@@ -1,0 +1,17 @@
+---
+title: "Lambda の capacity-provider-config は関数作成時にしか指定できない"
+description: "update-function-configuration で後から追加しようとすると CapacityProviderConfig isn't supported for Lambda Default functions エラーになる。"
+date: "2026-03-13"
+published: true
+tags: ["aws", "lambda"]
+---
+
+既存の Lambda 関数を Managed Instances に移行しようと思い、`update-function-configuration` で `--capacity-provider-config` を追加した。
+
+```text title="出力結果"
+CapacityProviderConfig isn't supported for Lambda Default functions.
+```
+
+通常の Lambda（"Lambda Default"）として作成された関数には、後から Capacity Provider を紐づけることができない。Managed Instances として使うには **`create-function` 時に `--capacity-provider-config` を指定して関数を新規作成する必要がある**。
+
+つまり通常 Lambda → Managed Instances の移行は、同じコードで関数を再作成するパスになる。関数名を変えるか、既存関数を削除してから同名で再作成するかの二択だ。エイリアスで切り替えるような段階的な移行はできない点に注意が必要だ。

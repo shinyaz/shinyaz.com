@@ -1,0 +1,379 @@
+---
+title: "AWS Lambda Rust Official Support — Benchmarking Cold Start and Execution Speed vs Python"
+description: "Verified Lambda's GA Rust support with cargo-lambda. Cold start at 29ms, warm execution at 1.2ms — 90x faster than Python with 2.6x better memory efficiency."
+date: "2026-03-13"
+published: true
+featured: false
+categories: [infrastructure]
+tags: ["aws", "lambda", "rust", "serverless", "performance"]
+series: "lambda-rust"
+seriesOrder: 1
+---
+
+## Introduction
+
+On November 14, 2025, AWS [promoted Lambda's Rust support to general availability (GA)](https://aws.amazon.com/about-aws/whats-new/2025/11/aws-lambda-rust/). What was previously "experimental" is now officially supported with AWS Support and Lambda SLA coverage.
+
+But how much difference does Rust actually make on Lambda? I deployed a Rust function with cargo-lambda and benchmarked it head-to-head against an equivalent Python function — measuring cold start, execution speed, and memory usage.
+
+## What "Official Support" Actually Means
+
+The first thing to understand: this GA does **not** mean a dedicated `rust` managed runtime was added. Rust on Lambda still runs on `provided.al2023` (custom runtime), with `Runtime: provided.al2023` / `Handler: bootstrap` as the configuration.
+
+What changed:
+
+- **`aws-lambda-rust-runtime` crate is GA** — officially maintained by AWS, covered by SLA
+- **AWS Support tickets accepted** — you can now open support cases for Rust Lambda issues
+- **All regions supported** — including GovCloud and China regions
+
+In other words, it's not a managed runtime like Python or Node.js. Rather, the "custom runtime + official crate" approach is now formally supported.
+
+## Test Environment
+
+| Item | Value |
+| --- | --- |
+| Region | ap-northeast-1 (Tokyo) |
+| Architecture | arm64 (Graviton) |
+| Memory | 128 MB |
+| Rust version | 1.94.0 |
+| cargo-lambda | 1.9.1 |
+| Python runtime | python3.13 |
+
+The workload combines CPU stress (Fibonacci n=40) with memory allocation (100K element vector).
+
+Prerequisites:
+
+- Rust toolchain (install via `rustup`)
+- [cargo-lambda](https://www.cargo-lambda.info/) (installable via `pip3 install cargo-lambda`)
+- AWS CLI configured with `lambda:*` and `iam:*` permissions
+
+## From Project Creation to Deployment
+
+### Creating the Rust Function
+
+Generate a project with `cargo lambda new rust-lambda-bench --http`, then add `serde` / `serde_json` to `Cargo.toml`. `main.rs` needs no changes from the template — it just wraps the handler with `service_fn` and passes it to `run`.
+
+The handler's core logic is straightforward: take `n` from query parameters, run the Fibonacci calculation and vector allocation, and return timing results as JSON.
+
+```rust title="src/http_handler.rs (handler excerpt)"
+pub(crate) async fn function_handler(event: Request) -> Result<Response<Body>, Error> {
+    let n: u32 = event
+        .query_string_parameters_ref()
+        .and_then(|params| params.first("n"))
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(40);
+
+    let total_start = Instant::now();
+
+    // CPU workload: Fibonacci
+    let compute_start = Instant::now();
+    let fib_result = fibonacci(n);
+    let compute_ms = compute_start.elapsed().as_secs_f64() * 1000.0;
+
+    // Memory workload: 100K element vector
+    let alloc_start = Instant::now();
+    let items: Vec<u64> = (0..100_000).map(|i| i * i).collect();
+    let alloc_ms = alloc_start.elapsed().as_secs_f64() * 1000.0;
+
+    let total_ms = total_start.elapsed().as_secs_f64() * 1000.0;
+
+    // Serialize to BenchResult struct and return as JSON
+    let result = BenchResult {
+        runtime: "rust".to_string(),
+        fib_result, fib_n: n, compute_ms,
+        alloc_items: items.len(), alloc_ms, total_ms,
+    };
+    let body = serde_json::to_string(&result)?;
+    // ... build Response ...
+}
+```
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">Full Rust function code (Cargo.toml + all sources)</summary>
+
+```toml title="Cargo.toml"
+[package]
+name = "rust-lambda-bench"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+lambda_http = "1.0.0"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["macros"] }
+```
+
+```rust title="src/http_handler.rs"
+use lambda_http::{Body, Error, Request, RequestExt, Response};
+use serde::Serialize;
+use std::time::Instant;
+
+#[derive(Serialize)]
+struct BenchResult {
+    runtime: String,
+    fib_result: u64,
+    fib_n: u32,
+    compute_ms: f64,
+    alloc_items: usize,
+    alloc_ms: f64,
+    total_ms: f64,
+}
+
+fn fibonacci(n: u32) -> u64 {
+    if n <= 1 {
+        return n as u64;
+    }
+    let (mut a, mut b) = (0u64, 1u64);
+    for _ in 2..=n {
+        let tmp = a + b;
+        a = b;
+        b = tmp;
+    }
+    b
+}
+
+pub(crate) async fn function_handler(event: Request) -> Result<Response<Body>, Error> {
+    let n: u32 = event
+        .query_string_parameters_ref()
+        .and_then(|params| params.first("n"))
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(40);
+
+    let total_start = Instant::now();
+
+    let compute_start = Instant::now();
+    let fib_result = fibonacci(n);
+    let compute_ms = compute_start.elapsed().as_secs_f64() * 1000.0;
+
+    let alloc_start = Instant::now();
+    let items: Vec<u64> = (0..100_000).map(|i| i * i).collect();
+    let alloc_ms = alloc_start.elapsed().as_secs_f64() * 1000.0;
+
+    let total_ms = total_start.elapsed().as_secs_f64() * 1000.0;
+
+    let result = BenchResult {
+        runtime: "rust".to_string(),
+        fib_result, fib_n: n, compute_ms,
+        alloc_items: items.len(), alloc_ms, total_ms,
+    };
+
+    let body = serde_json::to_string(&result)?;
+    let resp = Response::builder()
+        .status(200)
+        .header("content-type", "application/json")
+        .body(body.into())
+        .map_err(Box::new)?;
+    Ok(resp)
+}
+```
+
+</details>
+
+### Python Comparison Function
+
+The same workload (Fibonacci + 100K element allocation) implemented in Python.
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">Python comparison function code</summary>
+
+```python title="lambda_function.py"
+import json
+import time
+
+def fibonacci(n):
+    if n <= 1:
+        return n
+    a, b = 0, 1
+    for _ in range(2, n + 1):
+        a, b = b, a + b
+    return b
+
+def lambda_handler(event, context):
+    params = event.get("queryStringParameters") or {}
+    n = int(params.get("n", 40))
+
+    total_start = time.perf_counter()
+
+    compute_start = time.perf_counter()
+    fib_result = fibonacci(n)
+    compute_ms = (time.perf_counter() - compute_start) * 1000
+
+    alloc_start = time.perf_counter()
+    items = [i * i for i in range(100_000)]
+    alloc_ms = (time.perf_counter() - alloc_start) * 1000
+
+    total_ms = (time.perf_counter() - total_start) * 1000
+
+    return {
+        "statusCode": 200,
+        "headers": {"content-type": "application/json"},
+        "body": json.dumps({
+            "runtime": "python", "fib_result": fib_result, "fib_n": n,
+            "compute_ms": round(compute_ms, 4),
+            "alloc_items": len(items), "alloc_ms": round(alloc_ms, 4),
+            "total_ms": round(total_ms, 4),
+        }),
+    }
+```
+
+</details>
+
+### Build and Deploy
+
+Both functions need an IAM role with `AWSLambdaBasicExecutionRole` attached. cargo-lambda handles Rust build and deploy with automatic ARM64 cross-compilation. The Python function is zipped and deployed via AWS CLI.
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">Deploy commands</summary>
+
+```bash title="Terminal (deploy)"
+# Create IAM role (if not exists)
+aws iam create-role --role-name lambda-rust-bench-role \
+  --assume-role-policy-document '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"lambda.amazonaws.com"},"Action":"sts:AssumeRole"}]}'
+aws iam attach-role-policy --role-name lambda-rust-bench-role \
+  --policy-arn arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+
+# Rust: build and deploy with Function URL
+cargo lambda build --release --arm64
+cargo lambda deploy rust-lambda-bench \
+  --iam-role arn:aws:iam::ACCOUNT_ID:role/lambda-rust-bench-role \
+  --region ap-northeast-1 \
+  --memory 128 \
+  --enable-function-url
+
+# Python: zip and deploy
+zip -j function.zip lambda_function.py
+aws lambda create-function \
+  --function-name python-lambda-bench \
+  --runtime python3.13 \
+  --handler lambda_function.lambda_handler \
+  --role arn:aws:iam::ACCOUNT_ID:role/lambda-rust-bench-role \
+  --zip-file fileb://function.zip \
+  --memory-size 128 --architectures arm64 \
+  --region ap-northeast-1
+```
+
+</details>
+
+Initial Rust build took about 23 seconds. Including deployment, under a minute total. cargo-lambda uses Zig as a cross-compiler, generating ARM64 binaries regardless of the host environment.
+
+## Benchmark Results
+
+### Cold Start
+
+Lambda recreates its execution environment when configuration changes. I forced cold starts by updating an environment variable, then measured the first invocation after the update completed. Using `--log-type Tail` returns the REPORT line (Duration, Billed Duration, Init Duration, Max Memory Used) in the response.
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">Benchmark execution steps</summary>
+
+```bash title="Terminal (measurement)"
+# Force cold start
+aws lambda update-function-configuration \
+  --function-name rust-lambda-bench \
+  --environment "Variables={BENCH_RUN=$(date +%s)}" \
+  --region ap-northeast-1
+aws lambda wait function-updated \
+  --function-name rust-lambda-bench --region ap-northeast-1
+
+# Invoke + get REPORT
+aws lambda invoke \
+  --function-name rust-lambda-bench \
+  --cli-binary-format raw-in-base64-out \
+  --payload '{"requestContext":{"http":{"method":"GET"}},"queryStringParameters":{"n":"40"},"rawPath":"/","headers":{}}' \
+  --region ap-northeast-1 --log-type Tail \
+  --query 'LogResult' --output text \
+  /tmp/result.json | base64 -d | grep REPORT
+
+# Check response body
+cat /tmp/result.json
+```
+
+For Python, use the same steps with `--function-name python-lambda-bench`. Warm starts were measured by running the same `invoke` command 5 consecutive times after the cold start.
+
+</details>
+
+| Metric | Rust | Python | Difference |
+| --- | ---: | ---: | --- |
+| Init Duration | 28.96 ms | 99.76 ms | **Rust 3.4x faster** |
+| Duration (first execution) | 1.77 ms | 167.47 ms | **Rust 95x faster** |
+| Billed Duration | 31 ms | 268 ms | **Rust 8.6x cheaper** |
+| Max Memory Used | 16 MB | 41 MB | **Rust 2.6x more efficient** |
+
+Rust's Init Duration of ~29ms is over 3x faster than Python's ~100ms. The standout is the first execution Duration: 1.77ms vs 167ms — a **95x difference**.
+
+### Warm Start
+
+Measured across 5 consecutive invocations after cold start.
+
+| Metric | Rust | Python | Difference |
+| --- | ---: | ---: | --- |
+| Duration avg | 1.22 ms | 108.21 ms | **Rust 89x faster** |
+| Duration min | 1.13 ms | 90.58 ms | **Rust 80x faster** |
+| Duration max | 1.39 ms | 129.14 ms | **Rust 93x faster** |
+| Billed Duration avg | 2 ms | 109 ms | **Rust 55x cheaper** |
+| Max Memory Used | 16 MB | 41 MB | **Rust 2.6x more efficient** |
+
+The ~90x gap persists. Rust stays within 1.1–1.4ms with minimal variance; Python ranges from 90–129ms.
+
+### Application-Level Timing
+
+Beyond Lambda's Duration (which includes runtime overhead), here's what the application code itself measured.
+
+| Operation | Rust | Python |
+| --- | ---: | ---: |
+| Fibonacci (n=40) | 0.00008 ms | 0.008 ms |
+| 100K element allocation | 0.00003 ms | 70.0 ms |
+| Total | 0.0003 ms | 70.0 ms |
+
+The memory allocation reveals the biggest gap. Python's list comprehension takes 70ms for 100K elements; Rust's `Vec` completes in 0.03μs — zero-cost abstractions at work.
+
+### Package Size
+
+| Item | Rust | Python |
+| --- | ---: | ---: |
+| Deploy package | 1.2 MB | 641 B |
+| Local binary | 2.4 MB | — |
+
+Rust includes all dependencies in the binary (1.2MB), though this doesn't meaningfully impact cold start. Python is tiny with stdlib only, but real projects with `requirements.txt` dependencies close the gap.
+
+## Cost Estimate
+
+Assuming 128MB / ARM64 in Tokyo (\$0.0000133334/GB-second), 1 million invocations per month. The free tier (400K GB-seconds/month) and request charges (\$0.20/1M, identical for both) are excluded. At this scale and memory, both functions actually fit within the free tier — the purpose here is to illustrate the unit cost difference at scale.
+
+| Item | Rust | Python |
+| --- | ---: | ---: |
+| Avg Billed Duration | 2 ms | 109 ms |
+| Monthly compute cost | \$0.0033 | \$0.1817 |
+| Difference | — | **~55x more expensive** |
+
+Execution time difference maps directly to cost. The higher the invocation frequency, the greater the economic benefit of Rust.
+
+## Considerations for Adoption
+
+**Compile time** — Initial build compiles all dependency crates (23 seconds here). CI/CD cache is essential.
+
+**Learning curve** — Ownership and lifetimes can slow team adoption, but Lambda's small codebase scope makes it a reasonable entry point.
+
+**Debug experience** — `cargo lambda watch` works, but the feedback loop is longer than Python's `print` debugging.
+
+**Runtime classification** — Shows as "Custom runtime" in the AWS Console. No inline code editor.
+
+## Takeaways
+
+- **29ms cold start is production-ready** — even for synchronous APIs behind API Gateway, this won't impact user experience
+- **90x execution speed translates directly to cost savings** — adopting Rust for high-frequency functions can dramatically reduce Lambda bills
+- **cargo-lambda makes DX practical** — build, deploy, and local testing in single commands, effectively hiding Rust's complexity
+- **Understand it's not a "managed runtime"** — GA means the crate and support are official; the `provided.al2023` + bootstrap binary architecture remains unchanged
+
+## Cleanup
+
+Delete the Lambda functions and IAM role after verification.
+
+```bash title="Terminal"
+aws lambda delete-function-url-config --function-name rust-lambda-bench --region ap-northeast-1
+aws lambda delete-function --function-name rust-lambda-bench --region ap-northeast-1
+aws lambda delete-function --function-name python-lambda-bench --region ap-northeast-1
+aws iam detach-role-policy --role-name lambda-rust-bench-role \
+  --policy-arn arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+aws iam delete-role --role-name lambda-rust-bench-role
+```

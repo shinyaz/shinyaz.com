@@ -1,0 +1,25 @@
+---
+title: "Lambda Managed Instances operator role requires AWSLambdaManagedEC2ResourceOperator"
+description: "EC2 FullAccess and even AdministratorAccess fail with InsufficientRolePermissions. A dedicated managed policy is required."
+date: "2026-03-13"
+published: true
+tags: ["aws", "lambda", "iam"]
+---
+
+Set up a Capacity Provider with an operator role for Lambda Managed Instances, ran `publish-version`, and the version went to `Failed`.
+
+```text title="Output"
+"StateReason": "The function's execution role doesn't have permission to perform this operation.",
+"StateReasonCode": "InsufficientRolePermissions"
+```
+
+The error gives no hint about which permission is missing. I escalated from `AmazonEC2FullAccess` → `AWSLambda_FullAccess` → `AdministratorAccess` — all failed with the same error.
+
+The answer is **`AWSLambdaManagedEC2ResourceOperator`**, a dedicated managed policy.
+
+```bash title="Terminal"
+aws iam attach-role-policy --role-name MyOperatorRole \
+  --policy-arn arn:aws:iam::aws:policy/AWSLambdaManagedEC2ResourceOperator
+```
+
+The [Getting Started guide](https://docs.aws.amazon.com/lambda/latest/dg/lambda-managed-instances-getting-started.html) documents this, but the error message won't lead you there. Generic EC2 permissions likely don't cover the internal operations Lambda uses (instance profiles, network config, etc.).

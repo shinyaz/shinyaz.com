@@ -1,0 +1,28 @@
+---
+title: "Lambda Managed Instances は --log-type Tail 非対応、Duration は CloudWatch の platform.report で取得する"
+description: "Invoke API で Tail を指定するとエラーになる。代わりに CloudWatch Logs の platform.report イベントから Duration を取得できる。"
+date: "2026-03-13"
+published: true
+tags: ["aws", "lambda", "cloudwatch"]
+---
+
+Lambda Managed Instances の関数を `--log-type Tail` 付きで呼び出したら即エラーになった。
+
+```text title="出力結果"
+Tail logs are not supported for functions configured with capacity provider.
+```
+
+通常 Lambda では `--log-type Tail` で REPORT 行（Duration、Billed Duration、Init Duration）を取得するのが定番だが、MI ではこの方法が使えない。
+
+代わりに CloudWatch Logs に出力される `platform.report` イベントから Duration を取得できる。
+
+```bash title="ターミナル"
+aws logs filter-log-events \
+  --log-group-name /aws/lambda/YOUR_FUNCTION_NAME \
+  --filter-pattern "platform.report" \
+  --start-time $(( $(date +%s) - 300 ))000 \
+  --region ap-northeast-1 \
+  --query 'events[*].message' --output text
+```
+
+`platform.report` の JSON には `metrics.durationMs` と `spans`（responseLatency、responseDuration）が含まれており、Tail ログの REPORT 行より詳細な情報が得られる。

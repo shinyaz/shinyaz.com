@@ -1,0 +1,332 @@
+---
+title: "Lambda Managed Instances で Rust マルチコンカレンシーを検証 — コールドスタートゼロの実力"
+description: "Lambda Managed Instances の Rust サポートを検証。run_concurrent で8並列処理を実現し、Init Duration 2.9msでコールドスタートを実質排除。通常Lambdaとの使い分けを考察する。"
+date: "2026-03-13"
+published: true
+featured: false
+categories: [infrastructure]
+tags: ["aws", "lambda", "rust", "serverless", "performance"]
+series: "lambda-rust"
+seriesOrder: 2
+---
+
+## はじめに
+
+[前回の記事](/ja/blog/2026/03/13/lambda-rust-official-support-benchmark)では、Lambda の Rust 公式サポート（GA）を検証し、Python 比で90倍の実行速度とコールドスタート29ms という結果を得た。
+
+2026年3月13日、AWS は [Lambda Managed Instances で Rust をサポート](https://aws.amazon.com/about-aws/whats-new/2026/03/aws-lambda-managed-instances-rust/)した。Managed Instances は Lambda 関数を管理された EC2 インスタンス上で実行する機能で、**マルチコンカレンシー**（1つの実行環境で複数リクエストを同時処理）と**コールドスタートの排除**を実現する。本記事ではこの新機能を検証し、通常の Lambda との違いを定量的に比較する。
+
+## Managed Instances とは
+
+通常の Lambda は「1リクエスト = 1実行環境」だが、Managed Instances は EC2 インスタンス上で複数リクエストを並列処理する。
+
+| 項目 | 通常 Lambda | Managed Instances |
+| --- | --- | --- |
+| 実行基盤 | Lambda サービス | 管理された EC2 インスタンス |
+| コンカレンシー | 1リクエスト/実行環境 | 最大1600リクエスト/実行環境 |
+| コールドスタート | あり（環境作成時） | なし（EC2 事前プロビジョニング） |
+| 料金モデル | リクエスト + Duration | EC2 ベース（Savings Plans 対応） |
+| セットアップ | 関数作成のみ | Capacity Provider + VPC + IAM |
+
+Rust では `lambda_runtime` クレートの `run_concurrent` 関数と `concurrency-tokio` フィーチャーを使い、Tokio の非同期タスクとして複数リクエストを同時処理する。
+
+## 検証環境
+
+| 項目 | 値 |
+| --- | --- |
+| リージョン | ap-northeast-1（東京） |
+| アーキテクチャ | arm64（Graviton） |
+| メモリ | 2048 MB（MI デフォルト） |
+| PerExecutionEnvironmentMaxConcurrency | 8 |
+| Rust バージョン | 1.94.0 |
+| lambda_runtime | 1.1.2（concurrency-tokio） |
+
+前提条件:
+
+- Rust ツールチェーン + [cargo-lambda](https://www.cargo-lambda.info/)
+- AWS CLI セットアップ済み（`lambda:*`、`iam:*`、`ec2:Describe*` の操作権限）
+- デフォルト VPC に3つ以上のサブネットがあること
+
+## 実装の変更点
+
+通常 Lambda との最大の違いは2点だ。`Cargo.toml` の `concurrency-tokio` フィーチャーと、`main.rs` での `run_concurrent` の使用。
+
+```rust title="main.rs（変更箇所のみ）"
+use lambda_runtime::{service_fn, run_concurrent, LambdaEvent, Error};
+
+// ハンドラは Clone + Send を実装する必要がある
+async fn handler(event: LambdaEvent<Request>) -> Result<BenchResult, Error> {
+    // 通常Lambdaと同じロジック
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Error> {
+    // run() → run_concurrent() に変更するだけ
+    run_concurrent(service_fn(handler)).await
+}
+```
+
+`run` を `run_concurrent` に置き換えるだけでマルチコンカレンシーが有効になる。ハンドラのクロージャが `Clone + Send` を実装していればコンパイルが通る。AWS SDK クライアントは内部で `Arc` を使っているためそのまま `.clone()` できるが、独自の共有状態は `Arc` でラップする必要がある。
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">完全な Rust 関数コード</summary>
+
+```toml title="Cargo.toml"
+[package]
+name = "rust-mi-bench"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+lambda_runtime = { version = "1", features = ["concurrency-tokio"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["macros"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+```
+
+```rust title="src/main.rs"
+use lambda_runtime::{service_fn, run_concurrent, LambdaEvent, Error};
+use serde::{Deserialize, Serialize};
+use std::time::Instant;
+
+#[derive(Deserialize, Default)]
+struct Request {
+    #[serde(default = "default_n")]
+    n: u32,
+}
+
+fn default_n() -> u32 { 40 }
+
+#[derive(Serialize)]
+struct BenchResult {
+    runtime: String,
+    mode: String,
+    fib_result: u64,
+    fib_n: u32,
+    compute_ms: f64,
+    alloc_items: usize,
+    alloc_ms: f64,
+    total_ms: f64,
+}
+
+fn fibonacci(n: u32) -> u64 {
+    if n <= 1 { return n as u64; }
+    let (mut a, mut b) = (0u64, 1u64);
+    for _ in 2..=n {
+        let tmp = a + b;
+        a = b;
+        b = tmp;
+    }
+    b
+}
+
+async fn handler(event: LambdaEvent<Request>) -> Result<BenchResult, Error> {
+    let n = event.payload.n;
+    let total_start = Instant::now();
+
+    let compute_start = Instant::now();
+    let fib_result = fibonacci(n);
+    let compute_ms = compute_start.elapsed().as_secs_f64() * 1000.0;
+
+    let alloc_start = Instant::now();
+    let items: Vec<u64> = (0..100_000).map(|i| i * i).collect();
+    let alloc_ms = alloc_start.elapsed().as_secs_f64() * 1000.0;
+
+    let total_ms = total_start.elapsed().as_secs_f64() * 1000.0;
+
+    Ok(BenchResult {
+        runtime: "rust".to_string(),
+        mode: "managed-instance".to_string(),
+        fib_result, fib_n: n, compute_ms,
+        alloc_items: items.len(), alloc_ms, total_ms,
+    })
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Error> {
+    tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .json()
+        .init();
+    run_concurrent(service_fn(handler)).await
+}
+```
+
+</details>
+
+## デプロイ手順
+
+Managed Instances のデプロイは通常 Lambda より複雑だ。**Capacity Provider**（EC2 リソースの管理単位）を作成し、Lambda 関数を紐づけて**バージョンを公開**する必要がある。
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">デプロイ手順（IAM + Capacity Provider + Lambda）</summary>
+
+```bash title="ターミナル（デプロイ）"
+ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+REGION="ap-northeast-1"
+
+# 1. 実行ロール作成
+aws iam create-role --role-name lambda-mi-exec-role \
+  --assume-role-policy-document '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"lambda.amazonaws.com"},"Action":"sts:AssumeRole"}]}'
+aws iam attach-role-policy --role-name lambda-mi-exec-role \
+  --policy-arn arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+
+# 2. オペレーターロール作成（EC2管理用）
+aws iam create-role --role-name lambda-mi-operator-role \
+  --assume-role-policy-document '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"lambda.amazonaws.com"},"Action":"sts:AssumeRole"}]}'
+aws iam attach-role-policy --role-name lambda-mi-operator-role \
+  --policy-arn arn:aws:iam::aws:policy/AWSLambdaManagedEC2ResourceOperator
+
+# 3. Capacity Provider 作成
+aws lambda create-capacity-provider \
+  --capacity-provider-name rust-bench-cp \
+  --vpc-config SubnetIds=SUBNET_1,SUBNET_2,SUBNET_3,SecurityGroupIds=SG_ID \
+  --permissions-config CapacityProviderOperatorRoleArn=arn:aws:iam::${ACCOUNT_ID}:role/lambda-mi-operator-role \
+  --instance-requirements Architectures=arm64 \
+  --capacity-provider-scaling-config ScalingMode=Auto \
+  --region $REGION
+
+# 4. Lambda 関数作成（Capacity Provider 紐づけ）
+cargo lambda build --release --arm64
+aws lambda create-function \
+  --function-name rust-mi-bench \
+  --runtime provided.al2023 \
+  --handler bootstrap \
+  --role arn:aws:iam::${ACCOUNT_ID}:role/lambda-mi-exec-role \
+  --zip-file fileb://target/lambda/rust-mi-bench/bootstrap.zip \
+  --architectures arm64 --memory-size 2048 --timeout 30 \
+  --capacity-provider-config "LambdaManagedInstancesCapacityProviderConfig={CapacityProviderArn=arn:aws:lambda:${REGION}:${ACCOUNT_ID}:capacity-provider:rust-bench-cp,PerExecutionEnvironmentMaxConcurrency=8}" \
+  --region $REGION
+
+# 5. バージョン公開（MI はバージョン公開が必須）
+aws lambda wait function-active-v2 --function-name rust-mi-bench --region $REGION
+aws lambda publish-version --function-name rust-mi-bench --region $REGION
+# EC2 プロビジョニングに約100秒かかる
+```
+
+</details>
+
+デプロイで最もハマったのは IAM の設定だ。**オペレーターロールには `AWSLambdaManagedEC2ResourceOperator` ポリシーが必須**で、汎用の EC2 FullAccess では動作しない。[Getting Started ガイド](https://docs.aws.amazon.com/lambda/latest/dg/lambda-managed-instances-getting-started.html)を参照するのが確実だ。
+
+## ベンチマーク結果
+
+### 呼び出しとメトリクス取得
+
+MI 関数はバージョン修飾子付きで呼び出す。`--log-type Tail` は非対応のため、Duration は CloudWatch Logs の `platform.report` イベントから取得する。
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">ベンチマーク実行手順</summary>
+
+```bash title="ターミナル（計測）"
+# バージョンが Active になるまで待機（EC2 プロビジョニング完了待ち）
+VERSION=1  # publish-version の出力から取得
+while true; do
+  STATE=$(aws lambda get-function-configuration \
+    --function-name rust-mi-bench --qualifier $VERSION \
+    --region ap-northeast-1 --query 'State' --output text)
+  echo "State: $STATE"
+  [ "$STATE" = "Active" ] && break
+  [ "$STATE" = "Failed" ] && echo "Failed!" && break
+  sleep 10
+done
+
+# 呼び出し（バージョン修飾子が必須）
+aws lambda invoke \
+  --function-name rust-mi-bench:$VERSION \
+  --cli-binary-format raw-in-base64-out \
+  --payload '{"n": 40}' \
+  --region ap-northeast-1 \
+  /tmp/mi_result.json
+cat /tmp/mi_result.json
+
+# Duration は CloudWatch Logs から取得
+aws logs filter-log-events \
+  --log-group-name /aws/lambda/rust-mi-bench \
+  --filter-pattern "platform.report" \
+  --start-time $(( $(date +%s) - 300 ))000 \
+  --region ap-northeast-1 \
+  --query 'events[*].message' --output text
+```
+
+</details>
+
+### Init Duration（初期化時間）
+
+Managed Instances は EC2 インスタンスのプロビジョニング時に実行環境を事前初期化する。CloudWatch Logs の `platform.initReport` から計測した。
+
+| 指標 | 通常 Lambda | Managed Instances |
+| --- | ---: | ---: |
+| Init Duration 平均 | 28.96 ms | 2.94 ms |
+| 発生タイミング | コールドスタート時 | EC2 プロビジョニング時（事前） |
+
+Managed Instances の Init Duration は**2.94ms**で、通常 Lambda の28.96msの約10分の1だ。しかもリクエスト処理パスでは発生しないため、ユーザーから見たコールドスタートは**実質ゼロ**になる。
+
+### リクエスト Duration
+
+CloudWatch Logs の `platform.report` と、クライアント側のレイテンシを計測した。通常 Lambda の値は[前回記事](/ja/blog/2026/03/13/lambda-rust-official-support-benchmark)のウォームスタート結果（128MB / arm64）を引用している。
+
+| 指標 | 通常 Lambda | Managed Instances |
+| --- | ---: | ---: |
+| Duration 平均 | 1.22 ms | 1.90 ms |
+| Duration 最小 | 1.13 ms | 0.98 ms |
+| Duration 最大 | 1.39 ms | 2.56 ms |
+| クライアント側レイテンシ（逐次） | — | 572 ms |
+
+Duration は Managed Instances の方がやや遅い（1.90ms vs 1.22ms）。EC2 上のルーティングレイヤーのオーバーヘッドが影響していると考えられる。ただし差は1ms未満であり、実用上の問題にはならない。
+
+クライアント側レイテンシが572msと大きいのは、Lambda API → EC2 インスタンスへのルーティングとネットワークホップが加わるためだ。Function URL や API Gateway 経由でも同様の傾向が見られるだろう。
+
+### マルチコンカレンシー（8並列）
+
+`PerExecutionEnvironmentMaxConcurrency=8` で8リクエストを同時送信した結果。通常 Lambda も同条件で8並列呼び出しを実施して比較した。
+
+| 指標 | 通常 Lambda（8並列） | Managed Instances（8並列） |
+| --- | ---: | ---: |
+| クライアント側レイテンシ 最小 | 650 ms | 820 ms |
+| クライアント側レイテンシ 最大 | 817 ms | 972 ms |
+| 必要な実行環境数 | 8（各1リクエスト） | 1（8リクエスト並列） |
+
+**8リクエストがすべて成功し、単一の実行環境で並列処理された。** 通常 Lambda では8つの実行環境がそれぞれ1リクエストを処理するが、Managed Instances では1つの実行環境が8リクエストを同時処理する。これにより高スループット時の実行環境数を大幅に削減できる。
+
+## 通常 Lambda との使い分け
+
+| ユースケース | 推奨 | 理由 |
+| --- | --- | --- |
+| 低頻度・バースト | 通常 Lambda | セットアップがシンプル、ペイパーユース |
+| 高スループット・定常負荷 | Managed Instances | EC2 料金 + Savings Plans で大幅コスト削減 |
+| コールドスタートが許容できない | Managed Instances | 事前プロビジョニングで排除 |
+| 共有状態が必要 | Managed Instances | DB 接続プール等を実行環境内で共有可能 |
+| シンプルさ重視 | 通常 Lambda | VPC/Capacity Provider 不要 |
+
+## 検証で得られた注意点
+
+**`--log-type Tail` が使えない** — Managed Instances では `Invoke` API の Tail ログが非対応。メトリクスは CloudWatch Logs の `platform.report` イベントから取得する必要がある。
+
+**バージョン公開が必須** — `$LATEST` では実行できない。コードを更新するたびに `publish-version` が必要で、EC2 のプロビジョニングに約100秒かかる。
+
+**オペレーターロールは専用ポリシーが必要** — `AWSLambdaManagedEC2ResourceOperator` マネージドポリシーを使う。EC2 FullAccess では権限不足でバージョン公開が失敗する。
+
+**メモリ設定に追加パラメータがある** — 関数の `MemorySize` は通常 Lambda と同様に指定するが、Capacity Provider レベルで `ExecutionEnvironmentMemoryGiBPerVCpu`（デフォルト2GB）も設定できる。後者は1つの EC2 インスタンスに何個の実行環境を配置できるかに影響する。
+
+## まとめ
+
+- **コールドスタート実質ゼロ** — Init Duration 2.94ms は EC2 プロビジョニング時に完了し、リクエストパスでは発生しない
+- **`run` → `run_concurrent` の1行変更でマルチコンカレンシー** — Rust の Tokio 非同期モデルとの相性が良く、実装コストは極めて低い
+- **高スループット時のコスト最適化に有効** — 1実行環境で8並列処理することで環境数を削減し、EC2 Savings Plans と組み合わせて大幅なコスト削減が可能
+- **セットアップの複雑さがトレードオフ** — Capacity Provider + VPC + 2つの IAM ロール + バージョン管理が必要で、通常 Lambda の手軽さとは対照的だ
+
+## クリーンアップ
+
+```bash title="ターミナル"
+aws lambda delete-function --function-name rust-mi-bench --region ap-northeast-1
+# Capacity Provider は関数バージョンの削除後に削除可能
+aws lambda delete-capacity-provider --capacity-provider-name rust-bench-cp --region ap-northeast-1
+aws iam detach-role-policy --role-name lambda-mi-exec-role \
+  --policy-arn arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+aws iam delete-role --role-name lambda-mi-exec-role
+aws iam detach-role-policy --role-name lambda-mi-operator-role \
+  --policy-arn arn:aws:iam::aws:policy/AWSLambdaManagedEC2ResourceOperator
+aws iam delete-role --role-name lambda-mi-operator-role
+```

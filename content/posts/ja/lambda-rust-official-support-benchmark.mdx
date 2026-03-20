@@ -1,0 +1,379 @@
+---
+title: "AWS Lambda Rust公式サポートを検証 — Pythonとコールドスタート・実行速度を実測比較"
+description: "Lambda の Rust 公式サポート（GA）を cargo-lambda で検証。コールドスタート29ms、ウォームスタート1.2msと Python比で90倍高速。メモリ使用量も2.6倍効率的だった。"
+date: "2026-03-13"
+published: true
+featured: false
+categories: [infrastructure]
+tags: ["aws", "lambda", "rust", "serverless", "performance"]
+series: "lambda-rust"
+seriesOrder: 1
+---
+
+## はじめに
+
+2025年11月14日、AWSは[Lambda の Rust サポートを一般提供（GA）に昇格](https://aws.amazon.com/jp/about-aws/whats-new/2025/11/aws-lambda-rust/)させた。これまで「実験的」だった Rust ランタイムが正式にサポート対象となり、AWS サポートと Lambda SLA の適用範囲に入った。
+
+Rust は高パフォーマンスとメモリ安全性を両立する言語として注目されているが、Lambda での実際の効果はどの程度か。本記事では cargo-lambda を使って Rust 関数をデプロイし、同等の Python 関数とコールドスタート・実行速度・メモリ使用量を定量比較する。
+
+## 「公式サポート」の実態
+
+最初に理解しておくべきは、今回の GA は **`rust` という専用マネージドランタイムが追加されたわけではない** という点だ。Rust Lambda は引き続き `provided.al2023`（カスタムランタイム）上で動作し、ランタイム設定は `Runtime: provided.al2023` / `Handler: bootstrap` となる。
+
+変わったのは以下の点だ。
+
+- **`aws-lambda-rust-runtime` クレートが GA** — AWS が公式にメンテナンスし、SLA の対象になった
+- **AWS サポートへの問い合わせが可能** — Rust Lambda の問題について AWS サポートケースを起票できる
+- **全リージョン対応** — GovCloud・中国リージョン含む全リージョンで利用可能
+
+つまり「Python や Node.js と同列のマネージドランタイム」ではなく、「カスタムランタイム + 公式クレート」という構成が正式サポートされた形になる。
+
+## 検証環境
+
+| 項目 | 値 |
+| --- | --- |
+| リージョン | ap-northeast-1（東京） |
+| アーキテクチャ | arm64（Graviton） |
+| メモリ | 128 MB |
+| Rust バージョン | 1.94.0 |
+| cargo-lambda | 1.9.1 |
+| Python ランタイム | python3.13 |
+
+ワークロードは CPU 負荷（フィボナッチ計算 n=40）とメモリ負荷（10万要素のベクタ割り当て）の複合パターンを使用した。
+
+前提条件:
+
+- Rust ツールチェーン（`rustup` でインストール）
+- [cargo-lambda](https://www.cargo-lambda.info/)（`pip3 install cargo-lambda` でインストール可能）
+- AWS CLI セットアップ済み（`lambda:*`、`iam:*` の操作権限）
+
+## プロジェクト作成からデプロイまで
+
+### Rust 関数の作成
+
+`cargo lambda new rust-lambda-bench --http` でプロジェクトを生成し、`Cargo.toml` に `serde` / `serde_json` を追加する。`main.rs` はテンプレートそのままで変更不要だ（ハンドラを `service_fn` でラップして `run` に渡すだけのエントリポイント）。
+
+ハンドラの核心部分はシンプルだ。クエリパラメータで `n` を受け取り、フィボナッチ計算とベクタ割り当ての処理時間を計測してJSONで返す。
+
+```rust title="src/http_handler.rs（ハンドラ部分）"
+pub(crate) async fn function_handler(event: Request) -> Result<Response<Body>, Error> {
+    let n: u32 = event
+        .query_string_parameters_ref()
+        .and_then(|params| params.first("n"))
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(40);
+
+    let total_start = Instant::now();
+
+    // CPU負荷: フィボナッチ計算
+    let compute_start = Instant::now();
+    let fib_result = fibonacci(n);
+    let compute_ms = compute_start.elapsed().as_secs_f64() * 1000.0;
+
+    // メモリ負荷: 10万要素のベクタ割り当て
+    let alloc_start = Instant::now();
+    let items: Vec<u64> = (0..100_000).map(|i| i * i).collect();
+    let alloc_ms = alloc_start.elapsed().as_secs_f64() * 1000.0;
+
+    let total_ms = total_start.elapsed().as_secs_f64() * 1000.0;
+
+    // BenchResult構造体にまとめてJSON返却
+    let result = BenchResult {
+        runtime: "rust".to_string(),
+        fib_result, fib_n: n, compute_ms,
+        alloc_items: items.len(), alloc_ms, total_ms,
+    };
+    let body = serde_json::to_string(&result)?;
+    // ... Response構築 ...
+}
+```
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">完全なRust関数コード（Cargo.toml + 全ソース）</summary>
+
+```toml title="Cargo.toml"
+[package]
+name = "rust-lambda-bench"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+lambda_http = "1.0.0"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["macros"] }
+```
+
+```rust title="src/http_handler.rs"
+use lambda_http::{Body, Error, Request, RequestExt, Response};
+use serde::Serialize;
+use std::time::Instant;
+
+#[derive(Serialize)]
+struct BenchResult {
+    runtime: String,
+    fib_result: u64,
+    fib_n: u32,
+    compute_ms: f64,
+    alloc_items: usize,
+    alloc_ms: f64,
+    total_ms: f64,
+}
+
+fn fibonacci(n: u32) -> u64 {
+    if n <= 1 {
+        return n as u64;
+    }
+    let (mut a, mut b) = (0u64, 1u64);
+    for _ in 2..=n {
+        let tmp = a + b;
+        a = b;
+        b = tmp;
+    }
+    b
+}
+
+pub(crate) async fn function_handler(event: Request) -> Result<Response<Body>, Error> {
+    let n: u32 = event
+        .query_string_parameters_ref()
+        .and_then(|params| params.first("n"))
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(40);
+
+    let total_start = Instant::now();
+
+    let compute_start = Instant::now();
+    let fib_result = fibonacci(n);
+    let compute_ms = compute_start.elapsed().as_secs_f64() * 1000.0;
+
+    let alloc_start = Instant::now();
+    let items: Vec<u64> = (0..100_000).map(|i| i * i).collect();
+    let alloc_ms = alloc_start.elapsed().as_secs_f64() * 1000.0;
+
+    let total_ms = total_start.elapsed().as_secs_f64() * 1000.0;
+
+    let result = BenchResult {
+        runtime: "rust".to_string(),
+        fib_result, fib_n: n, compute_ms,
+        alloc_items: items.len(), alloc_ms, total_ms,
+    };
+
+    let body = serde_json::to_string(&result)?;
+    let resp = Response::builder()
+        .status(200)
+        .header("content-type", "application/json")
+        .body(body.into())
+        .map_err(Box::new)?;
+    Ok(resp)
+}
+```
+
+</details>
+
+### Python 比較関数
+
+Rust と同じワークロード（フィボナッチ + 10万要素割り当て）を Python で実装する。
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">Python比較関数コード</summary>
+
+```python title="lambda_function.py"
+import json
+import time
+
+def fibonacci(n):
+    if n <= 1:
+        return n
+    a, b = 0, 1
+    for _ in range(2, n + 1):
+        a, b = b, a + b
+    return b
+
+def lambda_handler(event, context):
+    params = event.get("queryStringParameters") or {}
+    n = int(params.get("n", 40))
+
+    total_start = time.perf_counter()
+
+    compute_start = time.perf_counter()
+    fib_result = fibonacci(n)
+    compute_ms = (time.perf_counter() - compute_start) * 1000
+
+    alloc_start = time.perf_counter()
+    items = [i * i for i in range(100_000)]
+    alloc_ms = (time.perf_counter() - alloc_start) * 1000
+
+    total_ms = (time.perf_counter() - total_start) * 1000
+
+    return {
+        "statusCode": 200,
+        "headers": {"content-type": "application/json"},
+        "body": json.dumps({
+            "runtime": "python", "fib_result": fib_result, "fib_n": n,
+            "compute_ms": round(compute_ms, 4),
+            "alloc_items": len(items), "alloc_ms": round(alloc_ms, 4),
+            "total_ms": round(total_ms, 4),
+        }),
+    }
+```
+
+</details>
+
+### ビルドとデプロイ
+
+デプロイには `AWSLambdaBasicExecutionRole` をアタッチした IAM ロールが必要だ。Rust 関数は cargo-lambda の `build` と `deploy` で完結し、ARM64 向けクロスコンパイルも自動で処理される。Python 関数は zip で固めて AWS CLI でデプロイする。
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">デプロイ手順</summary>
+
+```bash title="ターミナル（デプロイ）"
+# IAM ロール作成（未作成の場合）
+aws iam create-role --role-name lambda-rust-bench-role \
+  --assume-role-policy-document '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"lambda.amazonaws.com"},"Action":"sts:AssumeRole"}]}'
+aws iam attach-role-policy --role-name lambda-rust-bench-role \
+  --policy-arn arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+
+# Rust: ビルド → デプロイ（Function URL 有効化）
+cargo lambda build --release --arm64
+cargo lambda deploy rust-lambda-bench \
+  --iam-role arn:aws:iam::ACCOUNT_ID:role/lambda-rust-bench-role \
+  --region ap-northeast-1 \
+  --memory 128 \
+  --enable-function-url
+
+# Python: zip → デプロイ
+zip -j function.zip lambda_function.py
+aws lambda create-function \
+  --function-name python-lambda-bench \
+  --runtime python3.13 \
+  --handler lambda_function.lambda_handler \
+  --role arn:aws:iam::ACCOUNT_ID:role/lambda-rust-bench-role \
+  --zip-file fileb://function.zip \
+  --memory-size 128 --architectures arm64 \
+  --region ap-northeast-1
+```
+
+</details>
+
+Rust の初回ビルドは約23秒。デプロイまで含めても1分以内で完了した。cargo-lambda が Zig をクロスコンパイラとして使い、ホスト環境に依存せず ARM64 バイナリを生成してくれる点が非常に便利だ。
+
+## ベンチマーク結果
+
+### コールドスタート
+
+Lambda は実行環境の設定を変更するとコンテナが再作成される。環境変数を更新して強制的にコールドスタートを発生させ、更新完了後の初回呼び出しで計測した。`--log-type Tail` を指定すると、レスポンスに REPORT 行（Duration、Billed Duration、Init Duration、Max Memory Used）が含まれる。
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">ベンチマーク実行手順</summary>
+
+```bash title="ターミナル（計測）"
+# コールドスタート強制
+aws lambda update-function-configuration \
+  --function-name rust-lambda-bench \
+  --environment "Variables={BENCH_RUN=$(date +%s)}" \
+  --region ap-northeast-1
+aws lambda wait function-updated \
+  --function-name rust-lambda-bench --region ap-northeast-1
+
+# 呼び出し + REPORT 取得
+aws lambda invoke \
+  --function-name rust-lambda-bench \
+  --cli-binary-format raw-in-base64-out \
+  --payload '{"requestContext":{"http":{"method":"GET"}},"queryStringParameters":{"n":"40"},"rawPath":"/","headers":{}}' \
+  --region ap-northeast-1 --log-type Tail \
+  --query 'LogResult' --output text \
+  /tmp/result.json | base64 -d | grep REPORT
+
+# レスポンスボディ確認
+cat /tmp/result.json
+```
+
+Python 側も同じ手順で `--function-name python-lambda-bench` に変えて実行する。ウォームスタートはコールドスタート後に同じ `invoke` コマンドを5回連続実行して計測した。
+
+</details>
+
+| 指標 | Rust | Python | 差 |
+| --- | ---: | ---: | --- |
+| Init Duration | 28.96 ms | 99.76 ms | **Rust が3.4倍高速** |
+| Duration（初回実行） | 1.77 ms | 167.47 ms | **Rust が95倍高速** |
+| Billed Duration | 31 ms | 268 ms | **Rust が8.6倍効率的** |
+| Max Memory Used | 16 MB | 41 MB | **Rust が2.6倍効率的** |
+
+Rust のコールドスタート（Init Duration）は約29ms。Python の約100ms と比較して3倍以上高速だ。さらに注目すべきは初回実行時の Duration で、Python の167ms に対して Rust は1.77ms と**95倍の差**がついた。
+
+### ウォームスタート
+
+コールドスタート後の連続5回呼び出しで計測。
+
+| 指標 | Rust | Python | 差 |
+| --- | ---: | ---: | --- |
+| Duration 平均 | 1.22 ms | 108.21 ms | **Rust が89倍高速** |
+| Duration 最小 | 1.13 ms | 90.58 ms | **Rust が80倍高速** |
+| Duration 最大 | 1.39 ms | 129.14 ms | **Rust が93倍高速** |
+| Billed Duration 平均 | 2 ms | 109 ms | **Rust が55倍効率的** |
+| Max Memory Used | 16 MB | 41 MB | **Rust が2.6倍効率的** |
+
+ウォームスタートでも約90倍の差が維持された。Rust は5回とも Duration が1.1〜1.4ms の範囲に収まり、分散が極めて小さい。一方 Python は90〜129ms とばらつきが大きかった。
+
+### アプリケーションレベルの処理時間
+
+Lambda の Duration はランタイムオーバーヘッドを含む値だが、アプリケーションコード内で計測した処理時間も確認した。
+
+| 処理 | Rust | Python |
+| --- | ---: | ---: |
+| フィボナッチ（n=40） | 0.00008 ms | 0.008 ms |
+| 10万要素割り当て | 0.00003 ms | 70.0 ms |
+| 合計 | 0.0003 ms | 70.0 ms |
+
+メモリ割り当て処理で圧倒的な差が出た。Python のリスト内包表記による10万要素の生成に70ms かかる一方、Rust の `Vec` は0.03μs で完了している。ゼロコスト抽象化とスタック/ヒープの最適化が効いている。
+
+### パッケージサイズ
+
+| 項目 | Rust | Python |
+| --- | ---: | ---: |
+| デプロイパッケージ | 1.2 MB | 641 B |
+| ローカルバイナリ | 2.4 MB | — |
+
+Rust はバイナリに全ての依存を含むため1.2MB になるが、Lambda のコールドスタートに影響するほどのサイズではない。Python は標準ライブラリのみで構成されるため極小だが、実際のプロジェクトでは `requirements.txt` の依存が加わり差は縮まる。
+
+## コスト試算
+
+128MB / ARM64 の東京リージョン料金（\$0.0000133334/GB-秒）で月100万回呼び出しを想定した場合。無料利用枠（月40万GB-秒）とリクエスト料金（\$0.20/100万件、両者共通）は除外している。なお月100万回・128MB 程度であれば両者とも無料枠内に収まるため、ここではスケール時の単価差を示すことが目的だ。
+
+| 項目 | Rust | Python |
+| --- | ---: | ---: |
+| Billed Duration 平均 | 2 ms | 109 ms |
+| 月間コンピュート料金 | \$0.0033 | \$0.1817 |
+| 差 | — | **約55倍** |
+
+実行時間の差がそのままコストに反映される。高頻度で呼ばれる関数ほど Rust の経済的メリットが大きい。
+
+## 導入時の注意点
+
+**コンパイル時間** — Rust の初回ビルドは依存クレートのコンパイルに時間がかかる（今回は23秒）。CI/CD ではキャッシュの活用が必須だ。
+
+**学習コスト** — 所有権・ライフタイムなど Rust 固有の概念は、チームへの導入障壁になりうる。Lambda 関数は比較的小さいコードベースのため、Rust 入門としては適切なスコープだろう。
+
+**デバッグ体験** — `cargo lambda watch` でローカル実行できるが、Python の `print` デバッグに比べるとフィードバックループは長い。
+
+**ランタイムの位置づけ** — `provided.al2023` 上で動作するため、AWS コンソール上では「カスタムランタイム」として表示される。Python や Node.js のようなインラインエディタは使えない。
+
+## まとめ
+
+- **コールドスタート29ms は本番投入可能な水準** — API Gateway 背後の同期 API でもユーザー体感に影響しないレベルだ
+- **90倍の実行速度差はコスト直結** — 高頻度関数で Rust を採用するだけで Lambda コストを大幅に削減できる
+- **cargo-lambda で DX は十分実用的** — ビルド・デプロイ・ローカルテストが1コマンドで完結し、Rust の複雑さを適切に隠蔽している
+- **「マネージドランタイム」ではない点を理解する** — GA はクレートとサポート体制の正式化であり、`provided.al2023` + bootstrap バイナリという構成は変わらない
+
+## クリーンアップ
+
+検証後は Lambda 関数と IAM ロールを削除する。
+
+```bash title="ターミナル"
+aws lambda delete-function-url-config --function-name rust-lambda-bench --region ap-northeast-1
+aws lambda delete-function --function-name rust-lambda-bench --region ap-northeast-1
+aws lambda delete-function --function-name python-lambda-bench --region ap-northeast-1
+aws iam detach-role-policy --role-name lambda-rust-bench-role \
+  --policy-arn arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+aws iam delete-role --role-name lambda-rust-bench-role
+```

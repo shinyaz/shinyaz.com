@@ -1,0 +1,17 @@
+---
+title: "Lambda capacity-provider-config can only be set at function creation time"
+description: "Trying to add it via update-function-configuration fails with CapacityProviderConfig isn't supported for Lambda Default functions."
+date: "2026-03-13"
+published: true
+tags: ["aws", "lambda"]
+---
+
+Wanted to migrate an existing Lambda function to Managed Instances, so I tried adding `--capacity-provider-config` via `update-function-configuration`.
+
+```text title="Output"
+CapacityProviderConfig isn't supported for Lambda Default functions.
+```
+
+Functions created as standard Lambda ("Lambda Default") can't have a Capacity Provider attached after the fact. **You must specify `--capacity-provider-config` at `create-function` time.**
+
+This means migrating from standard Lambda to Managed Instances requires recreating the function with the same code. Either use a different function name, or delete and recreate with the same name. Gradual migration via aliases isn't possible — something to plan for.

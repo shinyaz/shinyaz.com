@@ -1,0 +1,331 @@
+---
+title: "Lambda Managed Instances with Rust Multi-Concurrency — Zero Cold Starts in Practice"
+description: "Verified Lambda Managed Instances Rust support. run_concurrent enables 8 parallel requests with 2.9ms init — effectively eliminating cold starts. Compared with standard Lambda."
+date: "2026-03-13"
+published: true
+featured: false
+categories: [infrastructure]
+tags: ["aws", "lambda", "rust", "serverless", "performance"]
+series: "lambda-rust"
+seriesOrder: 2
+---
+
+## Introduction
+
+In the [previous post](/en/blog/2026/03/13/lambda-rust-official-support-benchmark), I verified Lambda's GA Rust support and measured 90x execution speed over Python with 29ms cold starts.
+
+On March 13, 2026, AWS [added Rust support to Lambda Managed Instances](https://aws.amazon.com/about-aws/whats-new/2026/03/aws-lambda-managed-instances-rust/). Managed Instances run Lambda functions on managed EC2 instances, enabling **multi-concurrency** (multiple requests per execution environment) and **cold start elimination**. This post verifies the feature and quantitatively compares it with standard Lambda.
+
+## What Are Managed Instances?
+
+Standard Lambda uses one execution environment per request. Managed Instances handle multiple requests in parallel on EC2 instances.
+
+| Aspect | Standard Lambda | Managed Instances |
+| --- | --- | --- |
+| Compute | Lambda service | Managed EC2 instances |
+| Concurrency | 1 request/environment | Up to 1600 requests/environment |
+| Cold start | Yes (on env creation) | No (EC2 pre-provisioned) |
+| Pricing | Request + Duration | EC2-based (Savings Plans eligible) |
+| Setup | Function only | Capacity Provider + VPC + IAM |
+
+For Rust, use `run_concurrent` from `lambda_runtime` with the `concurrency-tokio` feature. Requests are processed as Tokio async tasks.
+
+## Test Environment
+
+| Item | Value |
+| --- | --- |
+| Region | ap-northeast-1 (Tokyo) |
+| Architecture | arm64 (Graviton) |
+| Memory | 2048 MB (MI default) |
+| PerExecutionEnvironmentMaxConcurrency | 8 |
+| Rust version | 1.94.0 |
+| lambda_runtime | 1.1.2 (concurrency-tokio) |
+
+Prerequisites:
+
+- Rust toolchain + [cargo-lambda](https://www.cargo-lambda.info/)
+- AWS CLI with `lambda:*`, `iam:*`, `ec2:Describe*` permissions
+- Default VPC with 3+ subnets
+
+## Implementation Changes
+
+Two changes from standard Lambda: the `concurrency-tokio` feature in `Cargo.toml` and `run_concurrent` in `main.rs`.
+
+```rust title="main.rs (changes only)"
+use lambda_runtime::{service_fn, run_concurrent, LambdaEvent, Error};
+
+// Handler must implement Clone + Send
+async fn handler(event: LambdaEvent<Request>) -> Result<BenchResult, Error> {
+    // Same logic as standard Lambda
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Error> {
+    // Just replace run() with run_concurrent()
+    run_concurrent(service_fn(handler)).await
+}
+```
+
+Replacing `run` with `run_concurrent` is all it takes. The handler closure needs `Clone + Send`. AWS SDK clients use `Arc` internally so `.clone()` works directly, but custom shared state needs explicit `Arc` wrapping.
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">Full Rust function code</summary>
+
+```toml title="Cargo.toml"
+[package]
+name = "rust-mi-bench"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+lambda_runtime = { version = "1", features = ["concurrency-tokio"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["macros"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+```
+
+```rust title="src/main.rs"
+use lambda_runtime::{service_fn, run_concurrent, LambdaEvent, Error};
+use serde::{Deserialize, Serialize};
+use std::time::Instant;
+
+#[derive(Deserialize, Default)]
+struct Request {
+    #[serde(default = "default_n")]
+    n: u32,
+}
+
+fn default_n() -> u32 { 40 }
+
+#[derive(Serialize)]
+struct BenchResult {
+    runtime: String,
+    mode: String,
+    fib_result: u64,
+    fib_n: u32,
+    compute_ms: f64,
+    alloc_items: usize,
+    alloc_ms: f64,
+    total_ms: f64,
+}
+
+fn fibonacci(n: u32) -> u64 {
+    if n <= 1 { return n as u64; }
+    let (mut a, mut b) = (0u64, 1u64);
+    for _ in 2..=n {
+        let tmp = a + b;
+        a = b;
+        b = tmp;
+    }
+    b
+}
+
+async fn handler(event: LambdaEvent<Request>) -> Result<BenchResult, Error> {
+    let n = event.payload.n;
+    let total_start = Instant::now();
+
+    let compute_start = Instant::now();
+    let fib_result = fibonacci(n);
+    let compute_ms = compute_start.elapsed().as_secs_f64() * 1000.0;
+
+    let alloc_start = Instant::now();
+    let items: Vec<u64> = (0..100_000).map(|i| i * i).collect();
+    let alloc_ms = alloc_start.elapsed().as_secs_f64() * 1000.0;
+
+    let total_ms = total_start.elapsed().as_secs_f64() * 1000.0;
+
+    Ok(BenchResult {
+        runtime: "rust".to_string(),
+        mode: "managed-instance".to_string(),
+        fib_result, fib_n: n, compute_ms,
+        alloc_items: items.len(), alloc_ms, total_ms,
+    })
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Error> {
+    tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .json()
+        .init();
+    run_concurrent(service_fn(handler)).await
+}
+```
+
+</details>
+
+## Deployment
+
+Managed Instances deployment is more involved than standard Lambda. You need a **Capacity Provider** (EC2 resource management unit), attach the Lambda function, and **publish a version**.
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">Deploy steps (IAM + Capacity Provider + Lambda)</summary>
+
+```bash title="Terminal (deploy)"
+ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+REGION="ap-northeast-1"
+
+# 1. Execution role
+aws iam create-role --role-name lambda-mi-exec-role \
+  --assume-role-policy-document '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"lambda.amazonaws.com"},"Action":"sts:AssumeRole"}]}'
+aws iam attach-role-policy --role-name lambda-mi-exec-role \
+  --policy-arn arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+
+# 2. Operator role (for EC2 management)
+aws iam create-role --role-name lambda-mi-operator-role \
+  --assume-role-policy-document '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"lambda.amazonaws.com"},"Action":"sts:AssumeRole"}]}'
+aws iam attach-role-policy --role-name lambda-mi-operator-role \
+  --policy-arn arn:aws:iam::aws:policy/AWSLambdaManagedEC2ResourceOperator
+
+# 3. Capacity Provider
+aws lambda create-capacity-provider \
+  --capacity-provider-name rust-bench-cp \
+  --vpc-config SubnetIds=SUBNET_1,SUBNET_2,SUBNET_3,SecurityGroupIds=SG_ID \
+  --permissions-config CapacityProviderOperatorRoleArn=arn:aws:iam::${ACCOUNT_ID}:role/lambda-mi-operator-role \
+  --instance-requirements Architectures=arm64 \
+  --capacity-provider-scaling-config ScalingMode=Auto \
+  --region $REGION
+
+# 4. Lambda function with Capacity Provider
+cargo lambda build --release --arm64
+aws lambda create-function \
+  --function-name rust-mi-bench \
+  --runtime provided.al2023 --handler bootstrap \
+  --role arn:aws:iam::${ACCOUNT_ID}:role/lambda-mi-exec-role \
+  --zip-file fileb://target/lambda/rust-mi-bench/bootstrap.zip \
+  --architectures arm64 --memory-size 2048 --timeout 30 \
+  --capacity-provider-config "LambdaManagedInstancesCapacityProviderConfig={CapacityProviderArn=arn:aws:lambda:${REGION}:${ACCOUNT_ID}:capacity-provider:rust-bench-cp,PerExecutionEnvironmentMaxConcurrency=8}" \
+  --region $REGION
+
+# 5. Publish version (required for MI)
+aws lambda wait function-active-v2 --function-name rust-mi-bench --region $REGION
+aws lambda publish-version --function-name rust-mi-bench --region $REGION
+# EC2 provisioning takes ~100 seconds
+```
+
+</details>
+
+The biggest gotcha: **the operator role needs the `AWSLambdaManagedEC2ResourceOperator` managed policy**. Generic EC2 FullAccess won't work — version publishing silently fails with "InsufficientRolePermissions". See the [Getting Started guide](https://docs.aws.amazon.com/lambda/latest/dg/lambda-managed-instances-getting-started.html).
+
+## Benchmark Results
+
+### Invocation and Metrics
+
+MI functions require a version qualifier. Since `--log-type Tail` isn't supported, Duration metrics come from `platform.report` events in CloudWatch Logs.
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">Benchmark execution steps</summary>
+
+```bash title="Terminal (measurement)"
+# Wait for version to become Active (EC2 provisioning)
+VERSION=1  # from publish-version output
+while true; do
+  STATE=$(aws lambda get-function-configuration \
+    --function-name rust-mi-bench --qualifier $VERSION \
+    --region ap-northeast-1 --query 'State' --output text)
+  echo "State: $STATE"
+  [ "$STATE" = "Active" ] && break
+  [ "$STATE" = "Failed" ] && echo "Failed!" && break
+  sleep 10
+done
+
+# Invoke (version qualifier required)
+aws lambda invoke \
+  --function-name rust-mi-bench:$VERSION \
+  --cli-binary-format raw-in-base64-out \
+  --payload '{"n": 40}' \
+  --region ap-northeast-1 \
+  /tmp/mi_result.json
+cat /tmp/mi_result.json
+
+# Get Duration from CloudWatch Logs
+aws logs filter-log-events \
+  --log-group-name /aws/lambda/rust-mi-bench \
+  --filter-pattern "platform.report" \
+  --start-time $(( $(date +%s) - 300 ))000 \
+  --region ap-northeast-1 \
+  --query 'events[*].message' --output text
+```
+
+</details>
+
+### Init Duration
+
+Managed Instances pre-initialize execution environments during EC2 provisioning. Measured from `platform.initReport` in CloudWatch Logs.
+
+| Metric | Standard Lambda | Managed Instances |
+| --- | ---: | ---: |
+| Init Duration avg | 28.96 ms | 2.94 ms |
+| When it occurs | On cold start | During EC2 provisioning (upfront) |
+
+Managed Instances init at **2.94ms** — 10x faster than standard Lambda's 29ms. Since this happens during provisioning rather than on the request path, **cold starts are effectively zero** from the user's perspective.
+
+### Request Duration
+
+Measured from `platform.report` in CloudWatch Logs and client-side latency. Standard Lambda values are from the [previous post](/en/blog/2026/03/13/lambda-rust-official-support-benchmark)'s warm start results (128MB / arm64).
+
+| Metric | Standard Lambda | Managed Instances |
+| --- | ---: | ---: |
+| Duration avg | 1.22 ms | 1.90 ms |
+| Duration min | 1.13 ms | 0.98 ms |
+| Duration max | 1.39 ms | 2.56 ms |
+| Client-side latency (sequential) | — | 572 ms |
+
+Duration is slightly higher on Managed Instances (1.90ms vs 1.22ms), likely due to the EC2 routing layer overhead. The sub-1ms difference is negligible in practice.
+
+Client-side latency of 572ms is higher because of additional network hops from Lambda API to EC2 instances.
+
+### Multi-Concurrency (8 parallel)
+
+8 simultaneous requests with `PerExecutionEnvironmentMaxConcurrency=8`. Standard Lambda was also tested with 8 parallel invocations under the same conditions.
+
+| Metric | Standard Lambda (8 parallel) | Managed Instances (8 parallel) |
+| --- | ---: | ---: |
+| Client latency min | 650 ms | 820 ms |
+| Client latency max | 817 ms | 972 ms |
+| Execution environments needed | 8 (1 request each) | 1 (8 requests parallel) |
+
+**All 8 requests succeeded on a single execution environment.** Standard Lambda needs 8 environments for 8 concurrent requests. Managed Instances handles them in one — dramatically reducing environment count at high throughput.
+
+## When to Use Which
+
+| Use case | Recommended | Reason |
+| --- | --- | --- |
+| Low frequency / burst | Standard Lambda | Simple setup, pay-per-use |
+| High throughput / steady load | Managed Instances | EC2 pricing + Savings Plans |
+| Cold start intolerant | Managed Instances | Pre-provisioned, zero cold starts |
+| Shared state needed | Managed Instances | DB connection pools shared in-env |
+| Simplicity first | Standard Lambda | No VPC/Capacity Provider needed |
+
+## Gotchas
+
+**`--log-type Tail` not supported** — Tail logs don't work with Managed Instances. Use `platform.report` events in CloudWatch Logs instead.
+
+**Version publishing required** — `$LATEST` can't be invoked. Every code update needs `publish-version`, and EC2 provisioning takes ~100 seconds.
+
+**Operator role needs a specific policy** — `AWSLambdaManagedEC2ResourceOperator` managed policy is required. EC2 FullAccess is insufficient.
+
+**Memory has an additional parameter** — `MemorySize` still applies as with standard Lambda, but the Capacity Provider also has `ExecutionEnvironmentMemoryGiBPerVCpu` (default 2GB) which affects how many execution environments fit on a single EC2 instance.
+
+## Takeaways
+
+- **Zero cold starts in practice** — 2.94ms init happens during EC2 provisioning, not on the request path
+- **One-line change for multi-concurrency** — `run` → `run_concurrent` with Rust's Tokio model makes it trivial
+- **Cost optimization at scale** — 8 parallel requests per environment reduces environment count; combine with EC2 Savings Plans for significant savings
+- **Setup complexity is the trade-off** — Capacity Provider + VPC + 2 IAM roles + version management vs standard Lambda's simplicity
+
+## Cleanup
+
+```bash title="Terminal"
+aws lambda delete-function --function-name rust-mi-bench --region ap-northeast-1
+# Capacity Provider can be deleted after function versions are cleaned up
+aws lambda delete-capacity-provider --capacity-provider-name rust-bench-cp --region ap-northeast-1
+aws iam detach-role-policy --role-name lambda-mi-exec-role \
+  --policy-arn arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+aws iam delete-role --role-name lambda-mi-exec-role
+aws iam detach-role-policy --role-name lambda-mi-operator-role \
+  --policy-arn arn:aws:iam::aws:policy/AWSLambdaManagedEC2ResourceOperator
+aws iam delete-role --role-name lambda-mi-operator-role
+```
