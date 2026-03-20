@@ -263,10 +263,17 @@ src/
     layout.tsx                 # Root layout (passthrough)
     not-found.tsx              # Root 404 -> redirect to /en
     globals.css                # Tailwind v4 theme & prose styles
+    icon.tsx                   # Favicon (32×32, dynamic generation)
+    apple-icon.tsx             # Apple touch icon (180×180, dynamic generation)
     manifest.ts                # PWA manifest
     robots.ts                  # robots.txt
     sitemap.ts                 # Dynamic sitemap (all locales)
     sw.ts                      # Service worker source (Serwist)
+    icons/
+      icon-192/
+        route.tsx              # PWA icon 192×192 (dynamic generation)
+      icon-512/
+        route.tsx              # PWA icon 512×512 (dynamic generation)
     serwist/
       [path]/
         route.ts               # Serwist route handler (SW build + precache manifest)
@@ -324,6 +331,7 @@ src/
       index.ts                 # Locale types, getDictionary()
       ja.ts                    # Japanese dictionary
       en.ts                    # English dictionary
+    brand-icon.tsx             # Shared brand icon renderer (used by favicon, apple-icon, PWA icons)
     constants.ts               # Site URL, author, posts per page, OG image path, social links
     posts.ts                   # Blog query utilities (locale-aware, includes getRelatedPosts())
     tils.ts                    # TIL query utilities (locale-aware)

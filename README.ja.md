@@ -263,10 +263,17 @@ src/
     layout.tsx                 # ルートレイアウト (パススルー)
     not-found.tsx              # ルート 404 -> /en にリダイレクト
     globals.css                # Tailwind v4 テーマ & プロースタイル
+    icon.tsx                   # ファビコン (32×32, 動的生成)
+    apple-icon.tsx             # Apple touch アイコン (180×180, 動的生成)
     manifest.ts                # PWA マニフェスト
     robots.ts                  # robots.txt
     sitemap.ts                 # 動的サイトマップ (全ロケール)
     sw.ts                      # Service Worker ソース (Serwist)
+    icons/
+      icon-192/
+        route.tsx              # PWA アイコン 192×192 (動的生成)
+      icon-512/
+        route.tsx              # PWA アイコン 512×512 (動的生成)
     serwist/
       [path]/
         route.ts               # Serwist ルートハンドラー (SW ビルド + プリキャッシュマニフェスト)
@@ -324,6 +331,7 @@ src/
       index.ts                 # ロケール型, getDictionary()
       ja.ts                    # 日本語辞書
       en.ts                    # 英語辞書
+    brand-icon.tsx             # 共通ブランドアイコンレンダラー (ファビコン, Apple アイコン, PWA アイコンで使用)
     constants.ts               # サイト URL, 著者名, 1ページあたり記事数, OG 画像パス, ソーシャルリンク
     posts.ts                   # ブログクエリユーティリティ (ロケール対応, getRelatedPosts() を含む)
     tils.ts                    # TIL クエリユーティリティ (ロケール対応)
