@@ -1,8 +1,8 @@
 ---
 title: "Cognito認証UIとHPAで仕上げるエージェント基盤 — Agentic AI on EKS検証 Part 3"
 description: "Gradio + Cognito OAuthのWeb UIデプロイとHPAによるオートスケーリング設定でワークショップ全構成を完成。4コンポーネントのリソース消費実測値を共有する。"
-date: "2026-03-26"
-published: false
+date: "2026-03-23"
+published: true
 featured: false
 categories: [ai-agents]
 tags: ["eks", "kubernetes", "ai-agents", "cognito", "hpa", "gradio"]
@@ -12,7 +12,7 @@ seriesOrder: 3
 
 ## はじめに
 
-[Part 1](/ja/blog/2026/03/24/agentic-ai-on-eks-workshop) では Weather Agent + MCP Server、[Part 2](/ja/blog/2026/03/25/a2a-multi-agent-on-eks) では Travel Agent の A2A 連携を検証した。
+[Part 1](/ja/blog/2026/03/23/agentic-ai-on-eks-workshop) では Weather Agent + MCP Server、[Part 2](/ja/blog/2026/03/23/a2a-multi-agent-on-eks) では Travel Agent の A2A 連携を検証した。
 
 最終回となる本記事では、残りの 2 つのピースを埋める。Cognito OAuth 認証付きの Web UI と、HPA によるオートスケーリングだ。これでワークショップの全 4 コンポーネントが揃い、エージェント基盤として一通り動作する状態になる。
 
@@ -51,7 +51,7 @@ Agent UI は Gradio（Python ベースの Web UI フレームワーク）と Fas
 
 UI の特徴的な設計は **エージェントモードの切り替え**だ。ユーザーは画面上のラジオボタンで「Single Agent（Weather）」と「Multi-Agent（Travel）」を選択でき、同じチャット画面から異なるエージェントに接続できる。
 
-```python
+```python title="app.py"
 # app.py - エージェント選択ロジック
 if agent_mode == "Single Agent(Weather)":
     endpoint_url = "http://weather-agent.agents/prompt"
@@ -69,7 +69,7 @@ UI のデプロイは 3 ステップで完了する。
 
 Terraform で作成した Alice / Bob ユーザーにパスワードを設定する。
 
-```bash
+```bash title="Terminal"
 aws cognito-idp admin-set-user-password \
   --user-pool-id $COGNITO_POOL_ID \
   --username Alice --password "Passw0rd@" --permanent
@@ -79,7 +79,7 @@ aws cognito-idp admin-set-user-password \
 
 Cognito の Client ID / Secret を Kubernetes Secret として登録する。UI の Pod はこの Secret を `envFrom` で読み込む。
 
-```bash
+```bash title="Terminal"
 kubectl create secret generic agent-ui \
   --namespace ui \
   --from-env-file ui/.env
@@ -87,7 +87,7 @@ kubectl create secret generic agent-ui \
 
 **3. Helm デプロイ**
 
-```bash
+```bash title="Terminal"
 helm upgrade agent-ui manifests/helm/ui \
   --install -n ui --create-namespace \
   -f workshop-ui-values.yaml
@@ -99,7 +99,7 @@ helm upgrade agent-ui manifests/helm/ui \
 
 Helm チャートには HPA テンプレートが組み込まれており、`autoscaling.enabled=true` で有効化できる。
 
-```bash
+```bash title="Terminal"
 helm upgrade weather-agent manifests/helm/agent \
   --namespace agents \
   -f workshop-agent-weather-values.yaml \
@@ -113,7 +113,7 @@ helm upgrade weather-agent manifests/helm/agent \
 
 HPA が正常に動作していることを確認した。
 
-```text
+```text title="Output"
 NAME            TARGETS       MINPODS   MAXPODS   REPLICAS
 weather-agent   cpu: 3%/50%   1         3         1
 travel-agent    cpu: 1%/50%   1         3         1

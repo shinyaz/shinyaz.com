@@ -8,14 +8,14 @@ tags: ["eks", "kubernetes", "vpc"]
 
 EKS クラスターを削除した後、VPC を削除しようとしたら `DependencyViolation` で失敗した。
 
-```text title="出力結果"
+```text title="Output"
 An error occurred (DependencyViolation) when calling the DeleteSubnet operation:
 The subnet 'subnet-xxx' has dependencies and cannot be deleted.
 ```
 
 原因は EKS が自動作成した VPC エンドポイントだ。クラスター削除後もエンドポイントと紐づく ENI が `in-use` のまま残り、サブネットや VPC の削除をブロックする。VPC エンドポイントを明示的に削除し、ENI が `available` になるまで 30〜60 秒待つ必要がある。
 
-```bash title="ターミナル"
+```bash title="Terminal"
 # VPC エンドポイントを削除
 for vpce in $(aws ec2 describe-vpc-endpoints \
   --filters "Name=vpc-id,Values=$VPC_ID" --region us-east-1 \

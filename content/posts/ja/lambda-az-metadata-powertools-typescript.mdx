@@ -194,14 +194,14 @@ export const handler = async () => {
 
 ElastiCache Valkey クラスターは[前回の記事](/ja/blog/2026/03/20/lambda-az-metadata-same-az-routing)のデプロイ手順で構築する。TypeScript Lambda のビルドとデプロイは以下の通り。
 
-```bash title="ターミナル（ビルド）"
+```bash title="Terminal（ビルド）"
 npm init -y
 npm install @aws-lambda-powertools/commons esbuild
 npx esbuild index.ts --bundle --platform=node --target=node22 --outfile=dist/index.js --format=cjs --minify
 cd dist && zip function.zip index.js
 ```
 
-```bash title="ターミナル（Lambda作成）"
+```bash title="Terminal（Lambda作成）"
 aws lambda create-function \
   --function-name az-ts-routing-test \
   --runtime nodejs22.x \
@@ -274,7 +274,7 @@ aws lambda create-function \
 
 [前回の記事](/ja/blog/2026/03/20/lambda-az-metadata-same-az-routing)と同じ手順でリソースを削除する。TypeScript版のLambda関数名のみ異なる。
 
-```bash title="ターミナル"
+```bash title="Terminal"
 aws lambda delete-function --function-name az-ts-routing-test
 aws lambda delete-function --function-name az-ts-powertools-test
 # ElastiCache、サブネットグループ、SG、IAMロールの削除は前回記事を参照

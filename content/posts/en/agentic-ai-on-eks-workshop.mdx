@@ -1,8 +1,8 @@
 ---
 title: "Deploying AI Agents on EKS — Agentic AI on EKS Part 1"
 description: "Hands-on validation of the AWS 'Agentic AI on EKS' workshop. Covers Strands Agents SDK, MCP-based tool auto-discovery, and building container images with Kaniko on EKS."
-date: "2026-03-24"
-published: false
+date: "2026-03-23"
+published: true
 featured: false
 categories: [ai-agents]
 tags: ["eks", "kubernetes", "ai-agents", "strands-agents", "mcp", "bedrock", "kaniko"]
@@ -101,7 +101,7 @@ Since `agent.md` and `mcp.json` are mounted as Helm ConfigMaps, **agent behavior
 
 The agent's persona is defined in a markdown file. The code parses three sections — `## Agent Name`, `## Agent Description`, and `## System Prompt` — via regex and passes them to the `Agent` class.
 
-```markdown
+```markdown title="agent.md"
 # Weather Assistant Agent Configuration
 
 ## Agent Name
@@ -123,7 +123,7 @@ Using markdown instead of YAML or JSON is a deliberate choice — prompts are na
 
 MCP server connections are defined in `mcp.json`. Two transport types are supported: stdio (local process) and HTTP (remote server).
 
-```json
+```json title="mcp.json"
 {
   "mcpServers": {
     "weather-mcp-http": {
@@ -139,7 +139,7 @@ During local development, you can use stdio to spawn a process directly. For EKS
 
 The core of `agent.py` is just a few lines. It connects to each server in `mcp.json`, auto-discovers published tools, and passes them to the agent.
 
-```python
+```python title="agent.py"
 from strands import Agent, tool
 from strands.models import BedrockModel
 from strands.tools.mcp import MCPClient
@@ -193,13 +193,13 @@ Unlike `docker build`, which needs a privileged Docker daemon process, Kaniko in
 
 The workflow was: upload the build context (source code) to S3, then run a Kaniko Job on EKS that fetches the context from S3, builds the image, and pushes directly to ECR.
 
-```bash
+```bash title="Terminal"
 # Upload build context to S3
 tar czf /tmp/context.tar.gz .
 aws s3 cp /tmp/context.tar.gz s3://${BUCKET}/build/
 ```
 
-```yaml
+```yaml title="kaniko-job.yaml"
 # Kaniko Job: build on EKS → push to ECR
 apiVersion: batch/v1
 kind: Job
@@ -225,7 +225,7 @@ The critical piece is granting ECR push permissions via Pod Identity. I attached
 
 With images built by Kaniko and pushed to ECR, the Helm deployment is a two-step process — MCP Server first (since the Weather Agent references it), then the agent.
 
-```bash
+```bash title="Terminal"
 # 1. MCP Server (deploy first as Weather Agent depends on it)
 helm upgrade weather-mcp manifests/helm/mcp \
   --install -n mcp-servers --create-namespace \
@@ -239,7 +239,7 @@ helm upgrade weather-agent manifests/helm/agent \
 
 A test request for NYC's 3-day forecast returned the following:
 
-```text
+```text title="Output"
 Here's the weather forecast for New York City for the next 3 days:
 
 **Today**

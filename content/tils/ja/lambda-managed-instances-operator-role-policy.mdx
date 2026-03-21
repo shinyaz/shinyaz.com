@@ -8,7 +8,7 @@ tags: ["aws", "lambda", "iam"]
 
 Lambda Managed Instances の Capacity Provider にオペレーターロールを設定し、`publish-version` したところ、バージョンが `Failed` になった。
 
-```text title="出力結果"
+```text title="Output"
 "StateReason": "The function's execution role doesn't have permission to perform this operation.",
 "StateReasonCode": "InsufficientRolePermissions"
 ```
@@ -17,7 +17,7 @@ Lambda Managed Instances の Capacity Provider にオペレーターロールを
 
 正解は **`AWSLambdaManagedEC2ResourceOperator`** という専用のマネージドポリシーだった。
 
-```bash title="ターミナル"
+```bash title="Terminal"
 aws iam attach-role-policy --role-name MyOperatorRole \
   --policy-arn arn:aws:iam::aws:policy/AWSLambdaManagedEC2ResourceOperator
 ```

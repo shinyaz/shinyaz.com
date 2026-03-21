@@ -35,7 +35,7 @@ Auto Mode では以下の4つのマネージドコンポーネントからログ
 
 EKS クラスターをログソースとして登録する。4つのログタイプそれぞれに対して実行が必要だ。
 
-```bash title="ターミナル"
+```bash title="Terminal"
 # Compute ログの配信ソースを作成
 aws logs put-delivery-source \
   --name "sandbox-AUTO_MODE_COMPUTE_LOGS" \
@@ -49,7 +49,7 @@ aws logs put-delivery-source \
 
 CloudWatch Logs のロググループを配信先として登録する。
 
-```bash title="ターミナル"
+```bash title="Terminal"
 # ロググループの作成
 aws logs create-log-group \
   --log-group-name "/aws/eks/sandbox/auto-mode/compute"
@@ -65,7 +65,7 @@ aws logs put-delivery-destination \
 
 ソースと配信先を紐付ける。このタイミングで、各ログタイプ固有の `recordFields` が自動設定される。
 
-```bash title="ターミナル"
+```bash title="Terminal"
 aws logs create-delivery \
   --delivery-source-name "sandbox-AUTO_MODE_COMPUTE_LOGS" \
   --delivery-destination-arn \

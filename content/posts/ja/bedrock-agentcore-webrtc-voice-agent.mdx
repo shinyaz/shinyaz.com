@@ -74,7 +74,7 @@ server/
 
 ### セットアップ
 
-```bash title="ターミナル（エージェント起動）"
+```bash title="Terminal（エージェント起動）"
 git clone https://github.com/awslabs/amazon-bedrock-agentcore-samples.git
 cd amazon-bedrock-agentcore-samples/01-tutorials/01-AgentCore-runtime/06-bi-directional-streaming-webrtc
 
@@ -88,7 +88,7 @@ python bot.py --host 0.0.0.0 --port 8080
 
 別のターミナルでブラウザクライアントを起動する。依存パッケージはエージェント側と共通なので、同じ venv を使うのが簡単だ。
 
-```bash title="ターミナル（ブラウザクライアント起動）"
+```bash title="Terminal（ブラウザクライアント起動）"
 cd server
 source ../agent/venv/bin/activate
 python server.py  # http://localhost:7860
@@ -96,7 +96,7 @@ python server.py  # http://localhost:7860
 
 エージェント起動時に KVS シグナリングチャネルが自動作成される。
 
-```text title="出力結果"
+```text title="Output"
 Signaling channel: arn:aws:kinesisvideo:us-west-2:123456789012:channel/voice-agent-minimal/...
 Uvicorn running on http://0.0.0.0:8080
 ```
@@ -137,7 +137,7 @@ WebRTC 接続の確立は `/invocations` エンドポイントへの複数回の
 
 NAT Gateway 付きの VPC を作成する。
 
-```bash title="ターミナル（VPC 構築）"
+```bash title="Terminal（VPC 構築）"
 # VPC 作成
 VPC_ID=$(aws ec2 create-vpc --cidr-block 10.0.0.0/16 --region us-west-2 \
   --tag-specifications 'ResourceType=vpc,Tags=[{Key=Name,Value=webrtc-bot-example}]' \
@@ -164,7 +164,7 @@ aws ec2 wait nat-gateway-available --nat-gateway-ids $NAT_GW --region us-west-2
 <details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
 <summary className="cursor-pointer font-medium">ルートテーブルの設定</summary>
 
-```bash title="ターミナル"
+```bash title="Terminal"
 # パブリックサブネット → IGW
 PUBLIC_RT=$(aws ec2 create-route-table --vpc-id $VPC_ID --region us-west-2 --query 'RouteTable.RouteTableId' --output text)
 aws ec2 create-route --route-table-id $PUBLIC_RT --destination-cidr-block 0.0.0.0/0 --gateway-id $IGW --region us-west-2
@@ -186,7 +186,7 @@ SG_ID=$(aws ec2 describe-security-groups --filters "Name=vpc-id,Values=$VPC_ID" 
 
 `agent/` ディレクトリで AgentCore の設定とデプロイを行う。
 
-```bash title="ターミナル"
+```bash title="Terminal"
 cd agent
 pip install bedrock-agentcore-starter-toolkit
 
@@ -206,7 +206,7 @@ agentcore deploy --env KVS_CHANNEL_NAME=voice-agent-minimal --env AWS_REGION=us-
 
 デプロイが完了すると Agent ARN とロール名が出力される。ローカルに Docker がなくても、CodeBuild が ARM64 コンテナのビルドを自動で行う。
 
-```text title="出力結果"
+```text title="Output"
 Agent ARN: arn:aws:bedrock-agentcore:us-west-2:123456789012:runtime/bot-XXXXXXXXXX
 Execution role: AmazonBedrockAgentCoreSDKRuntime-us-west-2-XXXXXXXXXX
 ```
@@ -215,7 +215,7 @@ Execution role: AmazonBedrockAgentCoreSDKRuntime-us-west-2-XXXXXXXXXX
 
 自動作成された実行ロールに KVS と Bedrock の権限を追加する。サンプルリポジトリのプロジェクトルート（`agent/` の一つ上）に IAM ポリシーファイルが含まれている。
 
-```bash title="ターミナル"
+```bash title="Terminal"
 ROLE_NAME="AmazonBedrockAgentCoreSDKRuntime-us-west-2-XXXXXXXXXX"  # デプロイ出力から取得
 
 cd ..  # プロジェクトルートに移動（kvs-iam-policy.json がある場所）
@@ -226,7 +226,7 @@ sed -i "s/ACCOUNT_ID/$(aws sts get-caller-identity --query Account --output text
 
 `bedrock-iam-policy.json` は注意が必要だ。Foundation Model の ARN にはアカウント ID が含まれないため、サンプルの `ACCOUNT_ID` プレースホルダーをそのまま置換してはいけない。
 
-```bash title="ターミナル"
+```bash title="Terminal"
 # bedrock-iam-policy.json を修正（アカウント ID 部分を空にする）
 cat > bedrock-iam-policy.json << 'EOF'
 {
@@ -252,7 +252,7 @@ aws iam put-role-policy --role-name $ROLE_NAME --policy-name bedrock-nova-sonic 
 
 エンドポイントが準備完了になるまで待つ（数分かかる）。
 
-```bash title="ターミナル"
+```bash title="Terminal"
 cd agent
 agentcore status
 # Endpoint: DEFAULT (READY) と表示されるまで待つ
@@ -260,7 +260,7 @@ agentcore status
 
 ブラウザクライアントを起動する。
 
-```bash title="ターミナル（ブラウザクライアント起動）"
+```bash title="Terminal（ブラウザクライアント起動）"
 cd ../server
 source ../agent/venv/bin/activate
 python server.py  # http://localhost:7860
@@ -344,7 +344,7 @@ us-east-1, us-east-2, us-west-2, ap-south-1, ca-central-1, ap-northeast-2, ap-so
 
 `agentcore destroy` 後、AgentCore Runtime が VPC 内に作成した ENI の解放に時間がかかる場合がある（数分〜数時間）。サブネットや VPC の削除で `DependencyViolation` エラーが出た場合は、ENI が `available` になるまで待ってから再試行する。
 
-```bash title="ターミナル"
+```bash title="Terminal"
 # AgentCore デプロイの削除
 cd agent && agentcore destroy
 
@@ -359,7 +359,7 @@ aws kinesisvideo delete-signaling-channel \
 
 NAT Gateway → EIP → サブネット → IGW → ルートテーブル → VPC の順に削除する。
 
-```bash title="ターミナル"
+```bash title="Terminal"
 aws ec2 delete-nat-gateway --nat-gateway-id $NAT_GW --region us-west-2
 # NAT Gateway の削除完了を待つ（数分かかる）
 aws ec2 wait nat-gateway-deleted --nat-gateway-ids $NAT_GW --region us-west-2 2>/dev/null || sleep 60

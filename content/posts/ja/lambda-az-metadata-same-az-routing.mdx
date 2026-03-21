@@ -111,7 +111,7 @@ def handler(event, context):
 
 ### 基本動作とキャッシュ
 
-```json title="出力結果（test_mode: basic）"
+```json title="Output（test_mode: basic）"
 {
   "az_id": "apne1-az2",
   "latency_ms": 180.221,
@@ -231,7 +231,7 @@ def handler(event, context):
 
 以下のコマンドで検証環境を再現できる。ElastiCacheクラスターの作成に約10分かかる。
 
-```bash title="ターミナル（ElastiCache構築）"
+```bash title="Terminal（ElastiCache構築）"
 # セキュリティグループ作成（Valkey用ポート6379を自己参照で許可）
 SG_ID=$(aws ec2 create-security-group \
   --group-name az-test-sg --description "AZ test" \
@@ -261,7 +261,7 @@ aws elasticache create-replication-group \
 # → "available" になるまで約10分待つ
 ```
 
-```bash title="ターミナル（Lambda構築）"
+```bash title="Terminal（Lambda構築）"
 # IAMロール作成（VPC実行権限）
 aws iam create-role --role-name lambda-az-test-role \
   --assume-role-policy-document '{
@@ -390,7 +390,7 @@ def handler(event, context):
 
 検証後は以下の順序でリソースを削除する。ElastiCacheの削除に数分かかるため、完了を待ってからセキュリティグループとサブネットグループを削除する。
 
-```bash title="ターミナル"
+```bash title="Terminal"
 # Lambda関数削除
 aws lambda delete-function --function-name az-routing-test
 

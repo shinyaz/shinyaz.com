@@ -8,7 +8,7 @@ tags: ["aws", "lambda", "iam"]
 
 Lambda Durable Functions を AWS CLI でデプロイした際、IAM ポリシーに `lambda:CheckpointDurableExecutions`（複数形）を設定したら以下のエラーが出た。
 
-```text title="出力結果"
+```text title="Output"
 User: arn:aws:sts::XXXX:assumed-role/lambda-durable-test-role/durable-basic-test
 is not authorized to perform: lambda:CheckpointDurableExecution on resource: ...
 because no identity-based policy allows the lambda:CheckpointDurableExecution action

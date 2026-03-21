@@ -44,7 +44,7 @@ Auto Mode 環境でネットワークポリシーを有効化するには、2つ
 
 ### ConfigMap によるコントローラーの有効化
 
-```bash title="ターミナル"
+```bash title="Terminal"
 kubectl apply -f - <<EOF
 apiVersion: v1
 kind: ConfigMap
@@ -60,14 +60,14 @@ EOF
 
 デフォルトでは NodeClass の `networkPolicy` は `DefaultAllow`（全通信許可）に設定されている。これを `DefaultDeny` に変更する。
 
-```bash title="ターミナル"
+```bash title="Terminal"
 kubectl patch nodeclass default --type=merge \
   -p '{"spec":{"networkPolicy":"DefaultDeny"}}'
 ```
 
 重要な注意点として、**この変更は既存ノードには反映されない**。変更後に作成された新しいノードにのみ `DefaultDeny` が適用される。既存のワークロードを削除してノードのローテーションを待つか、ノードを手動で入れ替える必要がある。
 
-```bash title="出力結果"
+```bash title="Output"
 $ kubectl get cninodes -o jsonpath='{range .items[*]}{.metadata.name}: {.spec.networkPolicy}{"\n"}{end}'
 i-0676bb1b28ac86c6a: DefaultDeny    # 新規ノード → 反映済み
 i-0e088c13093d6f297: DefaultAllow   # 既存ノード → 未反映

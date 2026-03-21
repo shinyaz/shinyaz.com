@@ -1,8 +1,8 @@
 ---
 title: "Multi-Agent Coordination with A2A Protocol — Agentic AI on EKS Part 2"
 description: "Validating A2A delegation from Travel Agent to Weather Agent on EKS. Two gotchas: agent card URL defaults to 0.0.0.0, and S3 session history poisons LLM context with stale URLs."
-date: "2026-03-25"
-published: false
+date: "2026-03-23"
+published: true
 featured: false
 categories: [ai-agents]
 tags: ["eks", "kubernetes", "ai-agents", "strands-agents", "a2a", "bedrock"]
@@ -12,7 +12,7 @@ seriesOrder: 2
 
 ## Introduction
 
-In [Part 1](/en/blog/2026/03/24/agentic-ai-on-eks-workshop), I deployed a Weather Agent and MCP Server on EKS, validating the flow of tool auto-discovery and external API calls.
+In [Part 1](/en/blog/2026/03/23/agentic-ai-on-eks-workshop), I deployed a Weather Agent and MCP Server on EKS, validating the flow of tool auto-discovery and external API calls.
 
 This post covers A2A (Agent-to-Agent) protocol for multi-agent coordination. A Travel Agent receives travel questions and delegates weather lookups to the Weather Agent. Unlike single-agent setups, this introduced a new class of problems: agent discovery and trust between services.
 
@@ -97,7 +97,7 @@ The Weather Agent from Part 1 calls MCP tools (like `get_forecast`) directly. Th
 
 Just as the Weather Agent declares MCP Server connections in `mcp.json`, the Travel Agent declares A2A connections in `a2a_agents.json`.
 
-```json
+```json title="a2a_agents.json"
 {
   "urls": [
     "http://weather-agent.agents:9000/"
@@ -111,7 +111,7 @@ At startup, `A2AClientToolProvider` fetches the agent card from this URL, auto-d
 
 The Travel Agent code is remarkably simple. `A2AClientToolProvider` abstracts away all A2A communication complexity.
 
-```python
+```python title="Python"
 from strands_tools.a2a_client import A2AClientToolProvider
 
 provider = A2AClientToolProvider(
@@ -141,7 +141,7 @@ The Travel Agent's `agent.md` contains ~100 lines of detailed system prompt. Com
 
 The core of the prompt is about constraints — what the LLM must not do.
 
-```markdown
+```markdown title="agent.md"
 CORE PRINCIPLES:
 1. NEVER invent or fabricate specialized information
    that should come from other agents
@@ -159,7 +159,7 @@ Why such strict prohibitions? The LLM has general knowledge about weather and ca
 
 The first deployment failed immediately — Travel Agent couldn't reach Weather Agent via A2A.
 
-```text
+```text title="Output"
 A2AClientHTTPError: HTTP Error 503: Network communication error
 fetching agent card from http://0.0.0.0:9000/.well-known/agent-card.json
 ```
@@ -168,7 +168,7 @@ The root cause was the Weather Agent's agent card. The A2A server binds to `host
 
 The fix: set `a2a.http_url` in Helm values to the Kubernetes Service FQDN.
 
-```yaml
+```yaml title="values.yaml"
 # Weather Agent Helm values
 a2a:
   http_url: "http://weather-agent.agents:9000/"
@@ -182,7 +182,7 @@ After fixing the agent card URL, the Travel Agent still tried connecting to `htt
 
 The culprit was **S3 session history**. The Travel Agent persists per-user conversation history in S3. Messages from earlier failed attempts — containing the old `0.0.0.0` URL — were restored into the LLM's context. The LLM learned the stale URL from its conversation history and kept passing it to the `a2a_send_message` tool's `target_agent_url` parameter.
 
-```bash
+```bash title="Terminal"
 # Clear S3 session data
 aws s3 rm s3://${TRAVEL_SESSION_BUCKET}/ --recursive
 ```
@@ -195,7 +195,7 @@ This is a problem unique to AI agents. In traditional microservices, config chan
 
 With both issues resolved, a travel question triggered successful A2A delegation to the Weather Agent.
 
-```text
+```text title="Output"
 User: "I'm planning a trip to Miami, Florida next week.
        What will the weather be like?"
 

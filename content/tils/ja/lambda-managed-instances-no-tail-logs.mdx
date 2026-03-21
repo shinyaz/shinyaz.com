@@ -8,7 +8,7 @@ tags: ["aws", "lambda", "cloudwatch"]
 
 Lambda Managed Instances の関数を `--log-type Tail` 付きで呼び出したら即エラーになった。
 
-```text title="出力結果"
+```text title="Output"
 Tail logs are not supported for functions configured with capacity provider.
 ```
 
@@ -16,7 +16,7 @@ Tail logs are not supported for functions configured with capacity provider.
 
 代わりに CloudWatch Logs に出力される `platform.report` イベントから Duration を取得できる。
 
-```bash title="ターミナル"
+```bash title="Terminal"
 aws logs filter-log-events \
   --log-group-name /aws/lambda/YOUR_FUNCTION_NAME \
   --filter-pattern "platform.report" \
