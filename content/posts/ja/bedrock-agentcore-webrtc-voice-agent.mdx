@@ -342,6 +342,8 @@ us-east-1, us-east-2, us-west-2, ap-south-1, ca-central-1, ap-northeast-2, ap-so
 
 検証が終わったら課金を避けるためにリソースを削除する。AgentCore のデプロイと KVS シグナリングチャネルを先に削除し、その後 VPC 関連リソースを削除する。
 
+`agentcore destroy` 後、AgentCore Runtime が VPC 内に作成した ENI の解放に時間がかかる場合がある（数分〜数時間）。サブネットや VPC の削除で `DependencyViolation` エラーが出た場合は、ENI が `available` になるまで待ってから再試行する。
+
 ```bash title="ターミナル"
 # AgentCore デプロイの削除
 cd agent && agentcore destroy

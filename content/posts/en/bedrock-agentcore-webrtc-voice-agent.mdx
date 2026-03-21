@@ -342,6 +342,8 @@ us-east-1, us-east-2, us-west-2, ap-south-1, ca-central-1, ap-northeast-2, ap-so
 
 After verification, delete the resources to avoid ongoing charges. Remove the AgentCore deployment and KVS signaling channel first, then the VPC resources.
 
+After `agentcore destroy`, the ENI that AgentCore Runtime created in the VPC may take time to be released (minutes to hours). If you get a `DependencyViolation` error when deleting the subnet or VPC, wait until the ENI becomes `available` and retry.
+
 ```bash title="Terminal"
 # Remove AgentCore deployment
 cd agent && agentcore destroy

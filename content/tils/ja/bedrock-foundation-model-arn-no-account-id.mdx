@@ -1,0 +1,21 @@
+---
+title: "Bedrock Foundation Model の IAM ポリシーではアカウント ID を空にする"
+description: "Foundation Model の ARN は arn:aws:bedrock:region::foundation-model/... のようにアカウント ID が空。サンプルの ACCOUNT_ID プレースホルダーをそのまま置換すると権限が効かない。"
+date: "2026-03-21"
+published: true
+tags: ["bedrock", "iam", "aws"]
+---
+
+AgentCore Runtime に Nova Sonic の権限を付与する際、サンプルの `bedrock-iam-policy.json` にある `ACCOUNT_ID` を自分のアカウント ID に置換した。しかし Foundation Model の ARN にはアカウント ID が含まれないため、この置換は誤りだ。
+
+```json title="誤り"
+"Resource": "arn:aws:bedrock:us-west-2:123456789012:foundation-model/amazon.nova-2-sonic-v1:0"
+```
+
+```json title="正しい"
+"Resource": "arn:aws:bedrock:us-west-2::foundation-model/amazon.nova-2-sonic-v1:0"
+```
+
+`::` の部分がポイントだ。`aws bedrock get-foundation-model` で確認すると、`modelArn` のアカウント ID 部分が空であることがわかる。
+
+サンプルコードに `ACCOUNT_ID` プレースホルダーがあると `sed` で一括置換したくなるが、Bedrock の Foundation Model リソースだけは例外なので注意が必要だ。

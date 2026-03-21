@@ -1,0 +1,20 @@
+---
+title: "DependencyViolation when deleting VPC after agentcore destroy — wait for ENI release"
+description: "AgentCore Runtime's ENI in the VPC may stay in-use for hours after agentcore destroy. Wait for it to become available before deleting the subnet and VPC."
+date: "2026-03-21"
+published: true
+tags: ["bedrock", "agentcore", "vpc", "aws"]
+---
+
+After testing a WebRTC agent on AgentCore Runtime, I ran `agentcore destroy` and tried to clean up the VPC. The subnet deletion failed with `DependencyViolation`.
+
+```text title="Output"
+An error occurred (DependencyViolation) when calling the DeleteSubnet operation:
+The subnet 'subnet-xxx' has dependencies and cannot be deleted.
+```
+
+The culprit was an ENI that AgentCore Runtime created in the private subnet. It showed `in-use` with `InstanceOwnerId: amazon-aws`, and manual detach was rejected with `OperationNotPermitted`.
+
+The only option was to wait. In my case, the ENI was released about 9 hours after `agentcore destroy`. Once it became `available`, the standard `delete-network-interface` → `delete-subnet` → `delete-vpc` sequence worked.
+
+Similar behavior exists with Lambda VPC ENIs. For AgentCore, the ENI is managed by a service-linked role (`AWSServiceRoleForBedrockAgentCoreNetwork`) — deleting that role first may speed up the release.

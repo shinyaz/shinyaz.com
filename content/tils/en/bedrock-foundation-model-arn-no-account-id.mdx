@@ -1,0 +1,21 @@
+---
+title: "Bedrock Foundation Model ARNs have an empty account ID"
+description: "Foundation Model ARNs use arn:aws:bedrock:region::foundation-model/... with no account ID. Replacing the ACCOUNT_ID placeholder from samples breaks the IAM policy."
+date: "2026-03-21"
+published: true
+tags: ["bedrock", "iam", "aws"]
+---
+
+When granting Nova Sonic permissions to an AgentCore Runtime execution role, I replaced the `ACCOUNT_ID` placeholder in the sample `bedrock-iam-policy.json` with my actual account ID. But Foundation Model ARNs don't include an account ID, so this replacement is wrong.
+
+```json title="Wrong"
+"Resource": "arn:aws:bedrock:us-west-2:123456789012:foundation-model/amazon.nova-2-sonic-v1:0"
+```
+
+```json title="Correct"
+"Resource": "arn:aws:bedrock:us-west-2::foundation-model/amazon.nova-2-sonic-v1:0"
+```
+
+Note the `::` — the account ID portion is empty. You can verify this with `aws bedrock get-foundation-model`, which shows the `modelArn` with no account ID.
+
+When sample code has an `ACCOUNT_ID` placeholder, it's tempting to `sed` replace everything at once. Bedrock Foundation Model resources are the exception.
