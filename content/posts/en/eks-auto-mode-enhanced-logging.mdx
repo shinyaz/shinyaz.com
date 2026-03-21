@@ -10,7 +10,7 @@ tags: ["aws", "eks", "kubernetes", "cloudwatch", "devops"]
 
 ## Introduction
 
-In the [previous post](/en/post/eks-auto-mode-cluster-setup), I covered building an EKS cluster with Auto Mode. While Auto Mode conveniently delegates node management to EKS, the "what's happening under the hood" question remains.
+In the [previous post](/en/blog/2026/03/18/eks-auto-mode-cluster-setup), I covered building an EKS cluster with Auto Mode. While Auto Mode conveniently delegates node management to EKS, the "what's happening under the hood" question remains.
 
 A [February 2026 update](https://aws.amazon.com/about-aws/whats-new/2026/02/amazon-eks-auto-mode-enhanced-logging/) added CloudWatch Logs delivery for Auto Mode's managed components. This means you can now track Karpenter's scheduling decisions, VPC CNI IP allocations, and more in real-time. In this post, I set up log delivery, deploy a workload, and use Logs Insights to trace the full scale-up to scale-down cycle.
 
