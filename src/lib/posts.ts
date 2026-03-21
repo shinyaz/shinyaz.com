@@ -6,7 +6,11 @@ import type { Locale } from "./i18n";
 export function getPublishedPosts(locale?: Locale) {
   return posts
     .filter((post) => post.published && (locale == null || post.locale === locale))
-    .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+    .sort((a, b) => {
+      const diff = new Date(b.date).getTime() - new Date(a.date).getTime();
+      if (diff !== 0) return diff;
+      return (b.seriesOrder ?? 0) - (a.seriesOrder ?? 0);
+    });
 }
 
 export function getFeaturedPosts(locale?: Locale) {
