@@ -15,7 +15,7 @@ TIL writing guide: $ARGUMENTS
 ### Length & Scope
 - **Length:** 100-300 words ideal. Over 500 → convert to blog post (`/writing-posts`)
 - **Code blocks:** 1-2 ideal, max 3. 4+ = blog post territory
-- **Code block language:** Always specify (e.g. `tsx`, `bash`, `text`). Bare ` ``` ` breaks `rehype-pretty-code`. Add `title=` to label code blocks: language name for source code (`title="Python"`, `title="TypeScript"` etc.), `title="ターミナル"` / `title="Terminal"` for shell, `title="出力結果"` / `title="Output"` for results, or file names (`title="main.py"`)
+- **Code block language:** Always specify (e.g. `tsx`, `bash`, `text`). Bare ` ``` ` breaks `rehype-pretty-code`. Add `title=` to label code blocks: language name for source code (`title="Python"`, `title="TypeScript"` etc.), `title="Terminal"` for shell, `title="Output"` for results, or file names (`title="main.py"`). Use English for titles in both JA and EN posts
 - Let code speak — don't repeat in prose what code already shows
 - **Internal links** — Posts: `/{locale}/blog/{YYYY}/{MM}/{DD}/{slug}`, TILs: `/{locale}/til/{YYYY}/{MM}/{DD}/{slug}`. NEVER use `/{locale}/posts/{slug}` or `/{locale}/tils/{slug}`. Get dates from the target's frontmatter `date` field
 

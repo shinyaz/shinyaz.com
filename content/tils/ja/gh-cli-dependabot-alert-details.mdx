@@ -10,12 +10,12 @@ tags: ["github", "cli", "security"]
 
 `gh api` で Dependabot アラートの情報を取得できる。
 
-```bash title="ターミナル"
+```bash title="Terminal"
 gh api /repos/{owner}/{repo}/dependabot/alerts/19 \
   --jq '{severity: .security_advisory.severity, package: .security_vulnerability.package.name, summary: .security_advisory.summary, fixed_in: .security_vulnerability.first_patched_version.identifier}'
 ```
 
-```json title="出力結果"
+```json title="Output"
 {
   "severity": "high",
   "package": "flatted",
