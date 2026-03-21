@@ -2,8 +2,10 @@
 title: "Set Up EKS ArgoCD Capability with eksctl — One YAML File for a GitOps Environment"
 description: "Create an ArgoCD Capability using eksctl's declarative YAML config and deploy a sample app. Covers the differences from AWS CLI and CloudFormation behavior."
 date: "2026-03-22"
-published: false
+published: true
 featured: false
+series: "eks-argocd-capability"
+seriesOrder: 2
 categories: [infrastructure]
 tags: ["aws", "eks", "kubernetes", "argocd", "gitops", "eksctl", "devops"]
 ---
@@ -30,7 +32,7 @@ I'm working with `sandbox-cluster` (v1.32, ap-northeast-1).
 
 Same as the [previous post](/en/blog/2026/03/21/eks-argocd-capability)—create a [dedicated IAM role](https://docs.aws.amazon.com/eks/latest/userguide/capability-role.html) with the Capabilities trust policy.
 
-```bash
+```bash title="Terminal"
 cat > argocd-trust-policy.json << 'EOF'
 {
   "Version": "2012-10-17",
@@ -58,7 +60,7 @@ aws iam create-role \
 
 Retrieve the instance ARN, Identity Store ID, and user ID. See the [previous post](/en/blog/2026/03/21/eks-argocd-capability) for how to identify the Identity Center home region.
 
-```bash
+```bash title="Terminal"
 aws sso-admin list-instances \
   --query 'Instances[0].{InstanceArn:InstanceArn,IdentityStoreId:IdentityStoreId}' \
   --output table
@@ -73,7 +75,7 @@ aws identitystore list-users \
 
 This is the key difference from the CLI approach. With eksctl, you define the Capability declaratively in a YAML file.
 
-```yaml
+```yaml title="argocd-capability.yaml"
 # argocd-capability.yaml
 apiVersion: eksctl.io/v1alpha5
 kind: ClusterConfig
@@ -101,13 +103,13 @@ capabilities:
 
 Create the capability:
 
-```bash
+```bash title="Terminal"
 eksctl create capability -f argocd-capability.yaml
 ```
 
 Under the hood, eksctl creates a CloudFormation stack to manage the Capability. In my environment, it took about 4 minutes to complete.
 
-```text
+```text title="Output"
 2026-03-15 19:26:59 [ℹ]  creating capability argocd
 2026-03-15 19:27:01 [ℹ]  deploying stack "eksctl-sandbox-cluster-capability-..."
 2026-03-15 19:27:01 [ℹ]  waiting for CloudFormation stack "eksctl-sandbox-cluster-capability-..."
@@ -116,11 +118,11 @@ Under the hood, eksctl creates a CloudFormation stack to manage the Capability. 
 
 Check status with eksctl:
 
-```bash
+```bash title="Terminal"
 eksctl get capability --cluster sandbox-cluster --name argocd
 ```
 
-```text
+```text title="Output"
 NAME    TYPE    STATUS  VERSION
 argocd  ARGOCD  ACTIVE  3.1.8-eks-1
 ```
@@ -131,11 +133,11 @@ Once `ACTIVE`, you're good to go.
 
 ### CRDs
 
-```bash
+```bash title="Terminal"
 kubectl api-resources | grep argoproj.io
 ```
 
-```text
+```text title="Output"
 applications       app,apps       argoproj.io/v1alpha1   true   Application
 applicationsets    appset,appsets argoproj.io/v1alpha1   true   ApplicationSet
 appprojects        appproj        argoproj.io/v1alpha1   true   AppProject
@@ -149,7 +151,7 @@ Open the `serverUrl` (from `aws eks describe-capability`) in a browser. It redir
 
 Same as the [previous post](/en/blog/2026/03/21/eks-argocd-capability)—associate an access policy and register the cluster.
 
-```bash
+```bash title="Terminal"
 aws eks associate-access-policy \
   --region ap-northeast-1 \
   --cluster-name sandbox-cluster \
@@ -160,7 +162,7 @@ aws eks associate-access-policy \
 
 Register the cluster as a Secret. The `server` field uses the EKS cluster ARN, not the API server URL.
 
-```yaml
+```yaml title="local-cluster.yaml"
 # local-cluster.yaml
 apiVersion: v1
 kind: Secret
@@ -175,13 +177,13 @@ stringData:
   project: default
 ```
 
-```bash
+```bash title="Terminal"
 kubectl apply -f local-cluster.yaml
 ```
 
 ## Step 6: Deploy a Sample Application
 
-```yaml
+```yaml title="guestbook-app.yaml"
 # guestbook-app.yaml
 apiVersion: argoproj.io/v1alpha1
 kind: Application
@@ -209,26 +211,26 @@ spec:
 
 This time I added `finalizers`—a lesson learned from the previous post where Application deletion left orphaned resources.
 
-```bash
+```bash title="Terminal"
 kubectl apply -f guestbook-app.yaml
 ```
 
-```bash
+```bash title="Terminal"
 kubectl get application guestbook -n argocd -o wide
 ```
 
-```text
+```text title="Output"
 NAME        SYNC STATUS   HEALTH STATUS   REVISION                                   PROJECT
 guestbook   Synced        Healthy         abc1234def5678901234567890abcdef12345678   default
 ```
 
 Pods and Service are running:
 
-```bash
+```bash title="Terminal"
 kubectl get pods,svc -n default
 ```
 
-```text
+```text title="Output"
 NAME                                READY   STATUS    RESTARTS   AGE
 pod/guestbook-ui-xxxxxxxxxx-xxxxx   1/1     Running   0          100s
 
@@ -261,7 +263,7 @@ AWS CLI has minimal dependencies and its JSON output is easy to parse with `jq` 
 
 ## Cleanup
 
-```bash
+```bash title="Terminal (cleanup)"
 # 1. Delete the Application (finalizer handles cascade deletion)
 kubectl delete application guestbook -n argocd
 

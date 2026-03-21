@@ -4,6 +4,8 @@ description: "Enable ArgoCD Capability on EKS via AWS CLI and deploy a sample ap
 date: "2026-03-21"
 published: true
 featured: false
+series: "eks-argocd-capability"
+seriesOrder: 1
 categories: [infrastructure]
 tags: ["aws", "eks", "kubernetes", "argocd", "gitops", "devops"]
 ---
@@ -41,7 +43,7 @@ I'm working with the `sandbox` cluster (v1.32, ap-northeast-1).
 
 ArgoCD Capability needs a [dedicated IAM role](https://docs.aws.amazon.com/eks/latest/userguide/capability-role.html) with a trust policy for the Capabilities service.
 
-```json
+```json title="argocd-trust-policy.json"
 {
   "Version": "2012-10-17",
   "Statement": [
@@ -59,7 +61,7 @@ ArgoCD Capability needs a [dedicated IAM role](https://docs.aws.amazon.com/eks/l
 }
 ```
 
-```bash
+```bash title="Terminal"
 aws iam create-role \
   --role-name ArgoCDCapabilityRole \
   --assume-role-policy-document file://argocd-trust-policy.json
@@ -71,13 +73,13 @@ The service principal `capabilities.eks.amazonaws.com` is specific to EKS Capabi
 
 ArgoCD Capability uses IAM Identity Center for authentication. Local users are not supported.
 
-```bash
+```bash title="Terminal"
 aws sso-admin list-instances \
   --query 'Instances[0].{InstanceArn:InstanceArn,IdentityStoreId:IdentityStoreId}' \
   --output table
 ```
 
-```text
+```text title="Output"
 -----------------------------------------------------------------------
 |                           ListInstances                             |
 +------------------+--------------------------------------------------+
@@ -89,14 +91,14 @@ aws sso-admin list-instances \
 
 Use the `IdentityStoreId` to look up user IDs.
 
-```bash
+```bash title="Terminal"
 aws identitystore list-users \
   --identity-store-id d-1234567890 \
   --query 'Users[].{UserName:UserName,UserId:UserId}' \
   --output table
 ```
 
-```text
+```text title="Output"
 --------------------------------------------------------
 |                       ListUsers                      |
 +----------------------------------------+-------------+
@@ -110,7 +112,7 @@ Note the `UserId` for the RBAC mapping in the next step.
 
 The critical step here is **identifying the Identity Center home region**. It may differ from your EKS cluster region.
 
-```bash
+```bash title="Terminal"
 for region in us-east-1 us-west-2 ap-northeast-1; do
   result=$(aws sso-admin list-instances --region $region \
     --query 'Instances[0].InstanceArn' --output text 2>&1)
@@ -118,7 +120,7 @@ for region in us-east-1 us-west-2 ap-northeast-1; do
 done
 ```
 
-```text
+```text title="Output"
 us-east-1: arn:aws:sso:::instance/ssoins-1234567890abcdef
 us-west-2: None
 ap-northeast-1: None
@@ -130,7 +132,7 @@ In my environment, Identity Center lives in `us-east-1` while EKS runs in `ap-no
 
 Use [`aws eks create-capability`](https://docs.aws.amazon.com/eks/latest/userguide/create-argocd-capability.html) to enable the ArgoCD Capability.
 
-```bash
+```bash title="Terminal"
 aws eks create-capability \
   --region ap-northeast-1 \
   --cluster-name sandbox \
@@ -159,13 +161,13 @@ aws eks create-capability \
 
 The command returns immediately. The response includes a managed ArgoCD UI URL:
 
-```text
+```text title="Output"
 "serverUrl": "https://xxxxxxxxxx.eks-capabilities.ap-northeast-1.amazonaws.com"
 ```
 
 The capability took about 4 minutes to go from `CREATING` to `ACTIVE`.
 
-```bash
+```bash title="Terminal"
 aws eks describe-capability \
   --region ap-northeast-1 \
   --cluster-name sandbox \
@@ -174,7 +176,7 @@ aws eks describe-capability \
   --output table
 ```
 
-```text
+```text title="Output"
 +----------+-----------------+
 |  status  |    version      |
 +----------+-----------------+
@@ -190,11 +192,11 @@ ArgoCD 3.1.8 (EKS-managed) is deployed. Version management is fully handled by A
 
 Once active, ArgoCD CRDs are automatically installed in the cluster.
 
-```bash
+```bash title="Terminal"
 kubectl api-resources | grep argoproj.io
 ```
 
-```text
+```text title="Output"
 applications       app,apps       argoproj.io/v1alpha1   true   Application
 applicationsets    appset,appsets argoproj.io/v1alpha1   true   ApplicationSet
 appprojects        appproj        argoproj.io/v1alpha1   true   AppProject
@@ -202,11 +204,11 @@ appprojects        appproj        argoproj.io/v1alpha1   true   AppProject
 
 The `argocd` namespace is also auto-created.
 
-```bash
+```bash title="Terminal"
 kubectl get ns argocd
 ```
 
-```text
+```text title="Output"
 NAME     STATUS   AGE
 argocd   Active   4m16s
 ```
@@ -227,7 +229,7 @@ To deploy applications, you must explicitly [register target clusters](https://d
 
 The capability auto-creates an access entry for the IAM role, but **it doesn't include deployment permissions**. You need to explicitly associate an access policy. Skip this step and Application sync will fail.
 
-```bash
+```bash title="Terminal"
 aws eks associate-access-policy \
   --region ap-northeast-1 \
   --cluster-name sandbox \
@@ -240,7 +242,7 @@ Using `AmazonEKSClusterAdminPolicy` for testing—production environments should
 
 ### Register the Cluster
 
-```yaml
+```yaml title="local-cluster.yaml"
 apiVersion: v1
 kind: Secret
 metadata:
@@ -254,7 +256,7 @@ stringData:
   project: default
 ```
 
-```bash
+```bash title="Terminal"
 kubectl apply -f local-cluster.yaml
 ```
 
@@ -264,7 +266,7 @@ The `server` field uses the **EKS cluster ARN** instead of the Kubernetes API se
 
 Deploying the official ArgoCD guestbook example to verify the full flow.
 
-```yaml
+```yaml title="guestbook-app.yaml"
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
@@ -287,26 +289,26 @@ spec:
       - CreateNamespace=true
 ```
 
-```bash
+```bash title="Terminal"
 kubectl apply -f guestbook-app.yaml
 ```
 
 After about 45 seconds, the application transitioned from `Progressing` to `Healthy`.
 
-```bash
+```bash title="Terminal"
 kubectl get application guestbook -n argocd -o wide
 ```
 
-```text
+```text title="Output"
 NAME        SYNC STATUS   HEALTH STATUS   REVISION                                   PROJECT
 guestbook   Synced        Healthy         abc1234def5678901234567890abcdef12345678   default
 ```
 
-```bash
+```bash title="Terminal"
 kubectl get pods,svc -n default
 ```
 
-```text
+```text title="Output"
 NAME                                READY   STATUS    RESTARTS   AGE
 pod/guestbook-ui-xxxxxxxxxx-xxxxx   1/1     Running   0          58s
 
@@ -339,7 +341,7 @@ End-to-end verified: **ArgoCD Capability enabled, Identity Center SSO working, a
 
 Once you're done testing, delete the resources in reverse order.
 
-```bash
+```bash title="Terminal (cleanup)"
 # 1. Delete the Application
 kubectl delete application guestbook -n argocd
 
