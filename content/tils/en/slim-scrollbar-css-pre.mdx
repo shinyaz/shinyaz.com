@@ -1,0 +1,35 @@
+---
+title: "Slim down code block scrollbars with scrollbar-width and -webkit-scrollbar"
+description: "Browser-default scrollbars on pre elements look bulky. scrollbar-width: thin for Firefox and ::-webkit-scrollbar for Chrome/Safari make them minimal."
+date: 2026-03-21
+published: true
+tags: ["css", "tailwindcss"]
+---
+
+The default horizontal scrollbar on `<pre>` elements felt too heavy for a minimal blog design. I wanted something thinner and less distracting.
+
+The fix is two-pronged — one standard property for Firefox, one pseudo-element set for WebKit browsers:
+
+```css title="globals.css"
+pre {
+  scrollbar-width: thin;
+  scrollbar-color: var(--border) transparent;
+
+  &::-webkit-scrollbar {
+    height: 4px;
+  }
+
+  &::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  &::-webkit-scrollbar-thumb {
+    background: var(--border);
+    border-radius: 2px;
+  }
+}
+```
+
+`scrollbar-width: thin` is a CSS standard property that works in Firefox. Chrome and Safari ignore it and need the `::-webkit-scrollbar` family instead. Both are needed for cross-browser coverage.
+
+One gotcha in Tailwind CSS v4 — attribute selectors like `[data-rehype-pretty-code-figure] pre` didn't apply correctly. Switching to a plain `pre` selector fixed it.

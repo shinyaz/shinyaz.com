@@ -1,0 +1,35 @@
+---
+title: "scrollbar-widthと-webkit-scrollbarでコードブロックのスクロールバーを細くする"
+description: "pre要素のデフォルトスクロールバーが太くて目立つ。scrollbar-width: thinと::-webkit-scrollbarの併用でシンプルにできる。"
+date: 2026-03-21
+published: true
+tags: ["css", "tailwindcss"]
+---
+
+`<pre>` 要素のデフォルト横スクロールバーが、ミニマルなブログデザインに対して存在感がありすぎた。もっと細く控えめにしたい。
+
+Firefox 向けの標準プロパティと、WebKit 系ブラウザ向けの擬似要素の2つを併用する：
+
+```css title="globals.css"
+pre {
+  scrollbar-width: thin;
+  scrollbar-color: var(--border) transparent;
+
+  &::-webkit-scrollbar {
+    height: 4px;
+  }
+
+  &::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  &::-webkit-scrollbar-thumb {
+    background: var(--border);
+    border-radius: 2px;
+  }
+}
+```
+
+`scrollbar-width: thin` は CSS 標準プロパティで Firefox で有効。Chrome や Safari はこれを無視するので `::-webkit-scrollbar` 系が必要になる。クロスブラウザ対応には両方書く。
+
+Tailwind CSS v4 での注意点として、`[data-rehype-pretty-code-figure] pre` のような属性セレクタだと正しく適用されなかった。シンプルに `pre` セレクタにしたら解決した。
