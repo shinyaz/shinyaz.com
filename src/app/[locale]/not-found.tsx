@@ -2,12 +2,22 @@ import Link from "next/link";
 import { headers } from "next/headers";
 import { defaultLocale, isValidLocale, getDictionary } from "@/lib/i18n";
 
+function getLocaleFromUrl(url: string): string | undefined {
+  try {
+    return new URL(url).pathname.split("/")[1] || undefined;
+  } catch {
+    return url.split("/")[1] || undefined;
+  }
+}
+
 export default async function NotFound() {
   const headersList = await headers();
+  const referer = headersList.get("referer") ?? "";
   const pathname = headersList.get("x-pathname") ?? "";
-  const segments = pathname.split("/");
-  const localeSegment = segments[1] ?? defaultLocale;
-  const locale = isValidLocale(localeSegment) ? localeSegment : defaultLocale;
+  const localeFromPath = getLocaleFromUrl(pathname);
+  const localeFromReferer = getLocaleFromUrl(referer);
+  const candidate = localeFromPath || localeFromReferer || defaultLocale;
+  const locale = isValidLocale(candidate) ? candidate : defaultLocale;
   const t = getDictionary(locale);
 
   return (
