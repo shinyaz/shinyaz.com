@@ -1,0 +1,37 @@
+---
+title: "Deleting a VPC after EKS cluster removal requires waiting for VPC endpoint ENI release"
+description: "EKS auto-created VPC endpoints persist after cluster deletion, leaving ENIs in-use and blocking VPC deletion with DependencyViolation. Explicitly delete VPC endpoints and wait for ENI release."
+date: "2026-03-22"
+published: true
+tags: ["eks", "kubernetes", "vpc"]
+---
+
+After deleting an EKS cluster, I tried to delete the VPC and hit `DependencyViolation`.
+
+```text title="Output"
+An error occurred (DependencyViolation) when calling the DeleteSubnet operation:
+The subnet 'subnet-xxx' has dependencies and cannot be deleted.
+```
+
+The culprit was VPC endpoints that EKS auto-created. Even after cluster deletion, the endpoints and their associated ENIs remain `in-use`, blocking subnet and VPC deletion. You need to explicitly delete the VPC endpoints and wait 30–60 seconds for the ENIs to become `available`.
+
+```bash title="Terminal"
+# Delete VPC endpoints
+for vpce in $(aws ec2 describe-vpc-endpoints \
+  --filters "Name=vpc-id,Values=$VPC_ID" --region us-east-1 \
+  --query 'VpcEndpoints[].VpcEndpointId' --output text); do
+  aws ec2 delete-vpc-endpoints --vpc-endpoint-ids $vpce --region us-east-1
+done
+
+# Wait for ENI release (30-60 seconds)
+sleep 60
+
+# Delete remaining ENIs, then proceed with VPC deletion
+for eni in $(aws ec2 describe-network-interfaces \
+  --filters "Name=vpc-id,Values=$VPC_ID" --region us-east-1 \
+  --query 'NetworkInterfaces[].NetworkInterfaceId' --output text); do
+  aws ec2 delete-network-interface --network-interface-id $eni --region us-east-1
+done
+```
+
+After this, delete security groups → subnets → IGW → VPC in order. Encountered this during cleanup for the [Neuron DRA verification](/en/blog/2026/03/22/neuron-eks-dra).

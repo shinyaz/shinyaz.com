@@ -1,0 +1,526 @@
+---
+title: "AWS Neuron の DRA ドライバーで EKS 上の Trainium デバイス管理を Kubernetes ネイティブにする"
+description: "Neuron DRA ドライバーを EKS にデプロイし、ResourceClaimTemplate による属性ベースのデバイス割り当てを検証。trn1.2xlarge では LNC 動的設定が非対応という落とし穴も確認した。"
+date: "2026-03-22"
+published: true
+featured: false
+categories: [infrastructure]
+tags: ["eks", "kubernetes", "neuron", "trainium", "dra"]
+---
+
+## はじめに
+
+2026年3月20日、[AWS Neuron が EKS の Dynamic Resource Allocation (DRA) をサポートした](https://aws.amazon.com/about-aws/whats-new/2026/03/neuron-eks-dra-support/)。従来の Device Plugin ではデバイス数しか管理できなかったが、DRA によりインスタンスタイプやドライバーバージョンといった属性ベースのフィルタリングが Kubernetes スケジューラーのレベルで可能になる。
+
+本記事では、実際に EKS クラスターに Neuron DRA ドライバーをデプロイし、ResourceClaimTemplate を使ったデバイス割り当てを検証する。検証の過程で **trn1.2xlarge では LNC（Logical NeuronCore）の動的設定がサポートされない** という、ドキュメントだけでは気づきにくい制約も確認した。
+
+## 従来の Device Plugin の課題
+
+Kubernetes で Neuron デバイスを使う従来の方法は、Neuron Device Plugin + Scheduler Extension の組み合わせだ。Pod マニフェストでは `resources.limits` にデバイス数を指定する。
+
+```yaml title="従来の Device Plugin 方式"
+spec:
+  containers:
+  - name: training
+    resources:
+      limits:
+        aws.amazon.com/neuron: "16"
+      requests:
+        aws.amazon.com/neuron: "16"
+```
+
+この方式には3つの課題がある。
+
+1. **属性が見えない** — スケジューラーはデバイス数しか知らない。インスタンスタイプやドライバーバージョンでフィルタリングするには、ノードラベルと nodeSelector を手動で設定する必要がある
+2. **トポロジー非対応** — 接続されたデバイスのセットを要求するには、Neuron Scheduler Extension という追加コンポーネントが必要
+3. **LNC 設定が静的** — Logical NeuronCore の設定はノードの起動テンプレートで固定され、ワークロードごとに変更できない
+
+DRA はこれらの課題を解決する。
+
+## DRA の仕組み
+
+DRA には4つの登場人物がいる。
+
+| リソース | 誰が作る | 役割 |
+| --- | --- | --- |
+| **DRA ドライバー** | ベンダー（Neuron チーム） | ノード上のデバイスを検出し、属性を公開する |
+| **ResourceSlice** | DRA ドライバーが自動生成 | デバイスの属性（インスタンスタイプ、ドライバーバージョン等）をスケジューラーに公開 |
+| **DeviceClass** | Helm chart の一部としてデプロイ | デバイスの種類を定義（`neuron.aws.com`） |
+| **ResourceClaimTemplate** | インフラチーム | 必要なデバイスの条件を CEL 式で記述。ML エンジニアはテンプレート名を参照するだけ |
+
+従来の Device Plugin ではスケジューラーにデバイス数しか見えなかったが、DRA では ResourceSlice 経由で属性が見える。スケジューラーが ResourceClaimTemplate の CEL 式と ResourceSlice の属性をマッチングするため、ノードラベルや Scheduler Extension が不要になる。
+
+## 前提条件
+
+- Kubernetes コントロールプレーン 1.34 以上（ノード AMI は 1.34.2 以上）
+- Trainium インスタンス — ドキュメントでは trn2.48xlarge が前提として記載されているが、trn1 系でも DRA ドライバー自体は動作する
+- Helm 3
+
+今回は EKS 1.35 + trn1.2xlarge（us-east-1）で検証した。trn1.2xlarge は Neuron デバイスを1つ搭載する最小構成のインスタンスだ。Neuron Helm chart のバージョンは 1.5.0 を使用した。
+
+## 環境構築
+
+### EKS クラスターの作成
+
+trn1 インスタンスが利用可能な AZ にサブネットを配置する必要がある。us-east-1 では us-east-1b と us-east-1f で trn1 が利用可能だ。
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">VPC とサブネットの作成</summary>
+
+```bash title="ターミナル"
+# VPC
+VPC_ID=$(aws ec2 create-vpc --cidr-block 10.1.0.0/16 --region us-east-1 \
+  --tag-specifications 'ResourceType=vpc,Tags=[{Key=Name,Value=neuron-dra-test}]' \
+  --query 'Vpc.VpcId' --output text)
+aws ec2 modify-vpc-attribute --vpc-id $VPC_ID --enable-dns-hostnames '{"Value": true}' --region us-east-1
+aws ec2 modify-vpc-attribute --vpc-id $VPC_ID --enable-dns-support '{"Value": true}' --region us-east-1
+
+# Internet Gateway
+IGW=$(aws ec2 create-internet-gateway --region us-east-1 \
+  --tag-specifications 'ResourceType=internet-gateway,Tags=[{Key=Name,Value=neuron-dra-test}]' \
+  --query 'InternetGateway.InternetGatewayId' --output text)
+aws ec2 attach-internet-gateway --internet-gateway-id $IGW --vpc-id $VPC_ID --region us-east-1
+
+# パブリックサブネット（trn1 が利用可能な AZ を含む 2 つ）
+PUB_SUB_1B=$(aws ec2 create-subnet --vpc-id $VPC_ID --cidr-block 10.1.1.0/24 \
+  --availability-zone us-east-1b --region us-east-1 \
+  --query 'Subnet.SubnetId' --output text)
+aws ec2 modify-subnet-attribute --subnet-id $PUB_SUB_1B --map-public-ip-on-launch --region us-east-1
+
+PUB_SUB_1F=$(aws ec2 create-subnet --vpc-id $VPC_ID --cidr-block 10.1.2.0/24 \
+  --availability-zone us-east-1f --region us-east-1 \
+  --query 'Subnet.SubnetId' --output text)
+aws ec2 modify-subnet-attribute --subnet-id $PUB_SUB_1F --map-public-ip-on-launch --region us-east-1
+
+# ルートテーブル
+RT=$(aws ec2 create-route-table --vpc-id $VPC_ID --region us-east-1 \
+  --query 'RouteTable.RouteTableId' --output text)
+aws ec2 create-route --route-table-id $RT --destination-cidr-block 0.0.0.0/0 \
+  --gateway-id $IGW --region us-east-1
+aws ec2 associate-route-table --route-table-id $RT --subnet-id $PUB_SUB_1B --region us-east-1
+aws ec2 associate-route-table --route-table-id $RT --subnet-id $PUB_SUB_1F --region us-east-1
+```
+
+</details>
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">IAM ロールの作成</summary>
+
+```bash title="ターミナル"
+# クラスター用ロール
+aws iam create-role --role-name neuron-dra-cluster-role \
+  --assume-role-policy-document '{
+    "Version": "2012-10-17",
+    "Statement": [{
+      "Effect": "Allow",
+      "Principal": {"Service": "eks.amazonaws.com"},
+      "Action": "sts:AssumeRole"
+    }]
+  }'
+aws iam attach-role-policy --role-name neuron-dra-cluster-role \
+  --policy-arn arn:aws:iam::aws:policy/AmazonEKSClusterPolicy
+
+# ノード用ロール
+aws iam create-role --role-name neuron-dra-node-role \
+  --assume-role-policy-document '{
+    "Version": "2012-10-17",
+    "Statement": [{
+      "Effect": "Allow",
+      "Principal": {"Service": "ec2.amazonaws.com"},
+      "Action": "sts:AssumeRole"
+    }]
+  }'
+for policy in AmazonEKSWorkerNodePolicy AmazonEKS_CNI_Policy \
+  AmazonEC2ContainerRegistryReadOnly AmazonSSMManagedInstanceCore; do
+  aws iam attach-role-policy --role-name neuron-dra-node-role \
+    --policy-arn "arn:aws:iam::aws:policy/$policy"
+done
+```
+
+</details>
+
+```bash title="ターミナル（EKS クラスター作成）"
+CLUSTER_ROLE_ARN=$(aws iam get-role --role-name neuron-dra-cluster-role \
+  --query 'Role.Arn' --output text)
+
+aws eks create-cluster \
+  --name neuron-dra-test \
+  --region us-east-1 \
+  --kubernetes-version "1.35" \
+  --role-arn "$CLUSTER_ROLE_ARN" \
+  --resources-vpc-config "{
+    \"subnetIds\": [\"$PUB_SUB_1B\", \"$PUB_SUB_1F\"],
+    \"endpointPublicAccess\": true,
+    \"endpointPrivateAccess\": true
+  }"
+
+# 完了まで約 10 分
+aws eks wait cluster-active --name neuron-dra-test --region us-east-1
+aws eks update-kubeconfig --name neuron-dra-test --region us-east-1
+
+# EKS アドオンのインストール
+aws eks create-addon --cluster-name neuron-dra-test --addon-name vpc-cni --region us-east-1
+aws eks create-addon --cluster-name neuron-dra-test --addon-name kube-proxy --region us-east-1
+aws eks create-addon --cluster-name neuron-dra-test --addon-name coredns --region us-east-1
+```
+
+### Trainium ノードの追加
+
+AMI タイプに `AL2023_x86_64_NEURON` を指定する。Neuron ドライバーがプリインストールされた AMI だ。
+
+```bash title="ターミナル"
+NODE_ROLE_ARN=$(aws iam get-role --role-name neuron-dra-node-role \
+  --query 'Role.Arn' --output text)
+
+aws eks create-nodegroup \
+  --cluster-name neuron-dra-test \
+  --nodegroup-name trn1-nodes \
+  --node-role "$NODE_ROLE_ARN" \
+  --subnets "$PUB_SUB_1B" \
+  --instance-types trn1.2xlarge \
+  --scaling-config minSize=1,maxSize=1,desiredSize=1 \
+  --ami-type AL2023_x86_64_NEURON \
+  --region us-east-1
+
+aws eks wait nodegroup-active --cluster-name neuron-dra-test \
+  --nodegroup-name trn1-nodes --region us-east-1
+```
+
+```text title="出力結果"
+$ kubectl get nodes -o wide
+NAME                         STATUS   ROLES    AGE   VERSION
+ip-10-1-1-200.ec2.internal   Ready    <none>   79s   v1.35.2-eks-f69f56f
+```
+
+### Neuron DRA ドライバーのインストール
+
+Helm chart でインストールする。**Device Plugin は無効化する**のがポイントだ。DRA と Device Plugin は同一ノードで共存できない。なお、Helm のリリースは `kube-system` namespace に作成されるが、DRA ドライバーの Pod 自体は `neuron-dra-driver` namespace にデプロイされる。
+
+```bash title="ターミナル"
+helm upgrade --install neuron-helm-chart \
+  oci://public.ecr.aws/neuron/neuron-helm-chart \
+  --set "devicePlugin.enabled=false" \
+  --set "npd.enabled=false" \
+  --set "draDriver.enabled=true" \
+  --namespace kube-system
+```
+
+```text title="出力結果"
+$ kubectl get pods -n neuron-dra-driver
+NAME                                     READY   STATUS    RESTARTS   AGE
+neuron-dra-driver-kubelet-plugin-vltl4   1/1     Running   0          30s
+
+$ kubectl get deviceclass
+NAME             AGE
+neuron.aws.com   32s
+```
+
+DRA ドライバーが `neuron-dra-driver` namespace にデプロイされ、`neuron.aws.com` DeviceClass が自動作成される。
+
+## 検証 1: ResourceSlice とデバイス属性
+
+DRA ドライバーが公開するデバイス属性を確認する。
+
+```bash title="ターミナル"
+kubectl get resourceslice -o yaml
+```
+
+```yaml title="出力結果"
+spec:
+  devices:
+  - attributes:
+      deviceId:
+        int: 0
+      draDriverVersion:
+        version: 1.0.0
+      instanceType:
+        string: trn1.2xlarge
+      networkNodeLayer1:
+        string: nn-8fb8401ae3101871a
+      networkNodeLayer2:
+        string: nn-f5dc43656630d3d01
+      networkNodeLayer3:
+        string: nn-673c7189afc2107ea
+      neuronDriverVersion:
+        string: 2.26.5.0
+      resourceType:
+        string: neuron_device
+    name: neuron-device-0
+  driver: neuron.aws.com
+  nodeName: ip-10-1-1-200.ec2.internal
+```
+
+trn1.2xlarge は Neuron デバイスが1つなので `neuron-device-0` のみが公開されている。注目すべき属性は以下の通り。
+
+| 属性 | 用途 |
+| --- | --- |
+| `instanceType` | インスタンスタイプでフィルタリング |
+| `neuronDriverVersion` | 特定のドライバーバージョンを要求 |
+| `networkNodeLayer1-3` | トポロジー認識スケジューリング（[EC2 Instance Topology](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/how-ec2-instance-topology-works.html) に対応） |
+| `resourceType` | `neuron_device` と `neuron_node`（UltraServer）を区別 |
+| `deviceId` | 割り当てられたデバイスの識別 |
+| `draDriverVersion` | DRA ドライバーのバージョン確認 |
+
+ドキュメントでは trn1 の Non-UltraServer 属性として `topology_x`, `topology_y` 等も記載されているが、これらはインスタンス内のデバイスが2つ以上の場合にのみ公開される。trn1.2xlarge はデバイスが1つなので、今回の検証では出現しなかった。
+
+従来の Device Plugin ではこれらの情報はスケジューラーに見えなかった。DRA により、CEL 式でこれらの属性を直接参照できるようになる。
+
+## 検証 2: ResourceClaimTemplate によるデバイス割り当て
+
+### 基本的な割り当て
+
+ResourceClaimTemplate を作成し、Pod からデバイスを要求する。
+
+```yaml title="single-neuron-device.yaml"
+apiVersion: resource.k8s.io/v1
+kind: ResourceClaimTemplate
+metadata:
+  name: single-neuron-device
+spec:
+  spec:
+    devices:
+      requests:
+      - name: neurons
+        exactly:
+          deviceClassName: neuron.aws.com
+          allocationMode: ExactCount
+          count: 1
+          selectors:
+          - cel:
+              expression: >-
+                device.attributes['neuron.aws.com'].instanceType
+                == 'trn1.2xlarge'
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: neuron-dra-test-pod
+spec:
+  containers:
+  - name: test
+    image: public.ecr.aws/ubuntu/ubuntu:22.04
+    command: ["bash", "-c"]
+    args: ["ls -la /dev/neuron*; sleep 9999"]
+    resources:
+      claims:
+      - name: neurons
+  resourceClaims:
+  - name: neurons
+    resourceClaimTemplateName: single-neuron-device
+```
+
+従来の `resources.limits` ではなく `resources.claims` でテンプレートを参照する点が大きな違いだ。
+
+```text title="出力結果"
+$ kubectl apply -f single-neuron-device.yaml
+$ kubectl get pod neuron-dra-test-pod
+NAME                  READY   STATUS    RESTARTS   AGE
+neuron-dra-test-pod   1/1     Running   0          7s
+
+$ kubectl get resourceclaim
+NAME                                STATE                AGE
+neuron-dra-test-pod-neurons-c2p5z   allocated,reserved   8s
+
+$ kubectl exec neuron-dra-test-pod -- ls -la /dev/neuron0
+crw-rw-rw-. 1 root root 243, 0 Mar 21 11:43 /dev/neuron0
+```
+
+ResourceClaim が自動生成され、`neuron-device-0` が割り当てられた。Pod 内で `/dev/neuron0` にアクセスできる。
+
+### ドライバーバージョンによるフィルタリング
+
+CEL 式で複数の属性を組み合わせたフィルタリングも可能だ。前述の Pod マニフェストと同じ構造で、ResourceClaimTemplate の `selectors` 部分だけが異なる。
+
+```yaml title="neuron-with-driver-version.yaml（ResourceClaimTemplate 部分）"
+selectors:
+- cel:
+    expression: >-
+      device.attributes['neuron.aws.com'].instanceType
+      == 'trn1.2xlarge' &&
+      device.attributes['neuron.aws.com'].neuronDriverVersion
+      == '2.26.5.0'
+```
+
+この ResourceClaimTemplate を参照する Pod は正常にスケジュールされた。一方、存在しないドライバーバージョン（`9.99.99.0`）を指定した場合、Pod は `Pending` のまま以下のイベントが記録される。
+
+```text title="出力結果（存在しないバージョン指定時）"
+Warning  FailedScheduling  default-scheduler
+  0/1 nodes are available: 1 cannot allocate all claims.
+  still not schedulable, preemption: 0/1 nodes are available:
+  1 Preemption is not helpful for scheduling.
+```
+
+これは DRA の重要な特性だ。条件に合うデバイスがない場合、Pod はスケジュールされずに待機する。Device Plugin 方式ではデバイス数のみで割り当てが行われるため、このような属性レベルの不一致をスケジューリング段階で検出する手段がなかった。
+
+## 検証 3: Dynamic LNC 設定
+
+DRA のもう一つの特徴は、ResourceClaimTemplate 経由でデバイスの設定を動的に変更できることだ。ドキュメントでは trn2.48xlarge を対象とした LNC（Logical NeuronCore）の設定例が紹介されている。ここでは trn1.2xlarge で同じ設定を試し、インスタンスタイプによる制約を確認する。
+
+```yaml title="neuron-lnc-1.yaml（ResourceClaimTemplate 部分）"
+devices:
+  requests:
+  - name: neurons
+    exactly:
+      deviceClassName: neuron.aws.com
+      selectors:
+      - cel:
+          expression: >-
+            device.attributes['neuron.aws.com'].instanceType
+            == 'trn1.2xlarge'
+      allocationMode: All
+  config:
+  - requests: ["neurons"]
+    opaque:
+      driver: neuron.aws.com
+      parameters:
+        apiVersion: neuron.aws.com/v1
+        kind: NeuronConfig
+        logicalNeuronCore: 1
+```
+
+しかし、この設定を trn1.2xlarge で適用すると以下のエラーが発生する。
+
+```text title="出力結果（エラー）"
+Warning  FailedPrepareDynamicResources  kubelet
+  Failed to prepare dynamic resources:
+  error applying config: LNC value is not configurable
+  for instance type trn1.2xlarge
+```
+
+**trn1.2xlarge では LNC の動的設定がサポートされていない。** DRA ドライバーのログにも、`NeuronConfig` が渡されたことは記録されているが、インスタンスタイプの検証で拒否されている。
+
+```text title="DRA ドライバーログ"
+"Opaque device configs" configs=[{"Requests":["neurons"],
+  "Config":{"kind":"NeuronConfig","apiVersion":"neuron.aws.com/v1",
+  "logicalNeuronCore":1}}]
+```
+
+ドキュメントの LNC 設定例は trn2.48xlarge を前提としている。DRA ドライバーの実装がインスタンスタイプごとに LNC 設定の可否を制御しており、trn1 系は対象外だ。この制約はドキュメントに明記されていないので注意が必要だ。
+
+## 検証を踏まえた Device Plugin との比較
+
+実際に DRA を使ってみて、Device Plugin との違いが明確になった。同じワークロードのマニフェストを並べてみる。
+
+```yaml title="Device Plugin 方式"
+spec:
+  containers:
+  - name: training
+    resources:
+      limits:
+        aws.amazon.com/neuron: "1"
+      requests:
+        aws.amazon.com/neuron: "1"
+```
+
+```yaml title="DRA 方式"
+spec:
+  containers:
+  - name: training
+    resources:
+      claims:
+      - name: neurons
+  resourceClaims:
+  - name: neurons
+    resourceClaimTemplateName: single-neuron-device
+```
+
+| 観点 | Device Plugin | DRA |
+| --- | --- | --- |
+| デバイス指定 | 数量のみ | 属性ベース（CEL 式） |
+| トポロジー認識 | Scheduler Extension が必要 | `constraints` の `matchAttribute` で標準対応 ※ |
+| LNC 設定 | 起動テンプレートで固定 | ResourceClaimTemplate で動的（trn2 以上） |
+| 抽象化 | なし（ML エンジニアがデバイス数を指定） | テンプレート名で抽象化可能 |
+| 共存 | — | 同一ノードでは不可、クラスター内では可 |
+
+※ トポロジー認識は[ドキュメントの Connected Devices 例](https://awsdocs-neuron.readthedocs-hosted.com/en/latest/containers/neuron-dra.html#example-1-connected-neuron-devices)に基づく。今回の検証では trn1.2xlarge（デバイス1つ）のため未検証。
+
+DRA の最大のメリットは抽象化だ。検証 2 で見たように、インフラチームが `xl-trn2`（全16デバイス）、`l-trn2`（8デバイス）のようなわかりやすい名前の ResourceClaimTemplate を定義すれば、ML エンジニアはテンプレート名を指定するだけでよい。さらに、検証 2 のドライバーバージョンフィルタリングで確認したように、条件に合わないデバイスへの割り当てがスケジューリング段階で防がれるのも大きい。
+
+## まとめ
+
+- **属性ベースのフィルタリングが Kubernetes ネイティブに** — ドライバーバージョンやインスタンスタイプを CEL 式で指定でき、条件に合わないノードへのスケジュールを防げる。ノードラベルの手動管理が不要になる。
+- **LNC 動的設定は trn2 以上が必要** — trn1.2xlarge では `NeuronConfig` による LNC 設定が拒否される。ドキュメントの例は trn2.48xlarge 前提なので、インスタンスタイプごとの対応状況を確認すること。
+- **Device Plugin との共存はノード単位で排他** — 同一ノードで DRA と Device Plugin は共存できないが、クラスター内で異なるノードに分けることは可能。移行期間中はノードグループを分けて段階的に移行できる。
+- **ResourceClaimTemplate による関心の分離** — インフラチームがテンプレートを定義し、ML エンジニアはテンプレート名を参照するだけという運用が可能になる。これが DRA の最も実用的な価値だ。
+
+## クリーンアップ
+
+検証が終わったら課金を避けるためにリソースを削除する。
+
+```bash title="ターミナル（Helm と Kubernetes リソースの削除）"
+# DRA ドライバーのアンインストール
+helm uninstall neuron-helm-chart -n kube-system
+
+# テスト用リソースの削除
+kubectl delete resourceclaimtemplate --all
+kubectl delete pod --all --grace-period=0 --force
+```
+
+```bash title="ターミナル（EKS クラスターの削除）"
+# ノードグループ → クラスターの順に削除
+aws eks delete-nodegroup --cluster-name neuron-dra-test \
+  --nodegroup-name trn1-nodes --region us-east-1
+aws eks wait nodegroup-deleted --cluster-name neuron-dra-test \
+  --nodegroup-name trn1-nodes --region us-east-1
+
+aws eks delete-cluster --name neuron-dra-test --region us-east-1
+aws eks wait cluster-deleted --name neuron-dra-test --region us-east-1
+```
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">VPC と IAM ロールの削除</summary>
+
+```bash title="ターミナル"
+# ルートテーブルの関連付け解除と削除
+for assoc in $(aws ec2 describe-route-tables --route-table-ids $RT --region us-east-1 \
+  --query 'RouteTables[0].Associations[?!Main].RouteTableAssociationId' \
+  --output text); do
+  aws ec2 disassociate-route-table --association-id $assoc --region us-east-1
+done
+aws ec2 delete-route-table --route-table-id $RT --region us-east-1
+
+# EKS が自動作成した VPC エンドポイントを削除
+for vpce in $(aws ec2 describe-vpc-endpoints \
+  --filters "Name=vpc-id,Values=$VPC_ID" --region us-east-1 \
+  --query 'VpcEndpoints[].VpcEndpointId' --output text); do
+  aws ec2 delete-vpc-endpoints --vpc-endpoint-ids $vpce --region us-east-1
+done
+# VPC エンドポイント削除後、ENI の解放に 30〜60 秒かかる
+sleep 60
+
+# ENI が残っている場合は削除
+for eni in $(aws ec2 describe-network-interfaces \
+  --filters "Name=vpc-id,Values=$VPC_ID" --region us-east-1 \
+  --query 'NetworkInterfaces[].NetworkInterfaceId' --output text); do
+  aws ec2 delete-network-interface --network-interface-id $eni --region us-east-1
+done
+
+# セキュリティグループ（デフォルト以外）
+for sg in $(aws ec2 describe-security-groups \
+  --filters "Name=vpc-id,Values=$VPC_ID" --region us-east-1 \
+  --query 'SecurityGroups[?GroupName!=`default`].GroupId' --output text); do
+  aws ec2 delete-security-group --group-id $sg --region us-east-1
+done
+
+# サブネット・IGW・VPC
+aws ec2 delete-subnet --subnet-id $PUB_SUB_1B --region us-east-1
+aws ec2 delete-subnet --subnet-id $PUB_SUB_1F --region us-east-1
+aws ec2 detach-internet-gateway --internet-gateway-id $IGW \
+  --vpc-id $VPC_ID --region us-east-1
+aws ec2 delete-internet-gateway --internet-gateway-id $IGW --region us-east-1
+aws ec2 delete-vpc --vpc-id $VPC_ID --region us-east-1
+
+# IAM ロール
+aws iam detach-role-policy --role-name neuron-dra-cluster-role \
+  --policy-arn arn:aws:iam::aws:policy/AmazonEKSClusterPolicy
+aws iam delete-role --role-name neuron-dra-cluster-role
+
+for policy in AmazonEKSWorkerNodePolicy AmazonEKS_CNI_Policy \
+  AmazonEC2ContainerRegistryReadOnly AmazonSSMManagedInstanceCore; do
+  aws iam detach-role-policy --role-name neuron-dra-node-role \
+    --policy-arn "arn:aws:iam::aws:policy/$policy"
+done
+aws iam delete-role --role-name neuron-dra-node-role
+```
+
+</details>

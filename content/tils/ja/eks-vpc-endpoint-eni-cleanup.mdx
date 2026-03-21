@@ -1,0 +1,37 @@
+---
+title: "EKS クラスター削除後の VPC 削除は VPC エンドポイントの ENI 解放を待つ必要がある"
+description: "EKS クラスターを削除しても自動作成された VPC エンドポイントが残り、ENI が in-use のまま VPC 削除が DependencyViolation で失敗する。VPC エンドポイントを明示的に削除し、ENI 解放を待つ。"
+date: "2026-03-22"
+published: true
+tags: ["eks", "kubernetes", "vpc"]
+---
+
+EKS クラスターを削除した後、VPC を削除しようとしたら `DependencyViolation` で失敗した。
+
+```text title="出力結果"
+An error occurred (DependencyViolation) when calling the DeleteSubnet operation:
+The subnet 'subnet-xxx' has dependencies and cannot be deleted.
+```
+
+原因は EKS が自動作成した VPC エンドポイントだ。クラスター削除後もエンドポイントと紐づく ENI が `in-use` のまま残り、サブネットや VPC の削除をブロックする。VPC エンドポイントを明示的に削除し、ENI が `available` になるまで 30〜60 秒待つ必要がある。
+
+```bash title="ターミナル"
+# VPC エンドポイントを削除
+for vpce in $(aws ec2 describe-vpc-endpoints \
+  --filters "Name=vpc-id,Values=$VPC_ID" --region us-east-1 \
+  --query 'VpcEndpoints[].VpcEndpointId' --output text); do
+  aws ec2 delete-vpc-endpoints --vpc-endpoint-ids $vpce --region us-east-1
+done
+
+# ENI 解放を待つ（30〜60 秒）
+sleep 60
+
+# 残った ENI を削除してから VPC を削除
+for eni in $(aws ec2 describe-network-interfaces \
+  --filters "Name=vpc-id,Values=$VPC_ID" --region us-east-1 \
+  --query 'NetworkInterfaces[].NetworkInterfaceId' --output text); do
+  aws ec2 delete-network-interface --network-interface-id $eni --region us-east-1
+done
+```
+
+この後にセキュリティグループ → サブネット → IGW → VPC の順で削除すれば通る。[Neuron DRA の検証記事](/ja/blog/2026/03/22/neuron-eks-dra)のクリーンアップで遭遇した。
