@@ -1,0 +1,22 @@
+---
+title: "Ghostty SSH input issues are caused by missing terminfo on the remote host"
+description: "SSH from Ghostty to Ubuntu causes broken input because the remote host lacks xterm-ghostty terminfo. Setting shell-integration-features to ssh-terminfo,ssh-env fixes it."
+date: 2026-03-21
+published: true
+tags: ["ghostty", "ssh", "terminal"]
+---
+
+When I SSH'd into Ubuntu from Ghostty, backspace didn't work and cursor movement was broken. Turns out the remote host didn't have the `xterm-ghostty` terminfo installed. Ghostty sets `TERM=xterm-ghostty` by default, and without the matching terminfo on the remote side, terminal control sequences get misinterpreted.
+
+Adding this to the Ghostty config fixes it automatically on SSH:
+
+```text title="~/.config/ghostty/config"
+shell-integration-features = ssh-terminfo,ssh-env
+```
+
+Here's what each option does:
+
+- `ssh-terminfo` — Automatically installs the `xterm-ghostty` terminfo on the remote host during the first SSH connection
+- `ssh-env` — Falls back to `TERM=xterm-256color` if the terminfo installation fails
+
+With both set, hosts that accept the terminfo get native support, and the rest gracefully fall back to `xterm-256color`.

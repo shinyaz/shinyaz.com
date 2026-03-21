@@ -1,0 +1,22 @@
+---
+title: "Ghostty で SSH すると文字入力がおかしくなるのは terminfo が原因だった"
+description: "Ghostty から Ubuntu に SSH すると入力がおかしくなる。リモート側に xterm-ghostty の terminfo がないのが原因で、shell-integration-features に ssh-terminfo,ssh-env を設定すると解決する。"
+date: 2026-03-21
+published: true
+tags: ["ghostty", "ssh", "terminal"]
+---
+
+Ghostty から Ubuntu にSSHすると、バックスペースが効かなかったりカーソル移動がおかしくなったりした。原因はリモート側に `xterm-ghostty` の terminfo がインストールされていないことだった。Ghostty はデフォルトで `TERM=xterm-ghostty` をセットするが、リモート側がこの terminfo を知らないと端末制御シーケンスを正しく解釈できない。
+
+Ghostty の設定ファイルに以下を追加すると、SSH時に自動で対処してくれる。
+
+```text title="~/.config/ghostty/config"
+shell-integration-features = ssh-terminfo,ssh-env
+```
+
+それぞれの役割はこうだ。
+
+- `ssh-terminfo` — 初回SSH時にリモート側へ `xterm-ghostty` の terminfo を自動インストールする
+- `ssh-env` — terminfo のインストールに失敗した場合、`TERM=xterm-256color` に自動フォールバックする
+
+両方セットしておけば、terminfo が入るホストではネイティブに動作し、入らないホストでも `xterm-256color` で問題なく使える。
