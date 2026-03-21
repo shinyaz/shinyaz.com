@@ -33,14 +33,12 @@ For voice agents where latency matters, WebRTC's UDP-based transport has a clear
 ```mermaid
 graph LR
     Browser -->|WebRTC| KVS["KVS TURN Relay"]
-    KVS -->|TURN| ENI["ENI"]
+    KVS -->|TURN| ENI
     subgraph VPC["VPC (Private Subnet)"]
-        ENI --> Agent["Agent\n(Python / FastAPI)"]
-        Agent -->|Bidirectional\nStreaming| Nova["Nova Sonic"]
+        ENI --> AgentCore["AgentCore Runtime"]
+        AgentCore --> Agent["Agent\n(Python / FastAPI)"]
     end
-    subgraph AgentCore["AgentCore Runtime"]
-        VPC
-    end
+    Agent -->|Bidirectional\nStreaming| Nova["Nova Sonic\n(Bedrock)"]
 ```
 
 - **Browser client** — Captures microphone audio via WebRTC, plays agent responses
