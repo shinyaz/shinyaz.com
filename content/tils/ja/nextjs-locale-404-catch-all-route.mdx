@@ -1,0 +1,33 @@
+---
+title: "Next.js App Router の [locale] 配下で 404 ページを正しく表示するには catch-all ルートが必要"
+description: "Next.js App Router で /ja/存在しないページ にアクセスすると /en にリダイレクトされてしまう問題。[...slug] catch-all ルートの追加とルートの not-found.tsx の修正が両方必要だった。"
+date: "2026-03-21"
+published: true
+tags: ["nextjs", "i18n", "app-router"]
+---
+
+`/ja/存在しないページ` にアクセスすると、日本語の 404 ページではなく `/en` にリダイレクトされてしまう問題にハマった。
+
+原因は `app/not-found.tsx` で `redirect("/en")` していたこと（`defaultLocale` が `"en"`）。`[locale]` 配下にマッチしないパスがあると、`[locale]/not-found.tsx` ではなくルートの `not-found.tsx` が呼ばれてしまう。
+
+解決策は catch-all ルートの追加だ。
+
+```tsx title="src/app/[locale]/[...slug]/page.tsx"
+import { notFound } from "next/navigation";
+
+export default function CatchAllPage() {
+  notFound();
+}
+```
+
+これだけでは不十分で、ルートの `not-found.tsx` も `redirect()` ではなく 404 UI を表示するように変更する必要がある。Next.js App Router ではルートの `not-found.tsx` も呼ばれるケースがあるためだ。`not-found.tsx` 側では `headers()` からロケールを検出する。
+
+```tsx title="src/app/[locale]/not-found.tsx"
+const headersList = await headers();
+const pathname = headersList.get("x-pathname") ?? "";
+const referer = headersList.get("referer") ?? "";
+const candidate = getLocaleFromUrl(pathname) || getLocaleFromUrl(referer) || defaultLocale;
+const locale = isValidLocale(candidate) ? candidate : defaultLocale;
+```
+
+`x-pathname`（ミドルウェアで設定）を優先し、取れなければ `referer` にフォールバックする。Vercel の公式ガイド「[How to internationalise error pages in Next.js App Router](https://vercel.com/kb/guide/how-to-internationalise-error-pages-in-next-js-app-router)」にも同じパターンが記載されている。

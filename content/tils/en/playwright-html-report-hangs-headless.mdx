@@ -1,0 +1,21 @@
+---
+title: "Playwright HTML report auto-open hangs in headless environments"
+description: "Playwright E2E tests hang after completion in Codespaces or CI because the HTML reporter tries to open a browser. Setting open: never in playwright.config.ts fixes it."
+date: "2026-03-21"
+published: true
+tags: ["playwright", "testing", "ci"]
+---
+
+Running `npx playwright test` in Codespaces hung after all tests passed. It was trying to open the HTML report in a browser that doesn't exist.
+
+The `reporter: "html"` config auto-opens the report after tests. In headless environments, this blocks the process.
+
+```ts title="playwright.config.ts"
+// Hangs in headless environments
+reporter: "html",
+
+// Fix: disable auto-open
+reporter: [["html", { open: "never" }]],
+```
+
+You can also use the `PLAYWRIGHT_HTML_OPEN=never` environment variable, but baking it into the config is more reliable. View the report anytime with `npx playwright show-report`.

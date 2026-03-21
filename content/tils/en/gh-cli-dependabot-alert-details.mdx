@@ -1,0 +1,27 @@
+---
+title: "Check Dependabot alert details from the terminal with gh CLI"
+description: "Use gh api to get Dependabot vulnerability alert details — package name, severity, and fix version — without leaving the terminal."
+date: "2026-03-21"
+published: true
+tags: ["github", "cli", "security"]
+---
+
+Got a Dependabot vulnerability warning on `git push` and wanted to check the details without opening a browser.
+
+`gh api` can fetch Dependabot alert info directly:
+
+```bash title="Terminal"
+gh api /repos/{owner}/{repo}/dependabot/alerts/19 \
+  --jq '{severity: .security_advisory.severity, package: .security_vulnerability.package.name, summary: .security_advisory.summary, fixed_in: .security_vulnerability.first_patched_version.identifier}'
+```
+
+```json title="Output"
+{
+  "severity": "high",
+  "package": "flatted",
+  "summary": "Prototype Pollution via parse() in NodeJS flatted",
+  "fixed_in": "3.4.2"
+}
+```
+
+Package name, severity, and fix version in one shot. The `--jq` filter makes it easy to integrate into CI scripts too.

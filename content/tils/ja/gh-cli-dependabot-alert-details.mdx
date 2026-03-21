@@ -1,0 +1,27 @@
+---
+title: "gh CLI で Dependabot アラートの詳細を確認する"
+description: "gh api コマンドで Dependabot の脆弱性アラートのパッケージ名、深刻度、修正バージョンをターミナルから一発で確認できる。"
+date: "2026-03-21"
+published: true
+tags: ["github", "cli", "security"]
+---
+
+`git push` したときに Dependabot の脆弱性アラートが表示されたが、ブラウザを開かずにターミナルから詳細を確認したかった。
+
+`gh api` で Dependabot アラートの情報を取得できる。
+
+```bash title="ターミナル"
+gh api /repos/{owner}/{repo}/dependabot/alerts/19 \
+  --jq '{severity: .security_advisory.severity, package: .security_vulnerability.package.name, summary: .security_advisory.summary, fixed_in: .security_vulnerability.first_patched_version.identifier}'
+```
+
+```json title="出力結果"
+{
+  "severity": "high",
+  "package": "flatted",
+  "summary": "Prototype Pollution via parse() in NodeJS flatted",
+  "fixed_in": "3.4.2"
+}
+```
+
+パッケージ名、深刻度、修正バージョンが一発で分かる。`--jq` でフィルタすれば必要な情報だけ取れるので、CI スクリプトにも組み込みやすい。

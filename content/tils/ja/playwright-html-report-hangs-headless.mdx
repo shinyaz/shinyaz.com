@@ -1,0 +1,21 @@
+---
+title: "Playwright の HTML レポート自動表示はヘッドレス環境でハングする"
+description: "Codespaces や CI で Playwright の E2E テストが完了後にハングする原因は HTML レポートの自動オープン。playwright.config.ts で open: never を設定すれば解決する。"
+date: "2026-03-21"
+published: true
+tags: ["playwright", "testing", "ci"]
+---
+
+Codespaces で `npx playwright test` を実行したら、テスト完了後にプロセスがハングした。ブラウザで HTML レポートを開こうとして止まっていた。
+
+`playwright.config.ts` で `reporter` を `"html"` に設定していると、テスト後に自動でブラウザを開こうとする。ヘッドレス環境ではこれが失敗してハングする。
+
+```ts title="playwright.config.ts"
+// NG: ヘッドレス環境でハングする
+reporter: "html",
+
+// OK: 自動オープンを無効化
+reporter: [["html", { open: "never" }]],
+```
+
+環境変数 `PLAYWRIGHT_HTML_OPEN=never` でも回避できるが、config に書いておく方が確実だ。レポートを見たいときは `npx playwright show-report` で明示的に開ける。
