@@ -10,7 +10,7 @@ tags: ["aws", "eks", "kubernetes", "cloudwatch", "devops"]
 
 ## はじめに
 
-[前回の記事](/ja/post/eks-auto-mode-cluster-setup)で、EKS Auto Mode を使ったクラスター構築を紹介した。Auto Mode はノード管理を EKS に委譲できる便利な機能だが、「裏側で何が起きているかわからない」という不安もある。
+[前回の記事](/ja/blog/2026/03/18/eks-auto-mode-cluster-setup)で、EKS Auto Mode を使ったクラスター構築を紹介した。Auto Mode はノード管理を EKS に委譲できる便利な機能だが、「裏側で何が起きているかわからない」という不安もある。
 
 [2026年2月のアップデート](https://aws.amazon.com/jp/about-aws/whats-new/2026/02/amazon-eks-auto-mode-enhanced-logging/)で、Auto Mode のマネージドコンポーネントから CloudWatch Logs へのログ配信が可能になった。これにより、Karpenter のスケジューリング判断や VPC CNI の IP 割当など、Auto Mode の内部動作をリアルタイムで追跡できる。この記事では、実際にログ配信を設定し、Logs Insights でスケールアップ・スケールダウンの挙動を分析した結果を共有する。
 

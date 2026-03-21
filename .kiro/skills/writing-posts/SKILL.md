@@ -9,11 +9,13 @@ Blog post writing guide: $ARGUMENTS
 
 - **Title** — Include tech name, lead with outcome, remove filler words
 - **Description** — What it does + unique insight, 120-200 chars
-- **Opening** — Why the reader should care in 3 sentences. Use `## 課題` or `## はじめに`
+- **Opening** — Why the reader should care in 3 sentences. Use `## 課題` or `## はじめに` for Japanese, `## The Problem` or `## Introduction` for English
 - **Anchor Insight** — ONE core insight per post. No common thread → split posts
 - **Body** — Descriptive `##` headings, choose structure by article type
 - **Content** — Include gotchas, design decisions, before/after. Omit file dumps, boilerplate
-- **Code blocks** — Target 3-5. Over 7 → consolidate. Always specify a language (e.g. `tsx`, `bash`, `text`); bare ` ``` ` breaks `rehype-pretty-code`. Add `title=` to distinguish code types: language name for source code (`title="Python"`, `title="TypeScript"` etc.), `title="ターミナル"` / `title="Terminal"` for shell commands, `title="出力結果"` / `title="Output"` for execution results. Use file names when specific (`title="main.py"`) or add context (`title="ターミナル（事前準備）"`)
+- **Code blocks** — Target 3-5. Over 7 → consolidate. Always specify a language (e.g. `tsx`, `bash`, `text`); bare ` ``` ` breaks `rehype-pretty-code`. Add `title=` to distinguish code types: language name for source code (`title="Python"`, `title="TypeScript"` etc.), `title="Terminal"` for shell commands, `title="Output"` for execution results. Use file names when specific (`title="main.py"`) or add context (`title="Terminal (setup)"`)
+- **Collapsible sections** — Use `<details>` for reproducibility content that would interrupt reading flow: full source code, deploy/setup steps, IAM/infra scaffolding, raw data, cleanup commands. Keep the narrative in the main body, put "how to reproduce" in collapsible blocks. See [examples](references/EXAMPLES.md#collapsible-sections) for format
+- **Skip links** — When setup/deploy sections are long, add a skip link pointing to the results section (e.g. "Skip to [Results](#results) if you only want the findings")
 - **Closing** — Transferable insights (not action listing). Bold phrase + dash + explanation, 3-4 items
 - **Internal links** — Posts: `/{locale}/blog/{YYYY}/{MM}/{DD}/{slug}`, TILs: `/{locale}/til/{YYYY}/{MM}/{DD}/{slug}`. NEVER use `/{locale}/posts/{slug}` or `/{locale}/tils/{slug}`. Get dates from the target's frontmatter `date` field
 - **Length** — Japanese: 800-1500 words, English: 600-1200 words
@@ -21,11 +23,12 @@ Blog post writing guide: $ARGUMENTS
 ## Article Types
 
 - **Build log** / **Problem→Solution** / **Deep dive** / **Comparison** / **Migration** / **Lessons learned**
+- **Hands-on verification** — AWS new feature / service verification. Structure: Introduction (What's New link + official docs link) → Prerequisites → Setup (collapsible) → Verification results → Summary → Cleanup. See [verification article template](references/EXAMPLES.md#verification-article-template)
 
 ## Voice & Tone
 
 - First person, share opinions, conversational but precise
-- **Japanese:** だ/である体（not ですます体）
+- **Japanese:** da/dearu style (not desu/masu style)
 - **Bilingual:** Parallel but not literal translations. Same info, natural expression per language
 
 ## New Post Creation Workflow
