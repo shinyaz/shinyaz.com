@@ -14,6 +14,16 @@ interface MobileNavProps {
 
 export function MobileNav({ locale, t }: MobileNavProps) {
   const [isOpen, setIsOpen] = useState(false);
+  const [visible, setVisible] = useState(false);
+
+  // Animate in after portal mount
+  useEffect(() => {
+    if (isOpen) {
+      requestAnimationFrame(() => setVisible(true));
+    } else {
+      setVisible(false);
+    }
+  }, [isOpen]);
 
   // Lock body scroll when open
   useEffect(() => {
@@ -46,7 +56,6 @@ export function MobileNav({ locale, t }: MobileNavProps) {
     { href: `/${locale}/uses`, label: t.nav.uses },
     { href: `/${locale}/now`, label: t.nav.now },
     { href: `/${locale}/about`, label: t.nav.about },
-    { href: `/${locale}/search`, label: t.search.title },
   ];
 
   return (
@@ -96,19 +105,19 @@ export function MobileNav({ locale, t }: MobileNavProps) {
           <>
             {/* Overlay */}
             <div
-              className="fixed top-14 right-0 bottom-0 left-0 z-40 bg-black/50"
+              className={`fixed top-14 right-0 bottom-0 left-0 z-40 bg-black/25 backdrop-blur-[2px] transition-opacity duration-200 ${visible ? "opacity-100" : "opacity-0"}`}
               onClick={() => setIsOpen(false)}
               aria-hidden="true"
             />
 
             {/* Drawer */}
-            <nav className="fixed top-14 right-0 bottom-0 z-50 w-3/4 max-w-xs border-l border-border bg-background p-6 shadow-xl motion-reduce:transition-none">
+            <nav className={`fixed top-14 right-0 bottom-0 z-50 w-2/3 max-w-[260px] border-l border-border bg-gradient-to-b from-background/95 to-background backdrop-blur-md p-6 shadow-2xl transition-transform duration-200 ease-out motion-reduce:transition-none ${visible ? "translate-x-0" : "translate-x-full"}`}>
               <ul className="flex flex-col gap-4">
                 {navLinks.map((link) => (
                   <li key={link.href}>
                     <Link
                       href={link.href}
-                      className="block text-base text-muted-foreground hover:text-foreground transition-colors"
+                      className="block text-[15px] text-muted-foreground hover:text-foreground transition-colors"
                       onClick={() => setIsOpen(false)}
                     >
                       {link.label}
@@ -117,6 +126,27 @@ export function MobileNav({ locale, t }: MobileNavProps) {
                 ))}
               </ul>
               <div className="mt-6 flex items-center gap-3 border-t border-border pt-6">
+                <Link
+                  href={`/${locale}/search`}
+                  className="text-muted-foreground hover:text-foreground transition-colors"
+                  aria-label={t.search.label}
+                  onClick={() => setIsOpen(false)}
+                >
+                  <svg
+                    xmlns="http://www.w3.org/2000/svg"
+                    width="16"
+                    height="16"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="2"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  >
+                    <circle cx="11" cy="11" r="8" />
+                    <path d="m21 21-4.3-4.3" />
+                  </svg>
+                </Link>
                 <LanguageSwitcher locale={locale} />
                 <ThemeToggle />
               </div>
