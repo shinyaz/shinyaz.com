@@ -1,0 +1,192 @@
+---
+title: "Strands Agents SDK 入門 — MCP で外部ツールを接続する"
+description: "Strands Agents SDK に MCP (Model Context Protocol) サーバーを接続し、外部ツールでエージェントを拡張する。AWS ドキュメント検索 MCP サーバーを実際に動かし、自作ツールとの併用パターンをコードとメトリクスで確認する。"
+date: 2026-03-24
+published: false
+featured: false
+categories: [ai-agents]
+tags: ["strands-agents", "bedrock", "python", "ai-agents", "mcp"]
+series: "strands-agents-intro"
+seriesOrder: 3
+---
+
+## はじめに
+
+[前回の記事](/ja/blog/2026/03/24/strands-agents-custom-tools)ではカスタムツールの設計パターンを学んだ。`@tool` デコレータで自作ツールを作れるようになったが、すべてのツールを自分で実装するのは現実的ではない。
+
+ここで登場するのが [MCP (Model Context Protocol)](https://modelcontextprotocol.io) だ。MCP は、外部のツールサーバーとエージェントを接続するためのオープンプロトコルである。Strands Agents SDK は MCP をネイティブサポートしており、数行のコードで外部 MCP サーバーのツールをエージェントに追加できる。
+
+この記事では以下を試す。
+
+1. **MCP サーバーへの接続** — AWS ドキュメント検索 MCP サーバーを使う
+2. **MCP ツールと自作ツールの併用** — 外部ツールと `@tool` を組み合わせる
+
+公式ドキュメントは [Model Context Protocol (MCP) Tools](https://strandsagents.com/docs/user-guide/concepts/tools/mcp-tools/) を参照。
+
+## MCP とは
+
+MCP (Model Context Protocol) は、LLM アプリケーションに外部のコンテキストやツールを提供するためのオープンプロトコルだ。仕組みはシンプルで、MCP サーバーがツールを公開し、MCP クライアント（この場合は Strands）がそのツールを取得してエージェントに渡す。
+
+```text title="MCP の仕組み"
+エージェント → MCPClient → MCP サーバー
+                              ↓
+                         ツール一覧を返す
+                              ↓
+エージェント ← ツールとして登録 ← MCPClient
+```
+
+MCP サーバーは様々なコミュニティやベンダーが公開しており、AWS ドキュメント検索、GitHub、データベース操作など多数のサーバーが利用可能だ。
+
+## セットアップ
+
+[前回の記事](/ja/blog/2026/03/24/strands-agents-custom-tools)の環境をそのまま使う。追加で [uv](https://github.com/astral-sh/uv) が必要だ（MCP サーバーの実行に `uvx` コマンドを使う）。
+
+```bash title="Terminal"
+# uv がインストールされていない場合
+curl -LsSf https://astral.sh/uv/install.sh | sh
+```
+
+`mcp` パッケージは `strands-agents` の依存関係として既にインストールされている。
+
+以降の例ではすべて同じモデル設定を使う。各例は独立した `.py` ファイルとして実行できる。共通設定を先頭に書き、その下に各例のコードを追加する形だ。
+
+```python title="Python (共通設定)"
+from strands import Agent, tool
+from strands.models import BedrockModel
+from strands.tools.mcp import MCPClient
+from mcp import stdio_client, StdioServerParameters
+
+bedrock_model = BedrockModel(
+    model_id="us.anthropic.claude-sonnet-4-20250514-v1:0",
+    region_name="us-east-1",
+)
+```
+
+## MCP サーバーに接続する
+
+AWS が公開している [AWS Documentation MCP Server](https://github.com/awslabs/mcp) を使って、エージェントに AWS ドキュメント検索機能を追加する。
+
+```python title="Python"
+mcp_client = MCPClient(lambda: stdio_client(
+    StdioServerParameters(
+        command="uvx",
+        args=["awslabs.aws-documentation-mcp-server@latest"],
+        env={"FASTMCP_LOG_LEVEL": "ERROR"},
+    )
+))
+
+with mcp_client:
+    tools = mcp_client.list_tools_sync()
+    print(f"Available MCP tools: {[t.tool_name for t in tools]}")
+
+    agent = Agent(model=bedrock_model, tools=tools)
+    result = agent("What is Amazon Bedrock? Answer in 2 sentences.")
+```
+
+コードを分解して見ていこう。
+
+**MCPClient の作成**: `MCPClient` に MCP サーバーの起動方法を渡す。`stdio_client` は標準入出力（stdio）でサーバーと通信するトランスポートだ。`uvx` コマンドで MCP サーバーを起動している。
+
+**コンテキストマネージャ**: `with mcp_client:` で MCP サーバーとの接続を管理する。`with` ブロックを抜けると接続が自動的に閉じられる。
+
+**ツールの取得と登録**: `list_tools_sync()` で MCP サーバーが公開しているツール一覧を取得し、そのまま `Agent` の `tools` に渡す。
+
+### 実行結果
+
+```bash title="Terminal"
+python -u mcp_basic.py
+```
+
+```text title="Output"
+Available MCP tools: ['read_documentation', 'read_sections', 'search_documentation', 'recommend']
+```
+
+MCP サーバーから 4 つのツールが取得できた。自分でツールを実装していないのに、エージェントが AWS ドキュメントを検索・閲覧できるようになった。
+
+```text title="Output (エージェントの応答)"
+Tool #1: search_documentation
+Tool #2: read_documentation
+
+Amazon Bedrock is a fully managed service that provides secure, enterprise-grade
+access to high-performing foundation models from leading AI companies, enabling
+you to build and scale generative AI applications. The service supports 100+
+foundation models from industry-leading providers including Amazon, Anthropic,
+DeepSeek, Moonshot AI, MiniMax, and OpenAI, offering multiple API options for
+integration.
+```
+
+```text title="Output (メトリクス)"
+Cycles: 3
+Tools used: ['search_documentation', 'read_documentation']
+```
+
+エージェントは `search_documentation` でドキュメントを検索し、`read_documentation` で詳細を読み取り、3 サイクルで回答を生成した。前回学んだマルチステップ動作と同じパターンだ。
+
+## MCP ツールと自作ツールを併用する
+
+MCP ツールと `@tool` で作った自作ツールは同じ `tools` リストに混在させることができる。これが Strands の MCP 統合の最大の強みだ。
+
+AWS ドキュメントを検索する MCP ツールに、自作の `word_count` ツールを追加してみる。
+
+```python title="Python"
+@tool
+def word_count(text: str) -> int:
+    """Count the number of words in a text.
+
+    Args:
+        text: The text to count words in
+
+    Returns:
+        int: The number of words
+    """
+    return len(text.split())
+
+mcp_client = MCPClient(lambda: stdio_client(
+    StdioServerParameters(
+        command="uvx",
+        args=["awslabs.aws-documentation-mcp-server@latest"],
+        env={"FASTMCP_LOG_LEVEL": "ERROR"},
+    )
+))
+
+with mcp_client:
+    mcp_tools = mcp_client.list_tools_sync()
+    agent = Agent(model=bedrock_model, tools=mcp_tools + [word_count])
+    result = agent(
+        "Search AWS documentation for 'What is Amazon S3?' "
+        "and count the words in the answer you give me."
+    )
+```
+
+ポイントは `tools=mcp_tools + [word_count]` だ。MCP サーバーから取得したツールリストに、自作の `word_count` を追加しているだけ。LLM はすべてのツールを同列に扱い、必要に応じて使い分ける。
+
+### 実行結果
+
+```text title="Output"
+Tool #1: search_documentation
+Tool #2: read_sections
+Tool #3: read_documentation
+Tool #4: word_count
+
+The answer I provided contains 404 words explaining what Amazon S3 is, covering
+its core functionality as an object storage service, how it works with buckets
+and objects, the different types of buckets available, and its key features
+including storage classes, management capabilities, security, data processing,
+analytics, and consistency guarantees.
+```
+
+```text title="Output (メトリクス)"
+Cycles: 5
+Tools used: ['search_documentation', 'read_sections', 'read_documentation', 'word_count']
+```
+
+5 サイクルで 4 つのツールを使った。MCP ツール 3 つ（`search_documentation` → `read_sections` → `read_documentation`）で AWS ドキュメントから情報を収集し、最後に自作の `word_count` で単語数をカウントしている。
+
+LLM は MCP ツールと自作ツールの区別を意識していない。docstring を読んで「このツールは何ができるか」を判断し、最適な順序で呼び出している。
+
+## まとめ
+
+- **MCP で外部ツールを即座に追加できる** — `MCPClient` + `with` ブロックで MCP サーバーに接続し、`list_tools_sync()` でツールを取得するだけ。自分でツールを実装する必要がない。
+- **MCP ツールと自作ツールは混在できる** — `tools=mcp_tools + [my_tool]` で同じリストに入れるだけ。LLM はすべてのツールを同列に扱い、docstring を読んで自律的に使い分ける。
+- **コンテキストマネージャで接続を管理する** — `with mcp_client:` を使い、ブロック内でエージェントを実行する。ブロックを抜けると接続が自動的に閉じられる。
+- **MCP サーバーのエコシステムを活用する** — AWS ドキュメント検索以外にも、[多数の MCP サーバー](https://github.com/modelcontextprotocol/servers)が公開されている。必要な機能を持つサーバーを見つけて接続するだけでエージェントを拡張できる。

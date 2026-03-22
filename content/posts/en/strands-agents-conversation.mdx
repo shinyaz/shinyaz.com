@@ -1,0 +1,158 @@
+---
+title: "Strands Agents SDK Guide — Conversation Memory and Context Management"
+description: "Explore multi-turn conversations and SlidingWindowConversationManager in Strands Agents SDK. See how agents remember past exchanges and what happens when the context window fills up — verified with real code."
+date: 2026-03-24
+published: false
+featured: false
+categories: [ai-agents]
+tags: ["strands-agents", "bedrock", "python", "ai-agents", "conversation-management"]
+series: "strands-agents-intro"
+seriesOrder: 4
+---
+
+## Introduction
+
+In the [previous articles](/en/blog/2026/03/24/strands-agents-mcp-tools), we extended what agents can do with custom tools and MCP. But every example so far was a single-shot call. Practical agents need the ability to carry on a conversation.
+
+This article covers:
+
+1. **Multi-turn conversations** — calling the same agent multiple times and confirming it remembers
+2. **SlidingWindowConversationManager** — managing the context window and observing what happens when old messages are dropped
+3. **Inspecting conversation history** — looking inside `agent.messages`
+
+See the official docs at [State Management](https://strandsagents.com/docs/user-guide/concepts/agents/state/) and [Conversation Management](https://strandsagents.com/docs/user-guide/concepts/agents/conversation-management/) for the full reference.
+
+## How Conversations Are Remembered
+
+Strands agents maintain conversation history in `agent.messages`, a list that grows with each call. Every time you call `agent("question")`, the user message and assistant response are appended. On the next call, this entire history is passed to the model, so the agent "remembers" past exchanges.
+
+```text title="Conversation history flow"
+agent("My name is Taro")  → messages: [user, assistant]                    (2)
+agent("What's my name?")  → messages: [user, assistant, user, assistant]   (4)
+```
+
+## Setup
+
+Use the same environment from the [previous article](/en/blog/2026/03/24/strands-agents-mcp-tools).
+
+```python title="Python (shared config)"
+from strands import Agent
+from strands.models import BedrockModel
+from strands.agent.conversation_manager import SlidingWindowConversationManager
+
+bedrock_model = BedrockModel(
+    model_id="us.anthropic.claude-sonnet-4-20250514-v1:0",
+    region_name="us-east-1",
+)
+```
+
+## Multi-Turn Conversations — Confirming Memory
+
+Call the same agent instance twice and check whether it remembers information from the first call.
+
+```python title="Python"
+agent = Agent(model=bedrock_model, callback_handler=None)
+
+result1 = agent("My name is Taro. Remember it.")
+print(f"Messages: {len(agent.messages)}")  # 2
+
+result2 = agent("What is my name?")
+print(f"Messages: {len(agent.messages)}")  # 4
+```
+
+`callback_handler=None` disables streaming output to the console. Results are accessed via `result.message`.
+
+### Execution Results
+
+```text title="Output"
+Turn 1: Got it, Taro! I'll remember your name for our conversation. Nice to meet you!
+Messages in history: 2
+
+Turn 2: Your name is Taro!
+Messages in history: 4
+```
+
+After the first call, `messages` has 2 entries (user + assistant). After the second, 4 entries (user + assistant × 2). The agent correctly answered "Your name is Taro!" on the second call, confirming it remembered the first exchange.
+
+This is the basics of multi-turn conversation in Strands. No special configuration needed — just call the same agent instance repeatedly.
+
+## SlidingWindowConversationManager — Managing Context
+
+As conversations grow, `messages` can exceed the model's context window (the maximum tokens it can process). The `SlidingWindowConversationManager` prevents this.
+
+It's the default conversation manager in Strands, keeping only the most recent N messages and automatically dropping older ones.
+
+Let's set `window_size=4` and intentionally observe old information being lost.
+
+```python title="Python"
+agent = Agent(
+    model=bedrock_model,
+    conversation_manager=SlidingWindowConversationManager(window_size=4),
+    callback_handler=None,
+)
+
+agent("My favorite color is blue.")
+print(f"After turn 1: {len(agent.messages)} messages")  # 2
+
+agent("My favorite food is sushi.")
+print(f"After turn 2: {len(agent.messages)} messages")  # 4
+
+agent("My favorite language is Python.")
+print(f"After turn 3: {len(agent.messages)} messages")  # 4 (window applied)
+
+result = agent("What is my favorite color?")
+print(f"After turn 4: {len(agent.messages)} messages")  # 4
+```
+
+### Execution Results
+
+```text title="Output"
+After turn 1: 2 messages
+After turn 2: 4 messages
+After turn 3: 4 messages
+After turn 4: 4 messages
+
+Answer: I don't know what your favorite color is - you haven't mentioned it yet!
+You've told me about your favorite food (sushi) and favorite language (Python),
+but not your favorite color. What is it?
+```
+
+From turn 3 onward, `messages` stays fixed at 4. With `window_size=4`, only 4 messages (user + assistant × 2 turns) are retained.
+
+The "favorite color is blue" from turn 1 was pushed out of the window, so the agent answered "I don't know what your favorite color is." Meanwhile, "sushi" (turn 2) and "Python" (turn 3) remain in the window and are remembered.
+
+This is how the sliding window works. In production, the default `window_size=40` is used, but it's important to understand that old information can be lost in long conversations.
+
+## Inspecting Conversation History
+
+Let's look inside `agent.messages`.
+
+```python title="Python"
+agent = Agent(model=bedrock_model, callback_handler=None)
+agent("Hello! I'm learning Strands Agents SDK.")
+agent("What did I just say?")
+
+for i, msg in enumerate(agent.messages):
+    role = msg['role']
+    text = msg['content'][0].get('text', '')[:60]
+    print(f"  [{i}] {role:10s}: {text}")
+```
+
+### Execution Results
+
+```text title="Output"
+Total messages: 4
+  [0] user      : Hello! I'm learning Strands Agents SDK.
+  [1] assistant : Hello! I'd be happy to help you learn the Strands Agents SDK
+  [2] user      : What did I just say?
+  [3] assistant : You said "Hello! I'm learning Strands Agents SDK."
+```
+
+`messages` is a list of dicts with `role` (`user` or `assistant`) and `content`. User inputs and assistant responses alternate. When tools are used, tool call and tool result messages are also included.
+
+## Summary
+
+- **Just call the same instance to continue a conversation** — `agent("q1")` → `agent("q2")` and the agent remembers past exchanges. No special configuration needed.
+- **SlidingWindowConversationManager auto-drops old messages** — The default conversation manager keeps `window_size` messages and drops older ones, preventing context window overflow.
+- **Information outside the window is forgotten** — Messages pushed out of the sliding window aren't passed to the model, so the agent "forgets" them. For long-term retention, consider `SummarizingConversationManager` or session management.
+- **Inspect history with `agent.messages`** — Useful for debugging. Recorded as an alternating list of user/assistant messages.

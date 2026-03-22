@@ -1,0 +1,158 @@
+---
+title: "Strands Agents SDK 入門 — 会話の記憶とコンテキスト管理"
+description: "Strands Agents SDK のマルチターン会話と SlidingWindowConversationManager を実際に動かし、エージェントが会話を記憶する仕組みとコンテキストウィンドウの管理方法をコードで確認する。"
+date: 2026-03-24
+published: false
+featured: false
+categories: [ai-agents]
+tags: ["strands-agents", "bedrock", "python", "ai-agents", "conversation-management"]
+series: "strands-agents-intro"
+seriesOrder: 4
+---
+
+## はじめに
+
+[前回までの記事](/ja/blog/2026/03/24/strands-agents-mcp-tools)では、カスタムツールや MCP でエージェントの「できること」を拡張してきた。しかし、これまでの例はすべて 1 回きりの呼び出しだった。実用的なエージェントには「会話を続ける」能力が必要だ。
+
+この記事では以下を試す。
+
+1. **マルチターン会話** — 同じエージェントに複数回話しかけて、記憶が維持されることを確認する
+2. **SlidingWindowConversationManager** — コンテキストウィンドウの管理と、古いメッセージが消える挙動を確認する
+3. **会話履歴の中身** — `agent.messages` で何が記録されているかを確認する
+
+公式ドキュメントは [State Management](https://strandsagents.com/docs/user-guide/concepts/agents/state/) と [Conversation Management](https://strandsagents.com/docs/user-guide/concepts/agents/conversation-management/) を参照。
+
+## 会話はどう記憶されるのか
+
+Strands のエージェントは、`agent.messages` というリストに会話履歴を保持している。`agent("質問")` を呼ぶたびに、ユーザーメッセージとアシスタントの応答がこのリストに追加される。次の呼び出し時にはこの履歴がすべてモデルに渡されるため、エージェントは過去の会話を「記憶」できる。
+
+```text title="会話履歴の流れ"
+agent("名前は太郎です")  → messages: [user, assistant]        (2件)
+agent("私の名前は？")    → messages: [user, assistant, user, assistant]  (4件)
+```
+
+## セットアップ
+
+[前回の記事](/ja/blog/2026/03/24/strands-agents-mcp-tools)の環境をそのまま使う。
+
+```python title="Python (共通設定)"
+from strands import Agent
+from strands.models import BedrockModel
+from strands.agent.conversation_manager import SlidingWindowConversationManager
+
+bedrock_model = BedrockModel(
+    model_id="us.anthropic.claude-sonnet-4-20250514-v1:0",
+    region_name="us-east-1",
+)
+```
+
+## マルチターン会話 — 記憶の確認
+
+同じエージェントインスタンスに 2 回話しかけて、1 回目の情報を 2 回目で覚えているか確認する。
+
+```python title="Python"
+agent = Agent(model=bedrock_model, callback_handler=None)
+
+result1 = agent("My name is Taro. Remember it.")
+print(f"Messages: {len(agent.messages)}")  # 2
+
+result2 = agent("What is my name?")
+print(f"Messages: {len(agent.messages)}")  # 4
+```
+
+`callback_handler=None` はコンソールへのストリーミング出力を無効にする設定だ。結果は `result.message` から取得する。
+
+### 実行結果
+
+```text title="Output"
+Turn 1: Got it, Taro! I'll remember your name for our conversation. Nice to meet you!
+Messages in history: 2
+
+Turn 2: Your name is Taro!
+Messages in history: 4
+```
+
+1 回目の呼び出し後に `messages` が 2 件（user + assistant）、2 回目の後に 4 件（user + assistant × 2）になっている。2 回目の呼び出しで「Your name is Taro!」と正しく回答しており、1 回目の情報が記憶されていることが分かる。
+
+これが Strands のマルチターン会話の基本だ。特別な設定は不要で、同じエージェントインスタンスに繰り返し話しかけるだけで会話が継続する。
+
+## SlidingWindowConversationManager — コンテキストの管理
+
+会話が長くなると、`messages` が際限なく増えてモデルのコンテキストウィンドウ（処理できるトークンの上限）を超えてしまう。これを防ぐのが `SlidingWindowConversationManager` だ。
+
+Strands のデフォルトの会話マネージャーであり、直近 N 件のメッセージだけを保持し、古いメッセージを自動的に削除する。
+
+`window_size=4` に設定して、意図的に古い情報が消える様子を確認する。
+
+```python title="Python"
+agent = Agent(
+    model=bedrock_model,
+    conversation_manager=SlidingWindowConversationManager(window_size=4),
+    callback_handler=None,
+)
+
+agent("My favorite color is blue.")
+print(f"After turn 1: {len(agent.messages)} messages")  # 2
+
+agent("My favorite food is sushi.")
+print(f"After turn 2: {len(agent.messages)} messages")  # 4
+
+agent("My favorite language is Python.")
+print(f"After turn 3: {len(agent.messages)} messages")  # 4 (window applied)
+
+result = agent("What is my favorite color?")
+print(f"After turn 4: {len(agent.messages)} messages")  # 4
+```
+
+### 実行結果
+
+```text title="Output"
+After turn 1: 2 messages
+After turn 2: 4 messages
+After turn 3: 4 messages
+After turn 4: 4 messages
+
+Answer: I don't know what your favorite color is - you haven't mentioned it yet!
+You've told me about your favorite food (sushi) and favorite language (Python),
+but not your favorite color. What is it?
+```
+
+ターン 3 以降、`messages` が 4 件で固定されている。`window_size=4` なので、最大 4 メッセージ（user + assistant × 2 ターン分）しか保持されない。
+
+ターン 1 で伝えた「favorite color is blue」はウィンドウから押し出されて消えたため、エージェントは「I don't know what your favorite color is」と回答した。一方、ターン 2 の「sushi」とターン 3 の「Python」はウィンドウ内に残っているため覚えている。
+
+これがスライディングウィンドウの動作だ。本番環境ではデフォルトの `window_size=40` が使われるが、長い会話では古い情報が失われる可能性があることを理解しておく必要がある。
+
+## 会話履歴の中身を確認する
+
+`agent.messages` の中身を見てみよう。
+
+```python title="Python"
+agent = Agent(model=bedrock_model, callback_handler=None)
+agent("Hello! I'm learning Strands Agents SDK.")
+agent("What did I just say?")
+
+for i, msg in enumerate(agent.messages):
+    role = msg['role']
+    text = msg['content'][0].get('text', '')[:60]
+    print(f"  [{i}] {role:10s}: {text}")
+```
+
+### 実行結果
+
+```text title="Output"
+Total messages: 4
+  [0] user      : Hello! I'm learning Strands Agents SDK.
+  [1] assistant : Hello! I'd be happy to help you learn the Strands Agents SDK
+  [2] user      : What did I just say?
+  [3] assistant : You said "Hello! I'm learning Strands Agents SDK."
+```
+
+`messages` は `role`（`user` or `assistant`）と `content` を持つ辞書のリストだ。ユーザーの入力とアシスタントの応答が交互に記録されている。ツールを使った場合は、ツール呼び出しとツール結果のメッセージも含まれる。
+
+## まとめ
+
+- **同じインスタンスに話しかけるだけで会話が継続する** — `agent("質問1")` → `agent("質問2")` で、エージェントは過去の会話を記憶している。特別な設定は不要。
+- **SlidingWindowConversationManager で古いメッセージを自動削除** — デフォルトの会話マネージャーが `window_size` 件のメッセージを保持し、古いものを削除する。コンテキストウィンドウの溢れを防ぐ。
+- **ウィンドウから消えた情報は忘れる** — スライディングウィンドウの外に出た情報はモデルに渡されないため、エージェントは「忘れる」。重要な情報を長期保持するには `SummarizingConversationManager` やセッション管理を検討する。
+- **`agent.messages` で会話履歴を確認できる** — デバッグや動作確認に有用。user/assistant の交互のメッセージリストとして記録されている。

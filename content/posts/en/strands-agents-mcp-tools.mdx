@@ -1,0 +1,192 @@
+---
+title: "Strands Agents SDK Guide — Connecting External Tools with MCP"
+description: "Connect MCP (Model Context Protocol) servers to Strands Agents SDK and extend your agent with external tools. Walk through the AWS documentation search MCP server hands-on, and combine MCP tools with custom @tool functions."
+date: 2026-03-24
+published: false
+featured: false
+categories: [ai-agents]
+tags: ["strands-agents", "bedrock", "python", "ai-agents", "mcp"]
+series: "strands-agents-intro"
+seriesOrder: 3
+---
+
+## Introduction
+
+In the [previous article](/en/blog/2026/03/24/strands-agents-custom-tools), we learned custom tool design patterns. While the `@tool` decorator makes it easy to create tools, implementing everything yourself isn't practical.
+
+This is where [MCP (Model Context Protocol)](https://modelcontextprotocol.io) comes in. MCP is an open protocol for connecting external tool servers to agents. Strands Agents SDK has native MCP support, letting you add external MCP server tools to your agent with just a few lines of code.
+
+This article covers:
+
+1. **Connecting to an MCP server** — using the AWS documentation search MCP server
+2. **Mixing MCP tools with custom tools** — combining external tools and `@tool` functions
+
+See the official docs at [Model Context Protocol (MCP) Tools](https://strandsagents.com/docs/user-guide/concepts/tools/mcp-tools/) for the full reference.
+
+## What Is MCP?
+
+MCP (Model Context Protocol) is an open protocol for providing external context and tools to LLM applications. The concept is simple: an MCP server exposes tools, and an MCP client (Strands in this case) fetches those tools and passes them to the agent.
+
+```text title="How MCP works"
+Agent → MCPClient → MCP Server
+                       ↓
+                  Returns tool list
+                       ↓
+Agent ← Registers as tools ← MCPClient
+```
+
+Various communities and vendors publish MCP servers for AWS documentation search, GitHub, database operations, and more.
+
+## Setup
+
+Use the same environment from the [previous article](/en/blog/2026/03/24/strands-agents-custom-tools). You'll additionally need [uv](https://github.com/astral-sh/uv) (the `uvx` command runs MCP servers).
+
+```bash title="Terminal"
+# If uv is not installed
+curl -LsSf https://astral.sh/uv/install.sh | sh
+```
+
+The `mcp` package is already installed as a dependency of `strands-agents`.
+
+All examples below use the same model configuration. Each example can be run as a standalone `.py` file — paste the shared config at the top, then add the example code below it.
+
+```python title="Python (shared config)"
+from strands import Agent, tool
+from strands.models import BedrockModel
+from strands.tools.mcp import MCPClient
+from mcp import stdio_client, StdioServerParameters
+
+bedrock_model = BedrockModel(
+    model_id="us.anthropic.claude-sonnet-4-20250514-v1:0",
+    region_name="us-east-1",
+)
+```
+
+## Connecting to an MCP Server
+
+We'll use the [AWS Documentation MCP Server](https://github.com/awslabs/mcp) published by AWS to add documentation search capabilities to our agent.
+
+```python title="Python"
+mcp_client = MCPClient(lambda: stdio_client(
+    StdioServerParameters(
+        command="uvx",
+        args=["awslabs.aws-documentation-mcp-server@latest"],
+        env={"FASTMCP_LOG_LEVEL": "ERROR"},
+    )
+))
+
+with mcp_client:
+    tools = mcp_client.list_tools_sync()
+    print(f"Available MCP tools: {[t.tool_name for t in tools]}")
+
+    agent = Agent(model=bedrock_model, tools=tools)
+    result = agent("What is Amazon Bedrock? Answer in 2 sentences.")
+```
+
+Let's break this down.
+
+**Creating the MCPClient**: Pass the MCP server's launch configuration to `MCPClient`. `stdio_client` communicates with the server via standard I/O (stdio). The `uvx` command starts the MCP server.
+
+**Context manager**: `with mcp_client:` manages the connection to the MCP server. The connection is automatically closed when leaving the `with` block.
+
+**Fetching and registering tools**: `list_tools_sync()` retrieves the list of tools the MCP server exposes, and passes them directly to `Agent`'s `tools` parameter.
+
+### Execution Results
+
+```bash title="Terminal"
+python -u mcp_basic.py
+```
+
+```text title="Output"
+Available MCP tools: ['read_documentation', 'read_sections', 'search_documentation', 'recommend']
+```
+
+Four tools were fetched from the MCP server. Without implementing any tools ourselves, the agent can now search and read AWS documentation.
+
+```text title="Output (agent response)"
+Tool #1: search_documentation
+Tool #2: read_documentation
+
+Amazon Bedrock is a fully managed service that provides secure, enterprise-grade
+access to high-performing foundation models from leading AI companies, enabling
+you to build and scale generative AI applications. The service supports 100+
+foundation models from industry-leading providers including Amazon, Anthropic,
+DeepSeek, Moonshot AI, MiniMax, and OpenAI, offering multiple API options for
+integration.
+```
+
+```text title="Output (metrics)"
+Cycles: 3
+Tools used: ['search_documentation', 'read_documentation']
+```
+
+The agent used `search_documentation` to find relevant docs, then `read_documentation` to read the details, completing in 3 cycles. The same multi-step pattern we learned in the previous article.
+
+## Mixing MCP Tools with Custom Tools
+
+MCP tools and `@tool` custom tools can coexist in the same `tools` list. This is the biggest strength of Strands' MCP integration.
+
+Let's add a custom `word_count` tool alongside the AWS documentation MCP tools.
+
+```python title="Python"
+@tool
+def word_count(text: str) -> int:
+    """Count the number of words in a text.
+
+    Args:
+        text: The text to count words in
+
+    Returns:
+        int: The number of words
+    """
+    return len(text.split())
+
+mcp_client = MCPClient(lambda: stdio_client(
+    StdioServerParameters(
+        command="uvx",
+        args=["awslabs.aws-documentation-mcp-server@latest"],
+        env={"FASTMCP_LOG_LEVEL": "ERROR"},
+    )
+))
+
+with mcp_client:
+    mcp_tools = mcp_client.list_tools_sync()
+    agent = Agent(model=bedrock_model, tools=mcp_tools + [word_count])
+    result = agent(
+        "Search AWS documentation for 'What is Amazon S3?' "
+        "and count the words in the answer you give me."
+    )
+```
+
+The key line is `tools=mcp_tools + [word_count]`. Just append the custom tool to the MCP tool list. The LLM treats all tools equally and picks the right one based on the task.
+
+### Execution Results
+
+```text title="Output"
+Tool #1: search_documentation
+Tool #2: read_sections
+Tool #3: read_documentation
+Tool #4: word_count
+
+The answer I provided contains 404 words explaining what Amazon S3 is, covering
+its core functionality as an object storage service, how it works with buckets
+and objects, the different types of buckets available, and its key features
+including storage classes, management capabilities, security, data processing,
+analytics, and consistency guarantees.
+```
+
+```text title="Output (metrics)"
+Cycles: 5
+Tools used: ['search_documentation', 'read_sections', 'read_documentation', 'word_count']
+```
+
+Five cycles with four tools. Three MCP tools (`search_documentation` → `read_sections` → `read_documentation`) gathered information from AWS docs, then the custom `word_count` counted the words.
+
+The LLM doesn't distinguish between MCP tools and custom tools. It reads the docstrings, determines what each tool can do, and calls them in the optimal order.
+
+## Summary
+
+- **Add external tools instantly with MCP** — Connect to an MCP server with `MCPClient` + `with` block, fetch tools with `list_tools_sync()`. No need to implement tools yourself.
+- **MCP tools and custom tools coexist** — Just use `tools=mcp_tools + [my_tool]` to put them in the same list. The LLM treats all tools equally and selects based on docstrings.
+- **Manage connections with context managers** — Use `with mcp_client:` and run the agent inside the block. The connection closes automatically when leaving the block.
+- **Leverage the MCP server ecosystem** — Beyond AWS documentation search, [many MCP servers](https://github.com/modelcontextprotocol/servers) are available. Find a server with the capabilities you need and connect it to extend your agent.

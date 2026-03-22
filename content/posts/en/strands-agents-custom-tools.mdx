@@ -1,0 +1,222 @@
+---
+title: "Strands Agents SDK Guide — Custom Tool Design Patterns"
+description: "Deep dive into Strands Agents SDK custom tools. Build multi-step tool chains, observe how the LLM handles tool errors gracefully, and control agent behavior with system prompts — all verified with real code and metrics."
+date: 2026-03-24
+published: false
+featured: false
+categories: [ai-agents]
+tags: ["strands-agents", "bedrock", "python", "ai-agents", "custom-tools"]
+series: "strands-agents-intro"
+seriesOrder: 2
+---
+
+## Introduction
+
+In the [previous article](/en/blog/2026/03/24/strands-agents-quickstart), we ran through the Strands Agents SDK Quickstart and confirmed how the agent loop works. We learned that the `@tool` decorator turns a function into a tool, but building practical agents requires understanding how to design tools well.
+
+This article digs deeper into custom tool design from three angles.
+
+1. **Multi-step behavior** — chaining tools where one result feeds into the next
+2. **Error handling** — what happens when a tool fails
+3. **System prompts** — controlling how the agent behaves
+
+See the official docs at [Creating Custom Tools](https://strandsagents.com/docs/user-guide/concepts/tools/custom-tools/) for the full reference.
+
+## Setup
+
+Use the same environment from the [previous article](/en/blog/2026/03/24/strands-agents-quickstart). For a fresh start:
+
+```bash title="Terminal"
+mkdir my_agent && cd my_agent
+python -m venv .venv
+source .venv/bin/activate
+pip install strands-agents strands-agents-tools
+```
+
+All examples below use the same model configuration. Each example can be run as a standalone `.py` file — paste the shared config at the top, then add the example code below it.
+
+```python title="Python (shared config)"
+from strands import Agent, tool
+from strands.models import BedrockModel
+
+bedrock_model = BedrockModel(
+    model_id="us.anthropic.claude-sonnet-4-20250514-v1:0",
+    region_name="us-east-1",
+)
+```
+
+## Multi-Step Behavior — Chaining Tools
+
+In the previous article, the agent called three tools **in parallel** and finished in 2 cycles. This time, we'll see **sequential chaining** where one tool's result feeds into the next.
+
+We'll create two tools: one to fetch exchange rates and another to convert currencies.
+
+```python title="Python (tool definitions)"
+@tool
+def get_exchange_rate(base: str, target: str) -> dict:
+    """Get the current exchange rate between two currencies.
+
+    Args:
+        base: The base currency code (e.g. USD, EUR, JPY)
+        target: The target currency code (e.g. USD, EUR, JPY)
+
+    Returns:
+        dict: Exchange rate information
+    """
+    rates = {
+        ("USD", "JPY"): 149.50,
+        ("EUR", "USD"): 1.08,
+        ("EUR", "JPY"): 161.46,
+    }
+    rate = rates.get((base.upper(), target.upper()))
+    if rate is None:
+        return {"error": f"Rate not found for {base}/{target}"}
+    return {"base": base.upper(), "target": target.upper(), "rate": rate}
+
+@tool
+def convert_currency(amount: float, rate: float) -> dict:
+    """Convert an amount using a given exchange rate.
+
+    Args:
+        amount: The amount to convert
+        rate: The exchange rate to apply
+
+    Returns:
+        dict: Conversion result
+    """
+    return {"original": amount, "rate": rate, "converted": round(amount * rate, 2)}
+```
+
+The key point is that `convert_currency` requires a `rate` parameter. The LLM doesn't know the rate on its own, so it must first call `get_exchange_rate` to get it, then pass that value to `convert_currency`.
+
+```python title="Python (execution)"
+agent = Agent(model=bedrock_model, tools=[get_exchange_rate, convert_currency])
+result = agent("Convert 250 USD to JPY")
+```
+
+### Execution Results
+
+```text title="Output"
+I'll help you convert 250 USD to JPY. First, let me get the current exchange rate
+between USD and JPY, then perform the conversion.
+Tool #1: get_exchange_rate
+Now I'll convert 250 USD to JPY using the current exchange rate of 149.5:
+Tool #2: convert_currency
+Based on the current exchange rate of 149.5 JPY per USD, 250 USD converts to 37,375 JPY.
+```
+
+```json title="Output (metrics)"
+{
+  "total_cycles": 3,
+  "tool_usage": ["get_exchange_rate", "convert_currency"]
+}
+```
+
+**The cycle count is now 3.** Compare this with the parallel calls (2 cycles) from the previous article.
+
+- **Cycle 1**: The LLM reasons and calls `get_exchange_rate`
+- **Cycle 2**: Receives the rate (149.5), then calls `convert_currency` with that value
+- **Cycle 3**: Receives the conversion result (37,375) and generates the final answer
+
+This is multi-step behavior. The LLM determined that it needs the rate before it can convert, and called the tools sequentially. The developer doesn't need to specify the call order in code. The LLM reads the docstrings and decides autonomously.
+
+### Tool Design Tip — Separate Responsibilities
+
+You could combine `get_exchange_rate` and `convert_currency` into a single tool, but keeping them separate has advantages.
+
+- **Reusability** — each tool can be used independently
+- **Testability** — each tool can be tested in isolation
+- **LLM accuracy** — the clearer a tool's responsibility, the better the LLM is at selecting the right one
+
+## Error Handling — When Tools Fail
+
+When a tool throws an exception, the agent loop doesn't crash. The error information is returned to the LLM, which interprets it and includes it in the response.
+
+```python title="Python"
+@tool
+def divide(numerator: float, denominator: float) -> float:
+    """Divide two numbers.
+
+    Args:
+        numerator: The number to be divided
+        denominator: The number to divide by
+
+    Returns:
+        float: The result of the division
+    """
+    if denominator == 0:
+        raise ValueError("Cannot divide by zero")
+    return numerator / denominator
+
+agent = Agent(model=bedrock_model, tools=[divide])
+result = agent("What is 100 divided by 0? Then try 100 divided by 3.")
+```
+
+### Execution Results
+
+```text title="Output"
+Tool #1: divide
+Tool #2: divide
+
+1. 100 divided by 0: This operation results in an error because division
+   by zero is mathematically undefined. You cannot divide any number by zero.
+2. 100 divided by 3: This equals approximately 33.33
+   (or more precisely 33.333333333333336).
+```
+
+```text title="Output (metrics excerpt)"
+Cycles: 2
+  divide: calls=2, success=1, errors=1
+```
+
+Two things to note.
+
+**The agent doesn't crash.** Even though `raise ValueError("Cannot divide by zero")` was thrown, the agent loop catches it and returns the error to the LLM as a tool result with `status: "error"`. The LLM read the error message and explained that division by zero is undefined.
+
+**The second tool call succeeds.** The LLM wasn't derailed by the first error. It proceeded to call `divide(100, 3)` successfully. The metrics confirm `calls=2, success=1, errors=1`.
+
+In other words, just raising an exception is sufficient error handling. The agent loop catches it and lets the LLM decide what to do.
+
+## System Prompts — Controlling Agent Behavior
+
+The `system_prompt` parameter on `Agent` controls how the agent behaves. Let's use the same exchange rate tools and see how a system prompt changes the output.
+
+```python title="Python"
+agent = Agent(
+    model=bedrock_model,
+    tools=[get_exchange_rate, convert_currency],
+    system_prompt="You are a currency conversion assistant. "
+    "Always show the exchange rate before converting. "
+    "Always respond in a structured format with the rate and result clearly labeled.",
+)
+result = agent("How much is 1000 EUR in JPY?")
+```
+
+The only change is adding `system_prompt`. The tools are the same `get_exchange_rate` and `convert_currency` from earlier.
+
+### Execution Results
+
+```text title="Output"
+Tool #1: get_exchange_rate
+Tool #2: convert_currency
+
+## Currency Conversion Result
+
+**Exchange Rate:** 1 EUR = 161.46 JPY
+**Conversion:** 1,000 EUR = 161,460 JPY
+```
+
+Compared to running without a system prompt, the output is structured. The agent followed the instructions to "show the exchange rate before converting" and "respond in a structured format."
+
+System prompts are useful for:
+
+- **Consistent output format** — JSON, Markdown tables, bullet points, etc.
+- **Role definition** — "You are a ... assistant"
+- **Constraints** — "Never answer about ...", "Always respond in Japanese"
+
+## Summary
+
+- **Separate tool responsibilities** — One tool, one job. This makes it easier for the LLM to select the right tool, and improves reusability and testability.
+- **Just raise exceptions for errors** — The agent loop catches exceptions and returns error info to the LLM. The LLM interprets the error and includes it in the response, so developers don't need to write error-handling branches.
+- **Use system prompts to control output** — The `system_prompt` parameter lets you specify output format and agent role. Combined with good tool design, it gives precise control over agent behavior.
+- **Check cycle count to understand tool chains** — Parallel calls finish in 2 cycles, sequential chains take 3+. The `total_cycles` metric reveals the agent's reasoning pattern.

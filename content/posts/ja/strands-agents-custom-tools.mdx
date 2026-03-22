@@ -1,0 +1,222 @@
+---
+title: "Strands Agents SDK 入門 — カスタムツールの設計パターン"
+description: "Strands Agents SDK のカスタムツールを深掘りする。ツールの連鎖でマルチステップ動作を実現し、エラー時の LLM の挙動やシステムプロンプトによる出力制御を実際のコードとメトリクスで確認する。"
+date: 2026-03-24
+published: false
+featured: false
+categories: [ai-agents]
+tags: ["strands-agents", "bedrock", "python", "ai-agents", "custom-tools"]
+series: "strands-agents-intro"
+seriesOrder: 2
+---
+
+## はじめに
+
+[前回の記事](/ja/blog/2026/03/24/strands-agents-quickstart)では Strands Agents SDK の Quickstart を試し、エージェントループの基本を確認した。`@tool` デコレータで関数をツールにできることは分かったが、実用的なエージェントを作るには「ツールをどう設計するか」の理解が欠かせない。
+
+この記事では、カスタムツールの設計パターンを 3 つの観点から掘り下げる。
+
+1. **マルチステップ動作** — ツールの結果を見て次のツールを呼ぶ連鎖
+2. **エラーハンドリング** — ツールが失敗したとき LLM はどう振る舞うか
+3. **システムプロンプト** — エージェントの振る舞いをどう制御するか
+
+公式ドキュメントは [Creating Custom Tools](https://strandsagents.com/docs/user-guide/concepts/tools/custom-tools/) を参照。
+
+## セットアップ
+
+[前回の記事](/ja/blog/2026/03/24/strands-agents-quickstart)の環境をそのまま使う。新規の場合は以下を実行する。
+
+```bash title="Terminal"
+mkdir my_agent && cd my_agent
+python -m venv .venv
+source .venv/bin/activate
+pip install strands-agents strands-agents-tools
+```
+
+以降の例ではすべて同じモデル設定を使う。各例は独立した `.py` ファイルとして実行できる。共通設定を先頭に書き、その下に各例のコードを追加する形だ。
+
+```python title="Python (共通設定)"
+from strands import Agent, tool
+from strands.models import BedrockModel
+
+bedrock_model = BedrockModel(
+    model_id="us.anthropic.claude-sonnet-4-20250514-v1:0",
+    region_name="us-east-1",
+)
+```
+
+## マルチステップ動作 — ツールの連鎖
+
+前回の例ではエージェントが 3 つのツールを **並列に** 呼び出し、2 サイクルで完了した。今回は、あるツールの結果を使って次のツールを呼ぶ **逐次的な連鎖** を試す。
+
+為替レートの取得と通貨変換という 2 つのツールを用意する。
+
+```python title="Python (ツール定義)"
+@tool
+def get_exchange_rate(base: str, target: str) -> dict:
+    """Get the current exchange rate between two currencies.
+
+    Args:
+        base: The base currency code (e.g. USD, EUR, JPY)
+        target: The target currency code (e.g. USD, EUR, JPY)
+
+    Returns:
+        dict: Exchange rate information
+    """
+    rates = {
+        ("USD", "JPY"): 149.50,
+        ("EUR", "USD"): 1.08,
+        ("EUR", "JPY"): 161.46,
+    }
+    rate = rates.get((base.upper(), target.upper()))
+    if rate is None:
+        return {"error": f"Rate not found for {base}/{target}"}
+    return {"base": base.upper(), "target": target.upper(), "rate": rate}
+
+@tool
+def convert_currency(amount: float, rate: float) -> dict:
+    """Convert an amount using a given exchange rate.
+
+    Args:
+        amount: The amount to convert
+        rate: The exchange rate to apply
+
+    Returns:
+        dict: Conversion result
+    """
+    return {"original": amount, "rate": rate, "converted": round(amount * rate, 2)}
+```
+
+ポイントは `convert_currency` が `rate` パラメータを必要とする点だ。LLM はこのレートを自分では知らないので、まず `get_exchange_rate` を呼んで結果を取得し、その値を `convert_currency` に渡す必要がある。
+
+```python title="Python (実行)"
+agent = Agent(model=bedrock_model, tools=[get_exchange_rate, convert_currency])
+result = agent("Convert 250 USD to JPY")
+```
+
+### 実行結果
+
+```text title="Output"
+I'll help you convert 250 USD to JPY. First, let me get the current exchange rate
+between USD and JPY, then perform the conversion.
+Tool #1: get_exchange_rate
+Now I'll convert 250 USD to JPY using the current exchange rate of 149.5:
+Tool #2: convert_currency
+Based on the current exchange rate of 149.5 JPY per USD, 250 USD converts to 37,375 JPY.
+```
+
+```json title="Output (メトリクス)"
+{
+  "total_cycles": 3,
+  "tool_usage": ["get_exchange_rate", "convert_currency"]
+}
+```
+
+**サイクル数が 3** になった。前回の並列呼び出し（2 サイクル）との違いを見てみよう。
+
+- **Cycle 1**: LLM が推論し、`get_exchange_rate` を呼ぶ
+- **Cycle 2**: レート（149.5）を受け取り、その値を使って `convert_currency` を呼ぶ
+- **Cycle 3**: 変換結果（37,375）を受け取り、最終回答を生成する
+
+これがマルチステップ動作だ。LLM が「まずレートを調べないと変換できない」と判断し、ツールを逐次的に呼び出している。開発者がツールの呼び出し順序をコードで指定する必要はない。LLM が docstring を読んで自律的に判断する。
+
+### ツール設計のコツ — 責務を分離する
+
+`get_exchange_rate` と `convert_currency` を 1 つのツールにまとめることもできるが、分離することで以下のメリットがある。
+
+- **再利用性** — レート取得だけ、変換だけを単独で使える
+- **テスタビリティ** — 各ツールを独立してテストできる
+- **LLM の判断精度** — 1 つのツールの責務が明確なほど、LLM は正しいツールを選びやすい
+
+## エラーハンドリング — ツールが失敗したとき
+
+ツールが例外を投げたとき、エージェントループはクラッシュしない。エラー情報が LLM に返され、LLM がそれを解釈して回答に含める。
+
+```python title="Python"
+@tool
+def divide(numerator: float, denominator: float) -> float:
+    """Divide two numbers.
+
+    Args:
+        numerator: The number to be divided
+        denominator: The number to divide by
+
+    Returns:
+        float: The result of the division
+    """
+    if denominator == 0:
+        raise ValueError("Cannot divide by zero")
+    return numerator / denominator
+
+agent = Agent(model=bedrock_model, tools=[divide])
+result = agent("What is 100 divided by 0? Then try 100 divided by 3.")
+```
+
+### 実行結果
+
+```text title="Output"
+Tool #1: divide
+Tool #2: divide
+
+1. 100 divided by 0: This operation results in an error because division
+   by zero is mathematically undefined. You cannot divide any number by zero.
+2. 100 divided by 3: This equals approximately 33.33
+   (or more precisely 33.333333333333336).
+```
+
+```text title="Output (メトリクス抜粋)"
+Cycles: 2
+  divide: calls=2, success=1, errors=1
+```
+
+注目すべき点が 2 つある。
+
+**エージェントがクラッシュしない。** `raise ValueError("Cannot divide by zero")` が投げられても、エージェントループはそのエラーを `status: "error"` のツール結果として LLM に返す。LLM はエラーメッセージを読んで「ゼロ除算は未定義」と回答に含めた。
+
+**2 つ目のツール呼び出しは成功している。** LLM は 1 つ目のエラーに引きずられず、2 つ目の `divide(100, 3)` を正常に実行した。メトリクスでも `calls=2, success=1, errors=1` と正確に記録されている。
+
+つまり、ツール内で例外を投げるだけで十分なエラーハンドリングになる。エージェントループが例外をキャッチし、LLM に判断を委ねてくれる。
+
+## システムプロンプト — エージェントの振る舞いを制御する
+
+`Agent` の `system_prompt` パラメータで、エージェントの振る舞いを制御できる。先ほどの為替ツールを使い、システムプロンプトの有無で出力がどう変わるか確認する。
+
+```python title="Python"
+agent = Agent(
+    model=bedrock_model,
+    tools=[get_exchange_rate, convert_currency],
+    system_prompt="You are a currency conversion assistant. "
+    "Always show the exchange rate before converting. "
+    "Always respond in a structured format with the rate and result clearly labeled.",
+)
+result = agent("How much is 1000 EUR in JPY?")
+```
+
+変更点は `system_prompt` を追加しただけだ。ツールは先ほどと同じ `get_exchange_rate` と `convert_currency` を使っている。
+
+### 実行結果
+
+```text title="Output"
+Tool #1: get_exchange_rate
+Tool #2: convert_currency
+
+## Currency Conversion Result
+
+**Exchange Rate:** 1 EUR = 161.46 JPY
+**Conversion:** 1,000 EUR = 161,460 JPY
+```
+
+システムプロンプトなしの場合と比較すると、出力が構造化されている。「Always show the exchange rate before converting」「respond in a structured format」という指示に従い、レートと結果をラベル付きで表示した。
+
+システムプロンプトは以下の用途で有効だ。
+
+- **出力形式の統一** — JSON、Markdown テーブル、箇条書きなど
+- **役割の定義** — 「あなたは〇〇アシスタントです」
+- **制約の付与** — 「〇〇については回答しない」「必ず日本語で回答する」
+
+## まとめ
+
+- **ツールの責務を分離する** — 1 ツール 1 責務にすると、LLM が正しいツールを選びやすくなり、再利用性とテスタビリティも向上する。
+- **エラーは例外を投げるだけでよい** — エージェントループが例外をキャッチし、エラー情報を LLM に返す。LLM がエラーを解釈して回答に含めるため、開発者がエラー時の分岐を書く必要がない。
+- **システムプロンプトで出力を制御する** — `system_prompt` パラメータで出力形式や役割を指定できる。ツールの設計と組み合わせることで、エージェントの振る舞いを精密にコントロールできる。
+- **サイクル数でツール連鎖を確認する** — 並列呼び出しは 2 サイクル、逐次連鎖は 3 サイクル以上。メトリクスの `total_cycles` でエージェントの推論パターンを把握できる。
