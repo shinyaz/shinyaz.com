@@ -6,7 +6,7 @@ published: true
 tags: ["ai-agents", "strands-agents", "s3", "eks"]
 ---
 
-Fixed the A2A agent card URL from `0.0.0.0` to the correct FQDN, restarted the Pod, but the Travel Agent still tried connecting to `http://0.0.0.0:9000/`. Spent a while debugging before finding the cause.
+Fixed the A2A agent card URL to the correct FQDN, restarted the Pod, but the Travel Agent still tried connecting to an unreachable URL. Spent a while debugging before finding the cause.
 
 The Travel Agent persists per-user conversation history in S3. Old tool call results containing the stale URL were restored into the LLM's context window. The LLM "learned" the wrong URL from its conversation history and kept passing it to `a2a_send_message`'s `target_agent_url` parameter.
 

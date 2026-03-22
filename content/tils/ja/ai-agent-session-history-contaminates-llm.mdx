@@ -6,9 +6,9 @@ published: true
 tags: ["ai-agents", "strands-agents", "s3", "eks"]
 ---
 
-A2A エージェントカードの URL を `0.0.0.0` → 正しい FQDN に修正し、Pod も再起動したのに、Travel Agent がまだ `http://0.0.0.0:9000/` に接続しようとする現象に遭遇した。
+A2A エージェントカードの URL を正しい FQDN に修正し、Pod も再起動したのに、Travel Agent がまだ到達不能な URL に接続しようとする現象に遭遇した。
 
-原因は S3 セッション履歴だった。Travel Agent はユーザーごとの会話履歴を S3 に保持しており、古い URL を含む過去のツール呼び出し結果が LLM のコンテキストに復元されていた。LLM はそのコンテキストから `0.0.0.0` を学習し、`a2a_send_message` の `target_agent_url` パラメータにそのまま渡していた。
+原因は S3 セッション履歴だった。Travel Agent はユーザーごとの会話履歴を S3 に保持しており、古い URL を含む過去のツール呼び出し結果が LLM のコンテキストに復元されていた。LLM はそのコンテキストから到達不能な URL を学習し、`a2a_send_message` の `target_agent_url` パラメータにそのまま渡していた。
 
 ```bash title="Terminal"
 aws s3 rm s3://travel-agent-session-${ACCOUNT_ID}/ --recursive

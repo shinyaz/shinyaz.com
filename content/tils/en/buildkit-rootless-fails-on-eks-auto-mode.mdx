@@ -15,6 +15,6 @@ Tried migrating from archived Kaniko to BuildKit, but rootless mode failed on EK
 
 BuildKit rootless uses [RootlessKit](https://github.com/rootless-containers/rootlesskit/) internally, which requires Linux user namespaces. EKS Auto Mode nodes are AWS-managed EC2 instances with `max_user_namespaces=0`, and kernel parameters can't be modified.
 
-Also tried `--oci-worker-no-process-sandbox` with `seccompProfile: Unconfined`, but RootlessKit itself fails to start without user namespaces — the sandbox flag doesn't help.
+Also tried `--oci-worker-no-process-sandbox` with `seccompProfile: Unconfined`, but in privileged mode it errors with `can't enable NoProcessSandbox without Rootless`, and in rootless mode RootlessKit can't start without user namespaces. Neither path works.
 
 Ended up using `securityContext.privileged: true`. Unlike Kaniko which runs unprivileged, BuildKit on EKS Auto Mode requires privileged access — a security tradeoff to be aware of. Full details in the [extra post](/en/blog/2026/03/23/buildkit-on-eks).
