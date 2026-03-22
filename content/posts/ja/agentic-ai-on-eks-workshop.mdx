@@ -377,7 +377,7 @@ tar czf /tmp/weather-agent-context.tar.gz .
 aws s3 cp /tmp/weather-agent-context.tar.gz s3://kaniko-build-${ACCOUNT_ID}/build/
 ```
 
-```yaml title="kaniko-job.yaml"
+```yaml title="kaniko-weather.yaml"
 # Kaniko Job で EKS 上ビルド → ECR push
 apiVersion: batch/v1
 kind: Job
@@ -396,6 +396,33 @@ spec:
         - "--context=s3://kaniko-build-${ACCOUNT_ID}/build/weather-mcp-context.tar.gz"
         - "--destination=${ECR_HOST}/agents-on-eks/weather-mcp:latest"
       restartPolicy: Never
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: kaniko-weather-agent
+  namespace: build
+spec:
+  backoffLimit: 1
+  template:
+    spec:
+      serviceAccountName: kaniko
+      containers:
+      - name: kaniko
+        image: gcr.io/kaniko-project/executor:latest
+        args:
+        - "--context=s3://kaniko-build-${ACCOUNT_ID}/build/weather-agent-context.tar.gz"
+        - "--destination=${ECR_HOST}/agents-on-eks/weather-agent:latest"
+      restartPolicy: Never
+```
+
+YAML を適用してビルドを開始し、完了を待つ。
+
+```bash title="Terminal"
+kubectl apply -f kaniko-weather.yaml
+kubectl wait --for=condition=complete \
+  job/kaniko-weather-mcp job/kaniko-weather-agent \
+  -n build --timeout=600s
 ```
 
 ポイントは Pod Identity で ECR push 権限を付与すること。`ecr:PutImage` と `ecr:CompleteLayerUpload` を含むポリシーを `build` namespace の `kaniko` サービスアカウントに紐づけた。ビルド時間は MCP Server が約 2 分、Weather Agent が約 3 分だった。
@@ -426,6 +453,13 @@ helm upgrade weather-agent manifests/helm/agent \
 ```
 
 `mcp-remote.yaml` は MCP 接続先を stdio（ローカル）から HTTP（リモート MCP Server）に切り替える values override ファイルだ。`a2a.http_url` は Part 2 の A2A 連携で必要になる設定で、エージェントカードに記載される URL を Kubernetes Service の FQDN に設定する。
+
+デプロイ完了を待つ。
+
+```bash title="Terminal"
+kubectl rollout status deployment weather-mcp -n mcp-servers --timeout=180s
+kubectl rollout status deployment weather-agent -n agents --timeout=180s
+```
 
 動作確認では、NYC の 3 日間天気予報を正常に取得できた。クラスター内部から curl で直接アクセスするか、`kubectl port-forward` でローカルに転送して確認する。
 

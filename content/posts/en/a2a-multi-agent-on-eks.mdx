@@ -165,6 +165,42 @@ Deploying the Travel Agent requires specifying the A2A connection target via Hel
 Build the Travel Agent container image (same Kaniko workflow as Part 1) and deploy with Helm. The key is specifying the Weather Agent's A2A endpoint in `a2a.a2a_agents.json`.
 
 ```bash title="Terminal"
+# Upload Travel Agent build context to S3
+cd agents/travel
+tar czf /tmp/travel-agent-context.tar.gz .
+aws s3 cp /tmp/travel-agent-context.tar.gz s3://kaniko-build-${ACCOUNT_ID}/build/
+cd ..
+```
+
+```yaml title="kaniko-travel.yaml"
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: kaniko-travel-agent
+  namespace: build
+spec:
+  backoffLimit: 1
+  template:
+    spec:
+      serviceAccountName: kaniko
+      containers:
+      - name: kaniko
+        image: gcr.io/kaniko-project/executor:latest
+        args:
+        - "--context=s3://kaniko-build-${ACCOUNT_ID}/build/travel-agent-context.tar.gz"
+        - "--destination=${ECR_HOST}/agents-on-eks/travel-agent:latest"
+      restartPolicy: Never
+```
+
+```bash title="Terminal"
+kubectl apply -f kaniko-travel.yaml
+kubectl wait --for=condition=complete \
+  job/kaniko-travel-agent -n build --timeout=600s
+```
+
+Deploy with Helm.
+
+```bash title="Terminal"
 # Travel Agent values file
 cat > /tmp/travel-values.yaml << EOF
 image:
@@ -190,6 +226,8 @@ EOF
 
 helm upgrade travel-agent manifests/helm/agent \
   --install -n agents -f /tmp/travel-values.yaml
+
+kubectl rollout status deployment travel-agent -n agents --timeout=180s
 ```
 
 Setting `agent.md: null` and `mcp.json: null` prevents ConfigMap creation, so the defaults embedded in the Dockerfile are used. The Travel Agent doesn't use MCP tools directly, so `mcp.json` isn't needed.
@@ -224,6 +262,10 @@ The culprit was **S3 session history**. The Travel Agent persists per-user conve
 ```bash title="Terminal"
 # Clear S3 session data
 aws s3 rm s3://travel-agent-session-${ACCOUNT_ID}/ --recursive
+
+# Restart pod to clear in-memory cache
+kubectl rollout restart deployment travel-agent -n agents
+kubectl rollout status deployment travel-agent -n agents --timeout=120s
 ```
 
 After clearing sessions, the Travel Agent fetched the correct URL from the agent card via `a2a_list_discovered_agents` and successfully communicated with the Weather Agent.

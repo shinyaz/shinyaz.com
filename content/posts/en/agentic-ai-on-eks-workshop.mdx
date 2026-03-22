@@ -377,7 +377,7 @@ tar czf /tmp/weather-agent-context.tar.gz .
 aws s3 cp /tmp/weather-agent-context.tar.gz s3://kaniko-build-${ACCOUNT_ID}/build/
 ```
 
-```yaml title="kaniko-job.yaml"
+```yaml title="kaniko-weather.yaml"
 # Kaniko Job: build on EKS → push to ECR
 apiVersion: batch/v1
 kind: Job
@@ -396,6 +396,33 @@ spec:
         - "--context=s3://kaniko-build-${ACCOUNT_ID}/build/weather-mcp-context.tar.gz"
         - "--destination=${ECR_HOST}/agents-on-eks/weather-mcp:latest"
       restartPolicy: Never
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: kaniko-weather-agent
+  namespace: build
+spec:
+  backoffLimit: 1
+  template:
+    spec:
+      serviceAccountName: kaniko
+      containers:
+      - name: kaniko
+        image: gcr.io/kaniko-project/executor:latest
+        args:
+        - "--context=s3://kaniko-build-${ACCOUNT_ID}/build/weather-agent-context.tar.gz"
+        - "--destination=${ECR_HOST}/agents-on-eks/weather-agent:latest"
+      restartPolicy: Never
+```
+
+Apply the YAML and wait for builds to complete.
+
+```bash title="Terminal"
+kubectl apply -f kaniko-weather.yaml
+kubectl wait --for=condition=complete \
+  job/kaniko-weather-mcp job/kaniko-weather-agent \
+  -n build --timeout=600s
 ```
 
 The critical piece is granting ECR push permissions via Pod Identity. I attached a policy including `ecr:PutImage` and `ecr:CompleteLayerUpload` to the `kaniko` service account in the `build` namespace. Build times were roughly 2 minutes for the MCP Server and 3 minutes for the Weather Agent.
@@ -426,6 +453,13 @@ helm upgrade weather-agent manifests/helm/agent \
 ```
 
 `mcp-remote.yaml` is a values override file that switches the MCP connection from stdio (local) to HTTP (remote MCP Server). `a2a.http_url` sets the URL in the agent card to the Kubernetes Service FQDN — needed for Part 2's A2A integration.
+
+Wait for the deployments to complete.
+
+```bash title="Terminal"
+kubectl rollout status deployment weather-mcp -n mcp-servers --timeout=180s
+kubectl rollout status deployment weather-agent -n agents --timeout=180s
+```
 
 A test request for NYC's 3-day forecast returned the following. Use `kubectl port-forward` to access the service from outside the cluster:
 
