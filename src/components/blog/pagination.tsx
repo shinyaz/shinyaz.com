@@ -20,6 +20,16 @@ function getPageNumbers(current: number, total: number): (number | "ellipsis")[]
   return pages;
 }
 
+function getMobilePageNumbers(current: number, total: number): (number | "ellipsis")[] {
+  if (total <= 3) return Array.from({ length: total }, (_, i) => i + 1);
+  const pages: (number | "ellipsis")[] = [1];
+  if (current > 2) pages.push("ellipsis");
+  if (current !== 1 && current !== total) pages.push(current);
+  if (current < total - 1) pages.push("ellipsis");
+  pages.push(total);
+  return pages;
+}
+
 export function Pagination({ currentPage, totalPages, basePath, locale }: PaginationProps) {
   if (totalPages <= 1) return null;
 
@@ -31,8 +41,24 @@ export function Pagination({ currentPage, totalPages, basePath, locale }: Pagina
     return page === 1 ? basePath : `${basePath}?page=${page}`;
   }
 
-  const linkClass = "rounded-md border border-border px-4 py-2 text-sm hover:bg-accent transition-colors md:px-3 md:py-1.5";
-  const disabledClass = "rounded-md border border-border px-4 py-2 text-sm opacity-40 md:px-3 md:py-1.5";
+  const linkClass = "rounded-md border border-border px-3 py-1.5 text-sm hover:bg-accent transition-colors";
+  const disabledClass = "rounded-md border border-border px-3 py-1.5 text-sm opacity-40";
+
+  function renderPages(pages: (number | "ellipsis")[]) {
+    return pages.map((p, i) =>
+      p === "ellipsis" ? (
+        <span key={`ellipsis-${i}`} className="px-2 text-sm text-muted-foreground">…</span>
+      ) : p === currentPage ? (
+        <span key={p} className="rounded-md border border-foreground bg-foreground px-3 py-1.5 text-sm text-background" aria-current="page">
+          {p}
+        </span>
+      ) : (
+        <Link key={p} href={pageHref(p)} className={linkClass}>
+          {p}
+        </Link>
+      )
+    );
+  }
 
   return (
     <nav className="mt-8 flex flex-wrap items-center justify-center gap-2" aria-label="Pagination">
@@ -43,19 +69,8 @@ export function Pagination({ currentPage, totalPages, basePath, locale }: Pagina
       ) : (
         <span className={disabledClass}>{t.pagination.prev}</span>
       )}
-      {getPageNumbers(currentPage, totalPages).map((p, i) =>
-        p === "ellipsis" ? (
-          <span key={`ellipsis-${i}`} className="px-2 text-sm text-muted-foreground">…</span>
-        ) : p === currentPage ? (
-          <span key={p} className="rounded-md border border-foreground bg-foreground px-4 py-2 text-sm text-background md:px-3 md:py-1.5" aria-current="page">
-            {p}
-          </span>
-        ) : (
-          <Link key={p} href={pageHref(p)} className={linkClass}>
-            {p}
-          </Link>
-        )
-      )}
+      <span className="contents md:hidden">{renderPages(getMobilePageNumbers(currentPage, totalPages))}</span>
+      <span className="hidden md:contents">{renderPages(getPageNumbers(currentPage, totalPages))}</span>
       {nextPage ? (
         <Link href={pageHref(nextPage)} className={linkClass}>
           {t.pagination.next}
