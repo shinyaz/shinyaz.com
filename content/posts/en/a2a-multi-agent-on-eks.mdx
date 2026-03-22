@@ -162,7 +162,56 @@ Deploying the Travel Agent requires specifying the A2A connection target via Hel
 <details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
 <summary className="cursor-pointer font-medium">Travel Agent deployment steps</summary>
 
-Build the Travel Agent container image (same Kaniko workflow as Part 1) and deploy with Helm. The key is specifying the Weather Agent's A2A endpoint in `a2a.a2a_agents.json`.
+Create the S3 session bucket and Pod Identity for the Travel Agent, then build the container image and deploy with Helm.
+
+```bash title="Terminal"
+# Travel Agent ECR repository
+aws ecr create-repository --repository-name agents-on-eks/travel-agent --region $AWS_REGION
+
+# Travel Agent S3 session bucket
+aws s3 mb s3://travel-agent-session-${ACCOUNT_ID} --region $AWS_REGION
+
+# Travel Agent IAM role (Bedrock + S3)
+cat > /tmp/travel-policy.json << EOF
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "BedrockAccess",
+      "Effect": "Allow",
+      "Action": ["bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream"],
+      "Resource": "*"
+    },
+    {
+      "Sid": "S3Access",
+      "Effect": "Allow",
+      "Action": ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"],
+      "Resource": "arn:aws:s3:::travel-agent-session-${ACCOUNT_ID}/*"
+    },
+    {
+      "Sid": "S3List",
+      "Effect": "Allow",
+      "Action": ["s3:ListBucket"],
+      "Resource": "arn:aws:s3:::travel-agent-session-${ACCOUNT_ID}"
+    }
+  ]
+}
+EOF
+
+aws iam create-role --role-name travel-agent-pod-role \
+  --assume-role-policy-document file:///tmp/pod-identity-trust.json
+aws iam put-role-policy --role-name travel-agent-pod-role \
+  --policy-name bedrock-s3 --policy-document file:///tmp/travel-policy.json
+
+TRAVEL_ROLE_ARN=$(aws iam get-role --role-name travel-agent-pod-role \
+  --query 'Role.Arn' --output text)
+aws eks create-pod-identity-association \
+  --cluster-name $CLUSTER_NAME --region $AWS_REGION \
+  --namespace agents --service-account travel-agent \
+  --role-arn $TRAVEL_ROLE_ARN
+```
+
+Build the container image. The key is specifying the Weather Agent's A2A endpoint in `a2a.a2a_agents.json`.
 
 ```bash title="Terminal"
 # Upload Travel Agent build context to S3
@@ -271,6 +320,8 @@ kubectl rollout status deployment travel-agent -n agents --timeout=120s
 After clearing sessions, the Travel Agent fetched the correct URL from the agent card via `a2a_list_discovered_agents` and successfully communicated with the Weather Agent.
 
 This is a problem unique to AI agents. In traditional microservices, config changes take effect immediately. But **AI agents with session state can have their decisions poisoned by stale conversation history**. Clearing sessions after connection changes should be part of the operational runbook.
+
+> **Note:** Even after applying both fixes above, the LLM may still pass a guessed URL to `a2a_send_message`'s `target_agent_url` parameter instead of using the discovered URL. The internal implementation of `a2a_send_message` does not fall back to discovered URLs, so if the LLM skips calling `a2a_list_discovered_agents` and guesses the URL, it will attempt to connect to an unreachable destination. If you encounter this issue, add an instruction to the Travel Agent's `agent.md` system prompt telling the LLM to always call `a2a_list_discovered_agents` to obtain the target URL before calling `a2a_send_message`.
 
 ## Verification
 

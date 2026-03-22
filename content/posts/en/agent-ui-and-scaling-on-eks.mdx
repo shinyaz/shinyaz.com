@@ -113,6 +113,9 @@ UI deployment completes in three steps. First, build the Agent UI container imag
 <summary className="cursor-pointer font-medium">Agent UI build steps</summary>
 
 ```bash title="Terminal"
+# Agent UI ECR repository
+aws ecr create-repository --repository-name agents-on-eks/agent-ui --region $AWS_REGION
+
 cd ui
 tar czf /tmp/agent-ui-context.tar.gz .
 aws s3 cp /tmp/agent-ui-context.tar.gz s3://kaniko-build-${ACCOUNT_ID}/build/

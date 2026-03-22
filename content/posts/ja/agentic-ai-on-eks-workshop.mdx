@@ -51,20 +51,18 @@ export ECR_HOST=${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com
 export CLUSTER_NAME=eks-sandbox  # 自分のクラスター名に変更
 ```
 
-ECR リポジトリの作成。4 コンポーネント分を一括で作る。
+ECR リポジトリの作成。Part 1 で使う 2 コンポーネント分を作る。
 
 ```bash title="Terminal"
-for repo in agents-on-eks/weather-mcp agents-on-eks/weather-agent \
-            agents-on-eks/travel-agent agents-on-eks/agent-ui; do
+for repo in agents-on-eks/weather-mcp agents-on-eks/weather-agent; do
   aws ecr create-repository --repository-name $repo --region $AWS_REGION
 done
 ```
 
-S3 セッションバケットの作成。Weather Agent と Travel Agent がそれぞれユーザーごとの会話履歴を保持する。
+S3 セッションバケットの作成。Weather Agent がユーザーごとの会話履歴を保持する。
 
 ```bash title="Terminal"
 aws s3 mb s3://weather-agent-session-${ACCOUNT_ID} --region $AWS_REGION
-aws s3 mb s3://travel-agent-session-${ACCOUNT_ID} --region $AWS_REGION
 ```
 
 Pod Identity 用の IAM ロール作成。エージェントが Bedrock と S3 にアクセスするために必要だ。
@@ -122,8 +120,6 @@ aws eks create-pod-identity-association \
   --namespace agents --service-account weather-agent \
   --role-arn $WEATHER_ROLE_ARN
 ```
-
-Travel Agent 用も同様に作成する（S3 バケット名を `travel-agent-session-${ACCOUNT_ID}` に変更）。
 
 </details>
 

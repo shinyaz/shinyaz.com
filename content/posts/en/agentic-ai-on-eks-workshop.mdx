@@ -51,20 +51,18 @@ export ECR_HOST=${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com
 export CLUSTER_NAME=eks-sandbox  # Change to your cluster name
 ```
 
-Create ECR repositories for all 4 components.
+Create ECR repositories for the two components used in Part 1.
 
 ```bash title="Terminal"
-for repo in agents-on-eks/weather-mcp agents-on-eks/weather-agent \
-            agents-on-eks/travel-agent agents-on-eks/agent-ui; do
+for repo in agents-on-eks/weather-mcp agents-on-eks/weather-agent; do
   aws ecr create-repository --repository-name $repo --region $AWS_REGION
 done
 ```
 
-Create S3 session buckets. The Weather Agent and Travel Agent each store per-user conversation history.
+Create an S3 session bucket. The Weather Agent stores per-user conversation history here.
 
 ```bash title="Terminal"
 aws s3 mb s3://weather-agent-session-${ACCOUNT_ID} --region $AWS_REGION
-aws s3 mb s3://travel-agent-session-${ACCOUNT_ID} --region $AWS_REGION
 ```
 
 Create IAM roles for Pod Identity. Agents need access to Bedrock and S3.
@@ -122,8 +120,6 @@ aws eks create-pod-identity-association \
   --namespace agents --service-account weather-agent \
   --role-arn $WEATHER_ROLE_ARN
 ```
-
-Create the Travel Agent role similarly (change the S3 bucket name to `travel-agent-session-${ACCOUNT_ID}`).
 
 </details>
 
