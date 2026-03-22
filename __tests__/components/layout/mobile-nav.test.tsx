@@ -46,7 +46,7 @@ describe("MobileNav", () => {
     expect(screen.getByText("Uses")).toBeDefined();
     expect(screen.getByText("Now")).toBeDefined();
     expect(screen.getByText("About")).toBeDefined();
-    expect(screen.getByText("Search")).toBeDefined();
+    expect(screen.getByLabelText("Search")).toBeDefined();
   });
 
   it("nav links have correct hrefs for en locale", () => {
