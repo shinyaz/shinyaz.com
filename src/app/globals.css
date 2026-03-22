@@ -246,6 +246,25 @@ body {
   color: var(--muted-foreground);
 }
 
+/* Slim scrollbar for code blocks */
+pre {
+  scrollbar-width: thin;
+  scrollbar-color: var(--border) transparent;
+
+  &::-webkit-scrollbar {
+    height: 4px;
+  }
+
+  &::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  &::-webkit-scrollbar-thumb {
+    background: var(--border);
+    border-radius: 2px;
+  }
+}
+
 /* KaTeX overrides */
 .katex-display {
   overflow-x: auto;
