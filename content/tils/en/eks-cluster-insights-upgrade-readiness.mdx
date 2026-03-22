@@ -8,7 +8,7 @@ tags: ["aws", "eks", "kubernetes"]
 
 I'd been manually checking EKS upgrade readiness, not realizing AWS has a built-in feature called Cluster Insights. One command surfaces kubelet version skew, add-on incompatibility, and other blockers — no extra tooling needed.
 
-```bash
+```bash title="Terminal"
 aws eks list-insights --region ap-northeast-1 --cluster-name my-cluster
 # For details on a specific finding:
 aws eks describe-insight --region ap-northeast-1 --cluster-name my-cluster --id <insight-id>

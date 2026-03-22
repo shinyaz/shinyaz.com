@@ -10,13 +10,13 @@ About ページや Uses ページは知っていたが、[nownownow.com](https:/
 
 実装のポイントは Velite の Page スキーマに `lastUpdated` を追加したことだ。
 
-```typescript
+```typescript title="TypeScript"
 lastUpdated: s.isodate().optional()
 ```
 
 `optional` にすることで既存ページ（About、Uses、Colophon）に影響なし。ルート側では `Intl.DateTimeFormat` を使えばライブラリ不要で locale 対応の日付フォーマットが手に入る。
 
-```tsx
+```tsx title="TypeScript"
 {new Intl.DateTimeFormat(locale, {
   year: "numeric",
   month: "long",

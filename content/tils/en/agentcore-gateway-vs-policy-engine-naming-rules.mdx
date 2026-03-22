@@ -10,14 +10,14 @@ I tried creating an AgentCore Gateway and Policy Engine with the same naming pre
 
 Gateway names allow hyphens only — underscores are rejected:
 
-```text
+```text title="Output"
 Value 'my_gateway' at 'name' failed to satisfy constraint:
 Member must satisfy regular expression pattern: ([0-9a-zA-Z][-]?){1,48}
 ```
 
 Policy Engine names allow underscores only — hyphens are rejected:
 
-```text
+```text title="Output"
 Value at '/name' failed to satisfy constraint:
 Member must satisfy regular expression pattern: ^[A-Za-z][A-Za-z0-9_]*$
 ```

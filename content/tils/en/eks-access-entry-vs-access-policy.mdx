@@ -10,7 +10,7 @@ When creating an EKS ArgoCD Capability, an access entry for the IAM role gets au
 
 The issue: **access entries** (who can access the cluster) and **access policies** (what they can do) are independent. The auto-created entry only has baseline Kubernetes permissions—no resource deployment rights.
 
-```bash
+```bash title="Terminal"
 # Access entry exists (auto-created)
 aws eks describe-access-entry \
   --cluster-name sandbox \

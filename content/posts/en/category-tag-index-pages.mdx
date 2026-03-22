@@ -32,7 +32,7 @@ The two index pages use different layouts, and the reason comes down to the shap
 
 **Categories** use a card grid (`grid gap-4 sm:grid-cols-2`). Each category has a name, description, and post count — structured data that fits naturally into a card. There are few categories (currently just one), so each deserves visual weight:
 
-```tsx
+```tsx title="TypeScript"
 <Link className="rounded-lg border border-border p-4 transition-colors hover:bg-accent">
   <h2 className="font-semibold">{name}</h2>
   <p className="mt-1 text-sm text-muted-foreground">{description}</p>
@@ -42,7 +42,7 @@ The two index pages use different layouts, and the reason comes down to the shap
 
 **Tags** use a flex-wrap tag cloud. Tags are flat strings with no description — just a name and count. There are many of them, so a dense layout makes more sense:
 
-```tsx
+```tsx title="TypeScript"
 <Link className="inline-flex items-center gap-1.5 rounded-full border border-border px-3 py-1.5 text-sm">
   #{tag} <span className="text-xs">({postCount})</span>
 </Link>

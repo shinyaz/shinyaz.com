@@ -65,7 +65,7 @@ The collection layer has three responsibilities: fetch data from each agent's lo
 
 A shared schema is essential for unified querying.
 
-```json
+```json title="JSON"
 {
   "timestamp": "2026-03-09T10:30:00Z",
   "agent": "claude-code",
@@ -98,7 +98,7 @@ The harder case is when a single developer uses multiple agents on the same PR �
 
 ### Collection Methods — and What's Actually Available
 
-```text
+```text title="Output"
 Claude Code  → CLI logs (~/.claude/logs) + API usage dashboard
 Cursor       → VS Code extension telemetry + Cursor dashboard API
 Copilot      → GitHub Copilot Metrics API (Organization-level)

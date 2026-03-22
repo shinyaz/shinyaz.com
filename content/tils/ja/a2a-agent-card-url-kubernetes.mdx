@@ -8,7 +8,7 @@ tags: ["a2a", "kubernetes", "strands-agents", "eks"]
 
 EKS 上で Travel Agent から Weather Agent に A2A 通信しようとしたら、以下のエラーで失敗した。
 
-```text
+```text title="Output"
 A2AClientHTTPError: HTTP Error 503: Network communication error
 fetching agent card from http://0.0.0.0:9000/.well-known/agent-card.json:
 All connection attempts failed
@@ -18,7 +18,7 @@ All connection attempts failed
 
 Helm values で `a2a.http_url` に Kubernetes Service の FQDN を設定すれば解決する。
 
-```yaml
+```yaml title="values.yaml"
 a2a:
   http_url: "http://weather-agent.agents:9000/"
 ```

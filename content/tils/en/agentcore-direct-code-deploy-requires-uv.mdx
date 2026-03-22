@@ -8,13 +8,13 @@ tags: ["agentcore", "bedrock", "uv"]
 
 Ran `agentcore configure -dt direct_code_deploy` and hit this:
 
-```text
+```text title="Output"
 ❌ Error: Direct Code Deploy deployment unavailable (uv not found (install from: https://docs.astral.sh/uv/))
 ```
 
 Direct Code Deploy uses `uv` under the hood to cross-compile dependencies for Linux ARM64. Installing it fixed the issue:
 
-```bash
+```bash title="Terminal"
 pip install uv
 agentcore configure -e my_server.py --protocol AGUI -dt direct_code_deploy -ni
 ```

@@ -58,7 +58,7 @@ By organizing meta-skills into a shared library, every developer starts from the
 
 First, we'll build a skill library for use across the entire organization. The key design decision is separating `_core` (shared across all teams) from team-specific directories. Like scoped npm packages, organizing skills into namespaced categories prevents naming conflicts while improving discoverability:
 
-```bash
+```bash title="Terminal"
 # Monorepo structure
 organization-skills/
 ├── .claude/
@@ -81,7 +81,7 @@ Each team customizes skills for their specific needs. What's important here is t
 
 #### Frontend Team
 
-```markdown
+```markdown title="SKILL.md (create-component)"
 # .claude/skills/frontend/create-component/SKILL.md
 
 ---
@@ -101,7 +101,7 @@ disable-model-invocation: true
 
 #### Backend Team
 
-```markdown
+```markdown title="SKILL.md (create-api)"
 # .claude/skills/backend/create-api/SKILL.md
 
 ---
@@ -124,7 +124,7 @@ disable-model-invocation: true
 
 Skills aren't "set and forget." Like code, they require ongoing maintenance. Unused skills, duplicate skills, and outdated skills accumulate over time and can cause more confusion than they solve. That's why we plan to establish a weekly process for improving and sharing skills:
 
-```bash
+```bash title="Terminal"
 # Weekly Friday improvement cycle
 /analyze-team-skills        # Analyze skill usage across the team
 /identify-duplicates        # Identify duplicate skills
@@ -138,7 +138,7 @@ Sharing skills across teams requires a technical infrastructure. Here, we're des
 
 ### 1. Central Repository
 
-```bash
+```bash title="Terminal"
 # Set up central skill repository
 git clone https://github.com/org/claude-skills-library
 cd claude-skills-library
@@ -153,7 +153,7 @@ git checkout -b team/devops
 
 This script distributes skills from the central repository to individual projects. Core skills (`_core`) are force-distributed to all projects, while team-specific skills are selectively distributed based on the `$TEAM` environment variable. This ensures each project receives only the skills it needs:
 
-```bash
+```bash title="sync-skills.sh"
 #!/bin/bash
 # sync-skills.sh
 
@@ -172,7 +172,7 @@ fi
 
 A bottom-up growth mechanism is equally important. If skills are only pushed top-down, they risk missing real-world needs. The following workflow lets individuals propose skills to the organization, modeled after the open-source contribution process:
 
-```markdown
+```markdown title="SKILL.md (propose-skill)"
 # .claude/skills/propose-skill/SKILL.md
 
 ---
@@ -235,7 +235,7 @@ We have an upcoming major upgrade from Next.js 15 to 16 (200+ components) where 
 
 We'll create a migration-specific skill so all developers follow the same procedure. Because each step is explicitly documented, even developers who aren't deeply familiar with the framework's internal changes can safely execute the migration:
 
-```markdown
+```markdown title="SKILL.md (nextjs16-migration)"
 # .claude/skills/nextjs16-migration/SKILL.md
 
 ---
@@ -287,8 +287,7 @@ gantt
 
 As skills proliferate, questions arise: "Who's responsible for this?" and "What if someone changes it without notice?" Just like code reviews, skills need a review process to maintain quality:
 
-```yaml
-# skill-governance.yml
+```yaml title="skill-governance.yml"
 roles:
   skill-owner:
     - Review and approve new skills
@@ -311,7 +310,7 @@ process:
 
 Deploying a tool without teaching people how to use it is pointless. We're designing tiered training so everyone can progressively adopt skills. Level 1 is mandatory for all team members—building a shared understanding of "what skills are" is the top priority:
 
-```markdown
+```markdown title="Markdown"
 ## Claude Code Skills Training
 
 ### Level 1: Basic (Required for all)
@@ -343,7 +342,7 @@ The flip side of enabling bottom-up skill creation is the risk of similar skills
 
 **Solution**: Regular auditing and consolidation
 
-```bash
+```bash title="Terminal"
 # Quarterly skill audit
 /audit-all-skills
 /find-duplicate-skills
@@ -357,7 +356,7 @@ Since skill updates affect the entire team, it's essential to track "when and wh
 
 **Solution**: Semantic versioning
 
-```markdown
+```markdown title="Output"
 # Skill version management
 
 skills/
@@ -372,7 +371,7 @@ When skill versions drift between projects, you end up with the same skill name 
 
 **Solution**: Enforced core skills with regular syncing
 
-```bash
+```bash title="Terminal"
 # Daily sync job
 0 9 * * * /usr/local/bin/sync-core-skills.sh
 ```
@@ -383,7 +382,7 @@ When skill versions drift between projects, you end up with the same skill name 
 
 Beyond a successful team deployment, there's potential for even more advanced automation. The next-generation features we're envisioning would delegate skill management itself to AI:
 
-```markdown
+```markdown title="Output"
 /skill-ai-suggest # AI suggests needed skills based on context
 /skill-auto-create # Automatically generate skills from repeated patterns
 /skill-performance # Performance analysis of skill execution
@@ -394,8 +393,7 @@ Beyond a successful team deployment, there's potential for even more advanced au
 
 Longer-term, we envision programmatically analyzing skill usage to automate the improvement cycle. Knowing quantitatively which skills are most used and how much time they save enables more accurate ROI assessments:
 
-```python
-# skill_analytics.py
+```python title="skill_analytics.py"
 def analyze_skill_usage():
     """Analyze skill usage patterns"""
     return {

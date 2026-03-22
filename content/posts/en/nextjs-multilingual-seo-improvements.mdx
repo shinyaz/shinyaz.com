@@ -22,7 +22,7 @@ The site uses middleware to redirect `https://shinyaz.com/` to `https://shinyaz.
 
 The declared canonical and Google's decision were out of sync. The fix: for the default locale (`en`) home page only, set the canonical to the root URL.
 
-```typescript
+```typescript title="TypeScript"
 // src/app/[locale]/page.tsx
 const canonicalUrl =
   locale === defaultLocale ? SITE_URL : `${SITE_URL}/${locale}`;
@@ -51,7 +51,7 @@ While reviewing the sitemap during the canonical investigation, I noticed blog p
 
 I added both the TIL index page (`/til`) and individual TIL entries to the sitemap, with hreflang alternates following the same pattern as blog posts.
 
-```typescript
+```typescript title="TypeScript"
 // src/app/sitemap.ts — individual TILs with hreflang
 for (const locale of locales) {
   const tilItems = getPublishedTils(locale);
@@ -73,7 +73,7 @@ for (const locale of locales) {
 
 For feeds, I merged posts and TILs into a single feed sorted by date. Separate feeds would also work, but from a subscriber's perspective, one feed covering all content is more convenient.
 
-```typescript
+```typescript title="TypeScript"
 // src/lib/feed.ts
 function getMergedFeedItems(locale: Locale): FeedItem[] {
   const posts = getPublishedPosts(locale).map((post) => ({ ... }));
@@ -96,7 +96,7 @@ Specifically, three additions:
 
 For OG images, placing an `opengraph-image.tsx` file in the TIL route is all it takes — Next.js auto-generates the meta tags.
 
-```typescript
+```typescript title="TypeScript"
 // src/app/[locale]/til/[year]/[month]/[day]/[slug]/opengraph-image.tsx
 return new ImageResponse(
   <OgImageLayout
@@ -117,7 +117,7 @@ The remaining items are small additions, but together they strengthen signals to
 
 **`theme-color` meta tag** — Without it, the mobile browser address bar used a default color. Setting separate values for light and dark mode makes the UI consistent with the site theme.
 
-```typescript
+```typescript title="TypeScript"
 // src/app/layout.tsx
 export const viewport: Viewport = {
   themeColor: [

@@ -14,17 +14,17 @@ Most developer blogs look the same: a Next.js + Markdown setup, maybe Contentlay
 
 This post walks through the key architectural decisions and what I learned building it. Here's the stack at a glance:
 
-| Category | Technology |
-|---|---|
-| Framework | Next.js 16 (App Router) |
-| Styling | Tailwind CSS v4 |
-| Content | MDX + Velite |
+| Category          | Technology                 |
+| ----------------- | -------------------------- |
+| Framework         | Next.js 16 (App Router)    |
+| Styling           | Tailwind CSS v4            |
+| Content           | MDX + Velite               |
 | Code Highlighting | Shiki + rehype-pretty-code |
-| Math Rendering | remark-math + rehype-katex |
-| Dark Mode | next-themes |
-| PWA | Serwist |
-| Testing | Vitest + Playwright |
-| Deployment | Vercel |
+| Math Rendering    | remark-math + rehype-katex |
+| Dark Mode         | next-themes                |
+| PWA               | Serwist                    |
+| Testing           | Vitest + Playwright        |
+| Deployment        | Vercel                     |
 
 ## Why Velite for Content
 
@@ -32,7 +32,7 @@ The biggest decision was the content pipeline. Contentlayer was the obvious choi
 
 The pipeline is straightforward: MDX files go through Velite as a prebuild step, which outputs typed JSON that Next.js imports directly.
 
-```
+```text title="Output"
 content/posts/{en,ja}/*.mdx
   → Velite (prebuild)
     → .velite/ (static data)

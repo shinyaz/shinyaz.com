@@ -10,7 +10,7 @@ I noticed the tag detail pages (`/tag/[slug]`) and category detail pages (`/cate
 
 The fix is straightforward. Add a `browseAll` key to the i18n dictionary and place a `Link` before the `<header>`:
 
-```tsx
+```tsx title="TypeScript"
 <Link
   href={`/${locale}/tag`}
   className="text-sm text-muted-foreground transition-colors hover:text-foreground"

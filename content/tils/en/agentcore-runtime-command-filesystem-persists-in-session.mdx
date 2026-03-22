@@ -10,7 +10,7 @@ The AgentCore Runtime docs for `InvokeAgentRuntimeCommand` say "Stateless betwee
 
 Testing with `/tmp/`, files created in one API call were visible to subsequent calls in the same session.
 
-```python
+```python title="Python"
 # API call 1
 run_command('/bin/bash -c "echo hello > /tmp/test.txt"')
 

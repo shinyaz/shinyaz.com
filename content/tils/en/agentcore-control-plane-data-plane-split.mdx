@@ -8,19 +8,19 @@ tags: ["agentcore", "bedrock", "aws"]
 
 Tried calling `create_code_interpreter` on the `bedrock-agentcore` client and got an `AttributeError`.
 
-```python
+```python title="Python"
 client = boto3.client("bedrock-agentcore", region_name="us-east-1")
 client.create_code_interpreter(...)  # ← fails
 ```
 
-```text
+```text title="Output"
 AttributeError: 'BedrockAgentCore' object has no attribute 'create_code_interpreter'.
 Did you mean: 'invoke_code_interpreter'?
 ```
 
 AgentCore uses separate boto3 clients for the **control plane** and **data plane**.
 
-```python
+```python title="Python"
 # Control plane: resource CRUD
 control = boto3.client("bedrock-agentcore-control", region_name="us-east-1")
 control.create_code_interpreter(...)   # ✓

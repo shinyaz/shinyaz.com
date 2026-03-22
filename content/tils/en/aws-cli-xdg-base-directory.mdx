@@ -10,7 +10,7 @@ When adding AWS CLI to my dotfiles, I wanted the config files under XDG Base Dir
 
 AWS CLI looks like it hardcodes `~/.aws/`, but two environment variables are all it takes to change that.
 
-```bash
+```bash title="Terminal"
 export AWS_CONFIG_FILE="$XDG_CONFIG_HOME/aws/config"
 export AWS_SHARED_CREDENTIALS_FILE="$XDG_CONFIG_HOME/aws/credentials"
 ```
@@ -19,7 +19,7 @@ Drop these in `zshenv` and everything — `aws configure`, `aws sso login` — p
 
 While at it, zsh completion is worth setting up too. AWS CLI v2 ships `aws_completer`, but it works through bash's `complete` interface. There's no native zsh completion function provided, so you need `bashcompinit` to load a bash compatibility layer. This is also the method recommended in the official AWS documentation.
 
-```bash
+```bash title="Terminal"
 if (( $+commands[aws] )); then
   autoload -Uz bashcompinit && bashcompinit
   complete -C aws_completer aws

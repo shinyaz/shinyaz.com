@@ -10,7 +10,7 @@ AgentCore Runtimeの`InvokeAgentRuntimeCommand`のドキュメントには "Stat
 
 実際に`/tmp/`で試してみると、同一セッション内の別APIコールで作成したファイルが普通に読めた。
 
-```python
+```python title="Python"
 # APIコール1
 run_command('/bin/bash -c "echo hello > /tmp/test.txt"')
 

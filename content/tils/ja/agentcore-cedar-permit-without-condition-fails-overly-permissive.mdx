@@ -8,7 +8,7 @@ tags: ["agentcore", "bedrock", "cedar", "aws"]
 
 AgentCore Policyで「まず全許可で動作確認して、あとから条件を絞ろう」と思い、`when`句なしの`permit`を作成したら`CREATE_FAILED`になった。
 
-```text
+```text title="Output"
 permit(
   principal,
   action == AgentCore::Action::"my-target___get_weather",
@@ -18,7 +18,7 @@ permit(
 
 ステータスが`CREATE_FAILED`になり、理由は以下の通り。
 
-```text
+```text title="Output"
 Overly Permissive: Policy Engine will allow every request for the specified
 principal (AgentCore::OAuthUser), action (my-target___get_weather) and
 resource (arn:aws:bedrock-agentcore:...) combination if the policy is added

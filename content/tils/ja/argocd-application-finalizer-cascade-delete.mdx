@@ -10,7 +10,7 @@ EKS の ArgoCD Capability で検証後、`kubectl delete application guestbook -
 
 ArgoCD の Application を削除したときにデプロイ済みリソースもカスケード削除するには、Application マニフェストに finalizer を設定する必要がある。
 
-```yaml
+```yaml title="YAML"
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:

@@ -10,7 +10,7 @@ MDX ブログに Mermaid 対応を入れようとして、最初は Server Compo
 
 結局クライアントコンポーネントで動的インポートする形に落ち着いた。ポイントは `useEffect` 内で `import("mermaid")` を呼ぶことでバンドルサイズへの影響を最小化する点と、`next-themes` の `resolvedTheme` を依存配列に入れてテーマ切り替え時に再レンダリングさせる点だ。
 
-```tsx
+```tsx title="TypeScript"
 "use client";
 
 import { useEffect, useRef, useState } from "react";

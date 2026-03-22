@@ -8,7 +8,7 @@ tags: ["dotfiles", "cli"]
 
 dotfiles を複数マシンで使っていると、「リポジトリは更新したのにデプロイし忘れた」「手動で設定をいじって差分が出ている」という状況が頻発する。`install.sh` の横に `test.sh` を置いて、3段階で検証するようにした。
 
-```bash
+```bash title="test.sh"
 # ファイル存在チェック
 check_file() {
   [[ -f "$1" ]] && ok "$2: $1" || ng "$2 not found: $1"

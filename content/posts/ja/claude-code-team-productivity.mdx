@@ -58,7 +58,7 @@ graph LR
 
 まず、組織全体で使用するスキルライブラリを構築する。ポイントは`_core`（全チーム共通）とチーム別ディレクトリの分離である。npmのスコープパッケージのように、スキルをカテゴリごとに名前空間で管理することで、命名衝突を防ぎつつ発見性を高める：
 
-```bash
+```bash title="Terminal"
 # モノレポ構造
 organization-skills/
 ├── .claude/
@@ -81,7 +81,7 @@ organization-skills/
 
 #### フロントエンドチーム
 
-```markdown
+```markdown title="SKILL.md (create-component)"
 # .claude/skills/frontend/create-component/SKILL.md
 
 ---
@@ -101,7 +101,7 @@ disable-model-invocation: true
 
 #### バックエンドチーム
 
-```markdown
+```markdown title="SKILL.md (create-api)"
 # .claude/skills/backend/create-api/SKILL.md
 
 ---
@@ -124,7 +124,7 @@ disable-model-invocation: true
 
 スキルは作って終わりではない。コードと同様にメンテナンスが必要だ。使われていないスキル、重複するスキル、古くなったスキルが溜まると、かえって混乱の原因になる。そこで、週次でスキルの改善と共有を行うプロセスを確立する予定である：
 
-```bash
+```bash title="Terminal"
 # 毎週金曜日の改善サイクル
 /analyze-team-skills        # チーム全体のスキル使用状況分析
 /identify-duplicates        # 重複スキルの特定
@@ -138,7 +138,7 @@ disable-model-invocation: true
 
 ### 1. 中央リポジトリ
 
-```bash
+```bash title="Terminal"
 # スキル中央リポジトリのセットアップ
 git clone https://github.com/org/claude-skills-library
 cd claude-skills-library
@@ -153,7 +153,7 @@ git checkout -b team/devops
 
 中央リポジトリのスキルを各プロジェクトに配布するスクリプトである。`_core`スキルは全プロジェクトに強制配布し、チーム固有スキルは環境変数`$TEAM`で選択的に配布する。これにより、必要なスキルだけが各プロジェクトに届く仕組みになる：
 
-```bash
+```bash title="sync-skills.sh"
 #!/bin/bash
 # sync-skills.sh
 
@@ -172,7 +172,7 @@ fi
 
 ボトムアップでスキルが成長する仕組みも重要だ。トップダウンで押し付けるだけでは、現場のニーズに合わないスキルが増えてしまう。以下は、個人が作成したスキルを組織全体に提案するためのワークフローである。OSSのコントリビューションモデルを参考にしている：
 
-```markdown
+```markdown title="SKILL.md (propose-skill)"
 # .claude/skills/propose-skill/SKILL.md
 
 ---
@@ -235,7 +235,7 @@ pie title "期待される効果の分布"
 
 マイグレーション用のスキルを作成し、全開発者が同じ手順で作業する。各ステップが明文化されているため、フレームワークの内部変更に詳しくない開発者でも安全に移行作業を進められる：
 
-```markdown
+```markdown title="SKILL.md (nextjs16-migration)"
 # .claude/skills/nextjs16-migration/SKILL.md
 
 ---
@@ -287,8 +287,7 @@ gantt
 
 スキルが増えてくると「誰が管理するのか」「勝手に変更されたらどうするのか」という問題が発生する。コードレビューと同様に、スキルにもレビュープロセスを設けることで品質を維持する：
 
-```yaml
-# skill-governance.yml
+```yaml title="skill-governance.yml"
 roles:
   skill-owner:
     - Review and approve new skills
@@ -311,7 +310,7 @@ process:
 
 ツールを導入しても、使い方を知らなければ意味がない。レベル別のトレーニングを設計し、全員が段階的にスキルを活用できるようにする。特にLevel 1は全員必須とし、「スキルとは何か」の共通理解を作ることが最優先である：
 
-```markdown
+```markdown title="Markdown"
 ## Claude Code スキルトレーニング
 
 ### Level 1: Basic (全員必須)
@@ -343,7 +342,7 @@ process:
 
 **対策**：定期的な監査と統合
 
-```bash
+```bash title="Terminal"
 # 四半期ごとのスキル監査
 /audit-all-skills
 /find-duplicate-skills
@@ -357,7 +356,7 @@ process:
 
 **対策**：セマンティックバージョニング
 
-```markdown
+```markdown title="Output"
 # スキルのバージョン管理
 
 skills/
@@ -372,7 +371,7 @@ skills/
 
 **対策**：コアスキルの強制と定期同期
 
-```bash
+```bash title="Terminal"
 # 日次同期ジョブ
 0 9 * * * /usr/local/bin/sync-core-skills.sh
 ```
@@ -383,7 +382,7 @@ skills/
 
 チーム展開が成功した先には、さらに高度な自動化の可能性がある。現在構想中の次世代機能は、スキルの管理自体をAIに委ねるというものだ：
 
-```markdown
+```markdown title="Output"
 /skill-ai-suggest # AIがコンテキストから必要なスキルを提案
 /skill-auto-create # 繰り返しパターンから自動でスキル生成
 /skill-performance # スキル実行のパフォーマンス分析
@@ -394,8 +393,7 @@ skills/
 
 将来的には、スキルの使用状況をプログラムで分析し、改善のサイクルを自動化することも視野に入れている。どのスキルが最も使われているか、どれだけの時間が節約されているかを定量的に把握できれば、投資対効果の判断がより正確になる：
 
-```python
-# skill_analytics.py
+```python title="skill_analytics.py"
 def analyze_skill_usage():
     """スキル使用状況の分析"""
     return {

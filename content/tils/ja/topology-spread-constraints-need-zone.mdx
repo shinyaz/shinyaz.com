@@ -10,7 +10,7 @@ EKS アップグレードの検証中、AWS の[ベストプラクティス](htt
 
 hostname だけの場合、3 Pod が別ノードに分散していても、全ノードが同じ AZ に集中する可能性がある。zone も追加すると AZ 間にも分散される。
 
-```yaml
+```yaml title="YAML"
 topologySpreadConstraints:
 - maxSkew: 1
   topologyKey: kubernetes.io/hostname

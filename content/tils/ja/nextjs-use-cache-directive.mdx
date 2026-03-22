@@ -8,7 +8,7 @@ tags: ["nextjs", "caching"]
 
 Server Component のデータ取得にキャッシュを効かせたくて Next.js のドキュメントを読んでいたら、従来の `fetch(..., { next: { revalidate: 60 } })` とは別に [`"use cache"` ディレクティブ](https://nextjs.org/docs/app/api-reference/directives/use-cache)が追加されていた。驚いたのは、`fetch` に限らず**任意の非同期関数や Server Component にそのまま使える**こと：
 
-```tsx
+```tsx title="TypeScript"
 async function getData() {
   "use cache";
   const res = await fetch("https://api.example.com/data");
@@ -18,7 +18,7 @@ async function getData() {
 
 従来のパターンだと `fetch` の呼び出しごとにキャッシュ設定を書く必要があったが、`"use cache"` なら関数単位でキャッシュが効く。データベースクエリや外部 API のラッパー関数にもそのまま使えるのが嬉しい。キャッシュ期間は `cacheLife` で制御する：
 
-```tsx
+```tsx title="TypeScript"
 import { cacheLife } from "next/cache";
 
 async function getData() {

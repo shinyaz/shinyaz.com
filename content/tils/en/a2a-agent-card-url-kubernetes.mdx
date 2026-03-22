@@ -8,7 +8,7 @@ tags: ["a2a", "kubernetes", "strands-agents", "eks"]
 
 Tried to send an A2A message from Travel Agent to Weather Agent on EKS and got:
 
-```text
+```text title="Output"
 A2AClientHTTPError: HTTP Error 503: Network communication error
 fetching agent card from http://0.0.0.0:9000/.well-known/agent-card.json:
 All connection attempts failed
@@ -18,7 +18,7 @@ The A2A server binds to `host=0.0.0.0` by default and publishes `http://0.0.0.0:
 
 Fix: set `a2a.http_url` to the Kubernetes Service FQDN in Helm values.
 
-```yaml
+```yaml title="values.yaml"
 a2a:
   http_url: "http://weather-agent.agents:9000/"
 ```

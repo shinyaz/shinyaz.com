@@ -10,7 +10,7 @@ MDX ブログに Mermaid 図のレンダリングを実装しようとした。`
 
 ビルド後の Velite 出力を調べると、`rehype-pretty-code` が構造を完全に書き換えていた。
 
-```json
+```json title="Output"
 {
   "before": "<pre><code class=\"language-mermaid\">graph TD...</code></pre>",
   "after": "<figure data-rehype-pretty-code-figure><pre data-language=\"mermaid\"><code data-language=\"mermaid\"><span data-line><span style=\"...\">graph TD</span></span>...</code></pre></figure>"
@@ -19,7 +19,7 @@ MDX ブログに Mermaid 図のレンダリングを実装しようとした。`
 
 `className` は消え、代わりに `data-language` が付与される。さらに中身のテキストは `<span data-line>` の入れ子に分割されている。対処は2段階だ：
 
-```tsx
+```tsx title="TypeScript"
 // 1. data-language で検出
 function isMermaidBlock(props, child) {
   if (props["data-language"] === "mermaid") return true;

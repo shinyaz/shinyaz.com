@@ -27,7 +27,7 @@ Third, **duplicated quality standards**. Three skills — `creating-skill`, `ana
 
 The most important naming rule in the official best practices is consistency within the collection. Three mixed patterns was a clear violation.
 
-```text
+```text title="Output"
 # Before → After
 fix-lint          → fixing-lint
 sync-i18n         → syncing-i18n
@@ -52,7 +52,7 @@ Whether Claude auto-selects a skill depends entirely on the `description` field 
 
 Here's the before and after for `writing-posts`:
 
-```text
+```text title="Output"
 # Before (passive)
 Blog post writing guidelines and creation workflow.
 Loaded when creating, editing, or reviewing blog posts
@@ -76,7 +76,7 @@ The same pattern was applied to seven skills. `debugging-build` gained Vercel de
 
 Beyond description improvements, I added skill references directly into CLAUDE.md's Critical Rules and Git Workflow sections.
 
-```markdown
+```markdown title="Markdown"
 # Before
 - **Build must pass** — No warnings allowed
 
@@ -94,7 +94,7 @@ The three skills `creating-skill`, `analyzing-agent-instructions`, and `optimizi
 
 The consolidation was straightforward: merge `analyzing-agent-instructions` into `optimizing-agent-instructions`, and extract shared quality criteria into `QUALITY-STANDARDS.md`.
 
-```text
+```text title="Output"
 # Before: 3 skills, quality standards scattered across 3 locations
 creating-skill/SKILL.md          ← naming/description rules inline
 analyzing-agent-instructions/    ← analysis workflow + quality criteria

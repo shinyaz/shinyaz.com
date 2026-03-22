@@ -24,7 +24,7 @@ Kiro's equivalent of CLAUDE.md is `.kiro/steering/*.md`. Steering files have thr
 
 Since CLAUDE.md contains project rules that should always be loaded, I placed it in `.kiro/steering/project.md` with `inclusion: always`.
 
-```yaml
+```yaml title="project.md"
 ---
 inclusion: always
 ---
@@ -47,7 +47,7 @@ Place files at `.kiro/skills/{skill-name}/SKILL.md` and Kiro loads only metadata
 
 Since agentskills.io is a cross-tool standard, SKILL.md files from `.claude/skills/` can be copied directly to `.kiro/skills/` with no changes.
 
-```bash
+```bash title="Terminal"
 cp -r .claude/skills/post-guide .kiro/skills/
 cp -r .claude/skills/fix-lint .kiro/skills/
 # ... same for other skills
@@ -57,7 +57,7 @@ cp -r .claude/skills/fix-lint .kiro/skills/
 
 The agentskills.io spec recommends that descriptions include not just what the skill does, but when to use it and relevant keywords.
 
-```yaml
+```yaml title="YAML"
 # Before
 description: Fix linting and formatting errors automatically
 
@@ -104,7 +104,7 @@ Kiro's official documentation lists four best practices for skills. I checked th
 
 The second point had the biggest impact. `run-tests` (181 lines), `add-mdx-component` (157 lines), and `post-guide` (155 lines) mixed core workflow steps with template collections. After extracting templates and patterns into `references/`, they shrank to 55, 37, and 39 lines respectively.
 
-```code
+```text title="Output"
 run-tests/
 ├── SKILL.md              # Core workflow (55 lines)
 └── references/
@@ -125,7 +125,7 @@ Files in `references/` are loaded by the agent only when needed, keeping the con
 
 ## Final File Structure
 
-```code
+```text title="Output"
 .claude/
   skills/
     post-guide/

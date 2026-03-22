@@ -10,7 +10,7 @@ After testing ArgoCD Capability on EKS, I ran `kubectl delete application guestb
 
 To cascade-delete deployed resources when removing an Application, you need a finalizer:
 
-```yaml
+```yaml title="YAML"
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:

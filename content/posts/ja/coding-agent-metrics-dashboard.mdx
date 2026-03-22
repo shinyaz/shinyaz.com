@@ -67,7 +67,7 @@ graph TD
 
 異なるエージェントのデータを統一的に扱うには、共通スキーマが不可欠だ。
 
-```json
+```json title="JSON"
 {
   "timestamp": "2026-03-09T10:30:00Z",
   "agent": "claude-code",
@@ -100,7 +100,7 @@ graph TD
 
 ### エージェント別の収集方法と現実的な制約
 
-```text
+```text title="Output"
 Claude Code  → CLIログ (~/.claude/logs) + API使用量ダッシュボード
 Cursor       → VS Code拡張テレメトリ + Cursorダッシュボード API
 Copilot      → GitHub Copilot Metrics API (Organization単位)

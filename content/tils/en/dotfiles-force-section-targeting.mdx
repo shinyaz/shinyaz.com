@@ -10,7 +10,7 @@ My dotfiles `install.sh` had a `--force` flag, but it overwrote everything — i
 
 The fix was adding a section name as a third argument to `copy_file`.
 
-```bash
+```bash title="install.sh"
 should_force() {
   local section="$1"
   [[ "$FORCE_ALL" == true ]] || [[ " ${FORCE_TARGETS[*]} " == *" $section "* ]]

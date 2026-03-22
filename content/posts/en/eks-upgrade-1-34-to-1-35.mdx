@@ -25,7 +25,7 @@ AWS publishes [EKS upgrade best practices](https://docs.aws.amazon.com/eks/lates
 | Node OS | Bottlerocket |
 | Add-ons | aws-guardduty-agent (v1.12.1-eksbuild.2) |
 
-```bash
+```bash title="Terminal"
 eksctl create cluster \
   --name eks-sandbox \
   --region ap-northeast-1 \
@@ -55,7 +55,7 @@ I skipped this step since this was a fresh test cluster. In production — espec
 
 EKS Cluster Insights proactively detect issues that could block an upgrade.
 
-```bash
+```bash title="Terminal"
 aws eks list-insights --region ap-northeast-1 --cluster-name eks-sandbox
 ```
 
@@ -65,7 +65,7 @@ Result: empty — no blockers. This is expected for a fresh cluster, but product
 
 Two tools for thorough coverage: [kubent](https://github.com/doitintl/kube-no-trouble) and [pluto](https://github.com/FairwindsOps/pluto).
 
-```bash
+```bash title="Terminal"
 kubent
 # Target K8s version is 1.34.4-eks-f69f56f
 # Retrieved 34 resources from collector — no deprecations found
@@ -88,7 +88,7 @@ Three aspects of the underlying infrastructure to verify before upgrading.
 
 ### Add-on Compatibility
 
-```bash
+```bash title="Terminal"
 aws eks list-addons --cluster-name eks-sandbox
 # ["aws-guardduty-agent"]
 
@@ -107,7 +107,7 @@ To verify availability during the upgrade, I deployed a sample app with delibera
 - **3 replicas + topologySpreadConstraints** — Spread pods evenly across nodes and AZs. AWS best practices recommend configuring both `kubernetes.io/hostname` (node spread) and `topology.kubernetes.io/zone` (AZ spread)
 - **PodDisruptionBudget (minAvailable: 66%)** — Guarantee at least 2 of 3 pods stay Running
 
-```yaml
+```yaml title="YAML"
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -162,7 +162,7 @@ After deployment, all 3 pods landed on 3 different nodes. PDB showed `ALLOWED DI
 
 I recorded pod and node status every 30 seconds while running the control plane upgrade.
 
-```bash
+```bash title="Terminal"
 eksctl upgrade cluster --name eks-sandbox --version 1.35 --approve
 ```
 
@@ -184,7 +184,7 @@ eksctl upgrade cluster --name eks-sandbox --version 1.35 --approve
 
 During the CP upgrade (~9 minutes), pods were completely unaffected. Node replacement only began after the upgrade completed.
 
-```text
+```text title="Output"
 ---22:09:17--- (just before CP upgrade)
 nginx-67686f8c5-j6865   Running   i-0a797512240b8a78d  (v1.34)
 nginx-67686f8c5-qzpqd   Running   i-0f1976563dcc3e932  (v1.34)

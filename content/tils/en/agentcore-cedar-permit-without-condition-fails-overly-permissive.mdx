@@ -8,7 +8,7 @@ tags: ["agentcore", "bedrock", "cedar", "aws"]
 
 Tried the "allow everything first, tighten later" approach with AgentCore Policy by creating a `permit` without a `when` clause. Got `CREATE_FAILED`.
 
-```text
+```text title="Output"
 permit(
   principal,
   action == AgentCore::Action::"my-target___get_weather",
@@ -18,7 +18,7 @@ permit(
 
 The status reason:
 
-```text
+```text title="Output"
 Overly Permissive: Policy Engine will allow every request for the specified
 principal (AgentCore::OAuthUser), action (my-target___get_weather) and
 resource (arn:aws:bedrock-agentcore:...) combination if the policy is added

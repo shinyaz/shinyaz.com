@@ -10,7 +10,7 @@ tags: ["nextjs", "web-design"]
 
 修正はシンプルだ。i18n辞書に `browseAll` キーを追加し、`<header>` の直前に `Link` を配置する。
 
-```tsx
+```tsx title="TypeScript"
 <Link
   href={`/${locale}/tag`}
   className="text-sm text-muted-foreground transition-colors hover:text-foreground"

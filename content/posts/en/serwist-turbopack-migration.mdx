@@ -36,7 +36,7 @@ By treating the SW as "just another route," it sidesteps the entire webpack-vs-T
 
 First, swap the packages and wrap your Next.js config with `withSerwist`. Unlike `withSerwistInit` from the old package, this wrapper is dead simple — all it does is add `esbuild` to `serverExternalPackages`. No SW options, no magic.
 
-```bash
+```bash title="Terminal"
 npm uninstall @serwist/next
 npm install -D @serwist/turbopack esbuild
 ```

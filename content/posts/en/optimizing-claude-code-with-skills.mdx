@@ -24,7 +24,7 @@ Why does this matter? CLAUDE.md is automatically loaded every time Claude Code s
 
 My bloated CLAUDE.md looked like this:
 
-```markdown
+```markdown title="CLAUDE.md (before)"
 ## Content Writing
 
 ### Common Conventions
@@ -63,7 +63,7 @@ Skills are Markdown files placed in the `.claude/skills/` directory that can be 
 
 ### Implemented Skills Structure
 
-```
+```text title="Output"
 .claude/skills/
 ├── post-guide/       # Blog post writing guide & creation
 ├── til-guide/        # TIL entry writing guide & creation
@@ -79,7 +79,7 @@ Each skill lives in its own directory with a `SKILL.md` file containing the proc
 
 ### Example Skill: `/post-guide`
 
-```markdown
+```markdown title="SKILL.md (post-guide)"
 ---
 name: post-guide
 description: Blog post writing guidelines and creation workflow. Loaded when creating, editing, or reviewing blog posts in content/posts/.
@@ -119,7 +119,7 @@ For skills like `/fix-lint` that only contain side effects such as file changes 
 
 The optimized CLAUDE.md is now just 59 lines. What remains is only "information Claude needs to know every time" — command lists, skill references, and project-specific constraints. All detailed procedures have moved to skills, loaded only when needed:
 
-```markdown
+```markdown title="CLAUDE.md (after)"
 # CLAUDE.md
 
 **Language rule:** Think in English internally.
@@ -200,7 +200,7 @@ Invoking skills is straightforward. Simply type `/skill-name` during a Claude Co
 
 ### Running Skills
 
-```bash
+```bash title="Terminal"
 # Create new blog post
 /post-guide nextjs-performance-tips
 
@@ -240,7 +240,7 @@ Here's how to introduce the skills system in your own project. The key is to pro
 
 Check your current CLAUDE.md line count. Over 100 lines means significant optimization potential. Under 50, and you may be fine for now:
 
-```bash
+```bash title="Terminal"
 wc -l CLAUDE.md  # Check current line count
 ```
 
@@ -248,7 +248,7 @@ wc -l CLAUDE.md  # Check current line count
 
 Just create a directory and place a SKILL.md inside — no complex configuration needed:
 
-```bash
+```bash title="Terminal"
 mkdir -p .claude/skills/your-skill
 cat > .claude/skills/your-skill/SKILL.md << 'EOF'
 ---
@@ -264,7 +264,7 @@ EOF
 
 Commit team-shared skills to Git, but manage personal customizations with a `.local/` suffix and add them to .gitignore. This maintains team standards while accommodating individual preferences:
 
-```bash
+```bash title="Terminal"
 echo ".claude/skills/*.local/" >> .gitignore
 echo "CLAUDE.local.md" >> .gitignore
 ```
@@ -307,7 +307,7 @@ CLAUDE.md is loaded in full into the context window every session. Even at 59 li
 
 At session start, Claude Code reads only the `name` and `description` of every skill. It uses this information to judge which skills are relevant to the current task.
 
-```markdown
+```markdown title="SKILL.md (metadata)"
 # Only this part is read initially
 
 ---
@@ -328,7 +328,7 @@ Only skills judged relevant have their `SKILL.md` body loaded. If you have 10 sk
 
 Skills can have a directory structure, so `SKILL.md` can reference supporting files — templates, code examples, detailed guides. These load only when `SKILL.md` instructions call for them.
 
-```
+```text title="Output"
 .claude/skills/typescript-conventions/
 ├── SKILL.md              # Loaded at Stage 2
 ├── guides/

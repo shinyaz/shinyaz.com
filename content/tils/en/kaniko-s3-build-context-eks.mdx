@@ -10,7 +10,7 @@ Needed to build container images on EKS but couldn't run a Docker daemon. Kaniko
 
 Upload source as tar.gz to S3, then point the Kaniko Job at it with `--context=s3://`.
 
-```yaml
+```yaml title="kaniko-job.yaml"
 apiVersion: batch/v1
 kind: Job
 metadata:

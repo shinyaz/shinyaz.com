@@ -8,13 +8,13 @@ tags: ["agentcore", "bedrock"]
 
 Tried setting `entryPoint` to `["python3", "main.py"]` in an AgentCore Runtime code configuration. Got:
 
-```text
+```text title="Output"
 An error occurred (ValidationException) when calling the CreateAgentRuntime operation: Invalid entrypoint value. Your entrypoint is either empty, contains spaces, starts with /, ~, ., .., or has multiple dots. Update the entrypoint name and try again.
 ```
 
 Then tried `["main"]` (no extension):
 
-```text
+```text title="Output"
 Entrypoint file type does not match your selected runtime. For Python runtime, your file should end with .py extension.
 ```
 

@@ -10,7 +10,7 @@ I tried calling mermaid in a Server Component to generate SVG strings at build t
 
 The solution is a client component with dynamic import inside `useEffect`. This keeps mermaid out of the initial bundle. The other key detail: use `resolvedTheme` from `next-themes` (not `theme`) in the dependency array so diagrams re-render on theme toggle.
 
-```tsx
+```tsx title="TypeScript"
 "use client";
 
 import { useEffect, useRef, useState } from "react";

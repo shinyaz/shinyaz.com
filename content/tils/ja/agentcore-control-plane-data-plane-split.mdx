@@ -8,19 +8,19 @@ tags: ["agentcore", "bedrock", "aws"]
 
 AgentCore の Code Interpreter を boto3 で操作しようとして、`create_code_interpreter` を `bedrock-agentcore` クライアントで呼んだら `AttributeError` が返ってきた。
 
-```python
+```python title="Python"
 client = boto3.client("bedrock-agentcore", region_name="us-east-1")
 client.create_code_interpreter(...)  # ← これが失敗する
 ```
 
-```text
+```text title="Output"
 AttributeError: 'BedrockAgentCore' object has no attribute 'create_code_interpreter'.
 Did you mean: 'invoke_code_interpreter'?
 ```
 
 原因は、AgentCore が**コントロールプレーン**と**データプレーン**で別のクライアントを使う設計になっていること。
 
-```python
+```python title="Python"
 # コントロールプレーン: リソースの CRUD
 control = boto3.client("bedrock-agentcore-control", region_name="us-east-1")
 control.create_code_interpreter(...)   # ✓

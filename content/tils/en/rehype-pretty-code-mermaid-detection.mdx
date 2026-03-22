@@ -10,7 +10,7 @@ I was adding Mermaid diagram rendering to an MDX blog. The plan was simple: over
 
 Inspecting the Velite build output revealed `rehype-pretty-code` completely rewrites the structure:
 
-```json
+```json title="Output"
 {
   "before": "<pre><code class=\"language-mermaid\">graph TD...</code></pre>",
   "after": "<figure data-rehype-pretty-code-figure><pre data-language=\"mermaid\"><code data-language=\"mermaid\"><span data-line><span style=\"...\">graph TD</span></span>...</code></pre></figure>"
@@ -19,7 +19,7 @@ Inspecting the Velite build output revealed `rehype-pretty-code` completely rewr
 
 The `className` is gone, replaced by `data-language`. The text content is split into nested `<span data-line>` elements. The fix requires two steps:
 
-```tsx
+```tsx title="TypeScript"
 // 1. Detect via data-language
 function isMermaidBlock(props, child) {
   if (props["data-language"] === "mermaid") return true;

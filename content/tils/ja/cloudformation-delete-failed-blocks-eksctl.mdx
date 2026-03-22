@@ -8,14 +8,14 @@ tags: ["aws", "eks", "cloudformation"]
 
 `eksctl create cluster --name sandbox` を実行したら、こんなエラーで即座に失敗した。
 
-```text
+```text title="Output"
 creating CloudFormation stack "eksctl-sandbox-cluster": AlreadyExistsException:
 Stack [eksctl-sandbox-cluster] already exists
 ```
 
 `aws eks describe-cluster` ではクラスターが見つからないのに、CloudFormation スタックだけが `DELETE_FAILED` 状態で残っていた。以前の削除が中途半端に終わっていたらしい。
 
-```bash
+```bash title="Terminal"
 # スタックの状態を確認
 aws cloudformation describe-stacks --stack-name eksctl-sandbox-cluster \
   --query 'Stacks[0].StackStatus'

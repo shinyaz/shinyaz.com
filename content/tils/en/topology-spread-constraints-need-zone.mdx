@@ -10,7 +10,7 @@ While reviewing AWS [EKS upgrade best practices](https://docs.aws.amazon.com/eks
 
 Adding both constraints ensures cross-AZ and cross-node distribution:
 
-```yaml
+```yaml title="YAML"
 topologySpreadConstraints:
 - maxSkew: 1
   topologyKey: kubernetes.io/hostname

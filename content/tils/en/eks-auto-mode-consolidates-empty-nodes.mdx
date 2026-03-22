@@ -8,7 +8,7 @@ tags: ["aws", "eks", "kubernetes"]
 
 While monitoring an EKS upgrade, I noticed an empty node vanishing on its own. At 22:09:17 there were 4 nodes, but by 22:10:51 the one with no pods (i-0e0b6da9f0dda191c) had been terminated — no manual intervention.
 
-```text
+```text title="Output"
 ---22:09:17---  (4 nodes, 1 empty)
 i-0a797512240b8a78d   v1.34  ← has nginx pods
 i-0c1a5101ad5cdfaac   v1.34  ← has nginx pods

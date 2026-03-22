@@ -49,7 +49,7 @@ Running my own `/analyzing-agent-instructions` skill revealed three issues.
 
 The most unexpected violation. Two meta-skills created in Part 3 had "claude" in their names:
 
-```text
+```text title="Output"
 analyze-claude-md    ← "claude" is a reserved word
 optimize-claude-md   ← same issue
 ```
@@ -58,7 +58,7 @@ The official docs explicitly prohibit "anthropic" and "claude" in the `name` fie
 
 ### 2. Skills Over 100 Lines Without Reference Files
 
-```text
+```text title="Output"
 til-guide:         106 lines  ← no references/
 debug-build:       112 lines  ← no references/
 create-skill:      130 lines  ← no references/
@@ -77,7 +77,7 @@ The official docs recommend "checklists that Claude can copy to track progress" 
 
 ### Resolving Reserved Words and Adopting Gerund Naming
 
-```text
+```text title="Output"
 # Before
 analyze-claude-md     → targeted CLAUDE.md only
 optimize-claude-md    → targeted CLAUDE.md only
@@ -93,7 +93,7 @@ Beyond just renaming, I expanded the scope. The old skills only analyzed CLAUDE.
 
 Extracted details from 6 skills into reference files:
 
-```text
+```text title="Output"
 til-guide/
 ├── SKILL.md              # 106 → 44 lines (guidelines + workflow)
 └── references/
@@ -116,7 +116,7 @@ The principle is clear: **SKILL.md keeps the "what to do"**, **reference files h
 
 Both `analyzing-agent-instructions` and `optimizing-agent-instructions` were created for both Claude Code and Kiro. Since the file paths differ, I created path-adapted versions rather than direct copies:
 
-```text
+```text title="Output"
 # Claude Code version
 wc -l CLAUDE.md
 for f in .claude/skills/*/SKILL.md; do ...
@@ -132,7 +132,7 @@ Reference files (PATTERNS.md, BEST-PRACTICES.md) contain universal principles, s
 
 Added copyable progress checklists to three complex workflow skills:
 
-```markdown
+```markdown title="Markdown"
 Copy this checklist to track progress:
 
     Deploy Progress:
@@ -169,7 +169,7 @@ Analysis confirmed CLAUDE.md was already optimal. Zero red flags. Every line con
 
 The most valuable outcome was improving `/analyzing-agent-instructions` itself and re-running it. The updated skill includes all official best practice checks, so running it after any skill addition or change maintains quality:
 
-```text
+```text title="Output"
 Analysis Progress:
 - [x] Step 1: Measure CLAUDE.md — 59 lines, Good
 - [x] Step 2: Audit skills — All under 500 lines, references OK

@@ -10,13 +10,13 @@ I knew about About pages and Uses pages, but I hadn't heard of the "Now page" co
 
 For implementation, the key addition was a `lastUpdated` field in the Velite page schema:
 
-```typescript
+```typescript title="TypeScript"
 lastUpdated: s.isodate().optional()
 ```
 
 Making it `optional` means existing pages (About, Uses, Colophon) are unaffected. Then in the route, `Intl.DateTimeFormat` handles locale-aware formatting without any library:
 
-```tsx
+```tsx title="TypeScript"
 {new Intl.DateTimeFormat(locale, {
   year: "numeric",
   month: "long",

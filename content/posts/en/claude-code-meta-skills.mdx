@@ -41,7 +41,7 @@ I implemented three meta-skills, each with a distinct role. They work together i
 
 The first meta-skill is for "understanding the current state." It reads the current CLAUDE.md, analyzes line count, section structure, and redundancies, then outputs optimization suggestions as a report. This skill doesn't have `disable-model-invocation` set — since it's read-only with no side effects, it's safe for Claude to run automatically:
 
-```markdown
+```markdown title="SKILL.md (analyze-claude-md)"
 ---
 name: analyze-claude-md
 description: Analyze CLAUDE.md and suggest optimizations
@@ -65,7 +65,7 @@ This skill outputs "suggestions," not "actions." It provides the data needed to 
 
 Execution produces a report like:
 
-```markdown
+```markdown title="Output"
 ## CLAUDE.md Analysis Report
 
 ### Current State
@@ -89,7 +89,7 @@ Execution produces a report like:
 
 The second meta-skill actually modifies files based on analysis results. It extracts detailed procedures from CLAUDE.md, creates them as new skills, and updates CLAUDE.md. This automates the work I did manually in the previous post:
 
-```markdown
+```markdown title="SKILL.md (optimize-claude-md)"
 ---
 name: optimize-claude-md
 description: Optimize CLAUDE.md by moving detailed procedures to skills
@@ -116,7 +116,7 @@ The thresholds defined here — "5+ steps," "10+ lines," "repeated 3+ times" —
 
 The third meta-skill creates new skills using standardized templates. When skills are created manually, directory structures and frontmatter conventions vary from person to person. This skill ensures consistent structure across the entire team:
 
-```markdown
+```markdown title="SKILL.md (create-skill)"
 ---
 name: create-skill
 description: Create a new Claude Code skill with proper structure
@@ -152,7 +152,7 @@ Here are concrete scenarios showing when each meta-skill comes into play.
 
 When inheriting a new project or when an existing project's CLAUDE.md has grown unwieldy. Start with analysis to understand the current state, then execute optimization. No need to manually read through 355 lines to make judgments:
 
-```bash
+```bash title="Terminal"
 # Analyze current state
 /analyze-claude-md
 
@@ -171,7 +171,7 @@ When inheriting a new project or when an existing project's CLAUDE.md has grown 
 
 When recurring procedures emerge — deployment steps, migration procedures, etc. Using `/create-skill` generates a properly structured skill instantly:
 
-```bash
+```bash title="Terminal"
 # Create deployment procedure skill
 /create-skill deploy-production
 
@@ -186,7 +186,7 @@ When recurring procedures emerge — deployment steps, migration procedures, etc
 
 Left unchecked, CLAUDE.md will inevitably bloat again. Running analysis quarterly to check health and cleaning up unused skills — same philosophy as codebase refactoring:
 
-```bash
+```bash title="Terminal"
 # Quarterly optimization check
 /analyze-claude-md
 
@@ -221,7 +221,7 @@ Meta-skills themselves improve, accumulating organizational best practices. For 
 
 Once the three core meta-skills are running smoothly, the next level of automation becomes visible. All of the following are designed to reduce the management overhead as skills multiply:
 
-```markdown
+```markdown title="Output"
 /audit-skills         # Detect unused skills
 /merge-skills        # Consolidate similar skills
 /version-skills      # Skill version control
@@ -257,7 +257,7 @@ Here are four principles to keep in mind when building your own meta-skills. Unl
 
 Meta-skills reach their full potential when shared across a team. Committing them to Git means every team member uses the same optimization process. Individual tweaks are isolated with the `.local/` suffix:
 
-```bash
+```bash title="Terminal"
 # Version control team meta-skills
 git add .claude/skills/*-claude-md/
 git add .claude/skills/create-skill/

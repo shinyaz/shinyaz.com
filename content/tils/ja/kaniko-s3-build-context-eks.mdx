@@ -10,7 +10,7 @@ EKS 上でコンテナイメージをビルドする必要があったが、Dock
 
 手順はシンプル。ソースを tar.gz にして S3 にアップロードし、Kaniko Job で `--context=s3://` を指定するだけだ。
 
-```yaml
+```yaml title="kaniko-job.yaml"
 apiVersion: batch/v1
 kind: Job
 metadata:

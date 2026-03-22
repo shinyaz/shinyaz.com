@@ -8,7 +8,7 @@ tags: ["aws", "eks", "kubernetes"]
 
 EKS アップグレードの監視中に、Pod が1つも載っていないノードが勝手に消えるのを観察した。22:09:17 時点で4台あったノードのうち、空の1台（i-0e0b6da9f0dda191c）が 22:10:51 には消滅していた。
 
-```text
+```text title="Output"
 ---22:09:17---  (4ノード、うち1台は空)
 i-0a797512240b8a78d   v1.34  ← nginx Pod あり
 i-0c1a5101ad5cdfaac   v1.34  ← nginx Pod あり

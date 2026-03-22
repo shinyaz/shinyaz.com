@@ -10,7 +10,7 @@ tags: ["nextjs", "velite"]
 
 原因はシンプルで、`getAllTags` がブログ記事（`posts`）だけを見ていたからだ。`generateStaticParams` もこの関数を使っていたので、TIL にしか存在しないタグのページはそもそも生成されていなかった。
 
-```ts
+```ts title="TypeScript"
 // Before: ブログ記事のタグしか返さない
 export function getAllTags(locale?: Locale) {
   const publishedPosts = getPublishedPosts(locale);

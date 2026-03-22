@@ -32,7 +32,7 @@ tags: ["nextjs", "blog", "i18n", "seo"]
 
 **カテゴリ一覧** はカードグリッド（`grid gap-4 sm:grid-cols-2`）。各カテゴリには名前・説明・記事数という構造化データがあり、カード形式に自然に収まる。カテゴリ数は少ない（現在1つ）ので、各カテゴリに視覚的な存在感を持たせたい：
 
-```tsx
+```tsx title="TypeScript"
 <Link className="rounded-lg border border-border p-4 transition-colors hover:bg-accent">
   <h2 className="font-semibold">{name}</h2>
   <p className="mt-1 text-sm text-muted-foreground">{description}</p>
@@ -42,7 +42,7 @@ tags: ["nextjs", "blog", "i18n", "seo"]
 
 **タグ一覧** はフレックスのタグクラウド。タグは説明のないフラットな文字列 — 名前と件数だけ。数が多いので密なレイアウトが合う：
 
-```tsx
+```tsx title="TypeScript"
 <Link className="inline-flex items-center gap-1.5 rounded-full border border-border px-3 py-1.5 text-sm">
   #{tag} <span className="text-xs">({postCount})</span>
 </Link>
