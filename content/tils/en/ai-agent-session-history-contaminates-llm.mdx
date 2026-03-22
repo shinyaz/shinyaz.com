@@ -11,7 +11,7 @@ Fixed the A2A agent card URL from `0.0.0.0` to the correct FQDN, restarted the P
 The Travel Agent persists per-user conversation history in S3. Old tool call results containing the stale URL were restored into the LLM's context window. The LLM "learned" the wrong URL from its conversation history and kept passing it to `a2a_send_message`'s `target_agent_url` parameter.
 
 ```bash title="Terminal"
-aws s3 rm s3://${TRAVEL_SESSION_BUCKET}/ --recursive
+aws s3 rm s3://travel-agent-session-${ACCOUNT_ID}/ --recursive
 ```
 
 After clearing sessions, the LLM fetched the correct URL from the agent card. Unlike traditional microservices where config changes take effect immediately, AI agents with session state can have their decisions overridden by stale conversation "memories." Always clear sessions when changing connection targets.

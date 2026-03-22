@@ -1,0 +1,20 @@
+---
+title: "BuildKit rootless doesn't work on EKS Auto Mode"
+description: "max_user_namespaces=0 prevents user namespace creation, causing rootless mode to fail. Privileged mode is the workaround."
+date: "2026-03-23"
+published: true
+tags: ["eks", "buildkit", "kubernetes"]
+---
+
+Tried migrating from archived Kaniko to BuildKit, but rootless mode failed on EKS Auto Mode nodes.
+
+```text title="Output"
+[rootlesskit:parent] /proc/sys/user/max_user_namespaces needs to be set to non-zero.
+[rootlesskit:parent] error: failed to start the child: fork/exec /proc/self/exe: no space left on device
+```
+
+BuildKit rootless uses [RootlessKit](https://github.com/rootless-containers/rootlesskit/) internally, which requires Linux user namespaces. EKS Auto Mode nodes are AWS-managed EC2 instances with `max_user_namespaces=0`, and kernel parameters can't be modified.
+
+Also tried `--oci-worker-no-process-sandbox` with `seccompProfile: Unconfined`, but RootlessKit itself fails to start without user namespaces — the sandbox flag doesn't help.
+
+Ended up using `securityContext.privileged: true`. Unlike Kaniko which runs unprivileged, BuildKit on EKS Auto Mode requires privileged access — a security tradeoff to be aware of. Full details in the [extra post](/en/blog/2026/03/23/buildkit-on-eks).

@@ -1,0 +1,20 @@
+---
+title: "BuildKit rootless は EKS Auto Mode で動かない"
+description: "max_user_namespaces=0 のため user namespaces が作れず rootless モードが失敗する。privileged モードで回避。"
+date: "2026-03-23"
+published: true
+tags: ["eks", "buildkit", "kubernetes"]
+---
+
+Kaniko がアーカイブされたので BuildKit に移行しようとしたら、EKS Auto Mode のノードで rootless モードが動かなかった。
+
+```text title="Output"
+[rootlesskit:parent] /proc/sys/user/max_user_namespaces needs to be set to non-zero.
+[rootlesskit:parent] error: failed to start the child: fork/exec /proc/self/exe: no space left on device
+```
+
+BuildKit rootless は内部で [RootlessKit](https://github.com/rootless-containers/rootlesskit/) を使い、Linux の user namespaces を必要とする。EKS Auto Mode のノードは AWS 管理の EC2 インスタンスで `max_user_namespaces=0` が設定されており、カーネルパラメータの変更もできない。
+
+`--oci-worker-no-process-sandbox` + `seccompProfile: Unconfined` の組み合わせも試したが、そもそも user namespaces が作れないので RootlessKit の起動自体が失敗する。
+
+結局 `securityContext.privileged: true` で動かした。Kaniko が非特権で動作するのに対し、BuildKit は EKS Auto Mode では privileged が必要になるのはセキュリティ面でのトレードオフだ。詳細は[番外編の記事](/ja/blog/2026/03/23/buildkit-on-eks)にまとめた。
