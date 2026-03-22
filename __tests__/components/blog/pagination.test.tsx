@@ -32,18 +32,56 @@ describe("Pagination", () => {
     render(
       <Pagination currentPage={2} totalPages={3} basePath="/en/blog" locale="en" />
     );
-    const links = screen.getAllByRole("link");
-    expect(links).toHaveLength(2);
-    const prevLink = links.find((l) => l.textContent === "Prev");
-    const nextLink = links.find((l) => l.textContent === "Next");
+    const prevLink = screen.getByRole("link", { name: "Prev" });
+    const nextLink = screen.getByRole("link", { name: "Next" });
     expect(prevLink).toBeDefined();
     expect(nextLink).toBeDefined();
   });
 
-  it("displays correct page info", () => {
+  it("displays all page numbers when totalPages <= 7", () => {
     render(
       <Pagination currentPage={2} totalPages={5} basePath="/en/blog" locale="en" />
     );
-    expect(screen.getByText("2 / 5")).toBeDefined();
+    for (let i = 1; i <= 5; i++) {
+      expect(screen.getByText(String(i))).toBeDefined();
+    }
+  });
+
+  it("highlights current page without link", () => {
+    render(
+      <Pagination currentPage={3} totalPages={5} basePath="/en/blog" locale="en" />
+    );
+    const current = screen.getByText("3");
+    expect(current.tagName).toBe("SPAN");
+    expect(current.getAttribute("aria-current")).toBe("page");
+  });
+
+  it("renders page number as link for non-current page", () => {
+    render(
+      <Pagination currentPage={1} totalPages={5} basePath="/en/blog" locale="en" />
+    );
+    const link = screen.getByRole("link", { name: "3" });
+    expect(link.getAttribute("href")).toBe("/en/blog?page=3");
+  });
+
+  it("uses basePath without query for page 1", () => {
+    render(
+      <Pagination currentPage={3} totalPages={5} basePath="/en/blog" locale="en" />
+    );
+    const link = screen.getByRole("link", { name: "1" });
+    expect(link.getAttribute("href")).toBe("/en/blog");
+  });
+
+  it("shows ellipsis when totalPages > 7", () => {
+    render(
+      <Pagination currentPage={5} totalPages={10} basePath="/en/blog" locale="en" />
+    );
+    const ellipses = screen.getAllByText("…");
+    expect(ellipses).toHaveLength(2);
+    expect(screen.getByText("1")).toBeDefined();
+    expect(screen.getByText("10")).toBeDefined();
+    expect(screen.getByText("4")).toBeDefined();
+    expect(screen.getByText("5")).toBeDefined();
+    expect(screen.getByText("6")).toBeDefined();
   });
 });

@@ -8,6 +8,18 @@ interface PaginationProps {
   locale: Locale;
 }
 
+function getPageNumbers(current: number, total: number): (number | "ellipsis")[] {
+  if (total <= 7) return Array.from({ length: total }, (_, i) => i + 1);
+  const pages: (number | "ellipsis")[] = [1];
+  const left = Math.max(2, current - 1);
+  const right = Math.min(total - 1, current + 1);
+  if (left > 2) pages.push("ellipsis");
+  for (let i = left; i <= right; i++) pages.push(i);
+  if (right < total - 1) pages.push("ellipsis");
+  pages.push(total);
+  return pages;
+}
+
 export function Pagination({ currentPage, totalPages, basePath, locale }: PaginationProps) {
   if (totalPages <= 1) return null;
 
@@ -19,34 +31,37 @@ export function Pagination({ currentPage, totalPages, basePath, locale }: Pagina
     return page === 1 ? basePath : `${basePath}?page=${page}`;
   }
 
+  const linkClass = "rounded-md border border-border px-4 py-2 text-sm hover:bg-accent transition-colors md:px-3 md:py-1.5";
+  const disabledClass = "rounded-md border border-border px-4 py-2 text-sm opacity-40 md:px-3 md:py-1.5";
+
   return (
-    <nav className="mt-8 flex items-center justify-center gap-4" aria-label="Pagination">
+    <nav className="mt-8 flex flex-wrap items-center justify-center gap-2" aria-label="Pagination">
       {prevPage ? (
-        <Link
-          href={pageHref(prevPage)}
-          className="rounded-md border border-border px-4 py-2 text-sm hover:bg-accent transition-colors md:px-3 md:py-1.5"
-        >
+        <Link href={pageHref(prevPage)} className={linkClass}>
           {t.pagination.prev}
         </Link>
       ) : (
-        <span className="rounded-md border border-border px-4 py-2 text-sm opacity-40 md:px-3 md:py-1.5">
-          {t.pagination.prev}
-        </span>
+        <span className={disabledClass}>{t.pagination.prev}</span>
       )}
-      <span className="text-sm text-muted-foreground">
-        {currentPage} / {totalPages}
-      </span>
+      {getPageNumbers(currentPage, totalPages).map((p, i) =>
+        p === "ellipsis" ? (
+          <span key={`ellipsis-${i}`} className="px-2 text-sm text-muted-foreground">…</span>
+        ) : p === currentPage ? (
+          <span key={p} className="rounded-md border border-foreground bg-foreground px-4 py-2 text-sm text-background md:px-3 md:py-1.5" aria-current="page">
+            {p}
+          </span>
+        ) : (
+          <Link key={p} href={pageHref(p)} className={linkClass}>
+            {p}
+          </Link>
+        )
+      )}
       {nextPage ? (
-        <Link
-          href={pageHref(nextPage)}
-          className="rounded-md border border-border px-4 py-2 text-sm hover:bg-accent transition-colors md:px-3 md:py-1.5"
-        >
+        <Link href={pageHref(nextPage)} className={linkClass}>
           {t.pagination.next}
         </Link>
       ) : (
-        <span className="rounded-md border border-border px-4 py-2 text-sm opacity-40 md:px-3 md:py-1.5">
-          {t.pagination.next}
-        </span>
+        <span className={disabledClass}>{t.pagination.next}</span>
       )}
     </nav>
   );
