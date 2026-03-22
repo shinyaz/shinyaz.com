@@ -14,9 +14,118 @@ seriesOrder: 1
 
 Calling an LLM via API is no longer enough. The real challenge for infrastructure engineers in 2026 is running AI agents in production — agents that use tools, coordinate with other agents, and maintain session state.
 
-The [Agentic AI on EKS](https://catalog.workshops.aws/agentic-ai-on-eks/en-US) workshop by AWS offers one answer to this challenge. It combines Strands Agents SDK, MCP (Model Context Protocol), and A2A (Agent-to-Agent) protocol to build a production-ready agent platform on EKS.
+The [Agentic AI on EKS](https://catalog.workshops.aws/agentic-ai-on-eks/en-US) workshop by AWS offers one answer to this challenge. It combines Strands Agents SDK, MCP (Model Context Protocol), and A2A (Agent-to-Agent) protocol to build a production-ready agent platform on EKS. The source code is in the `eks/` directory of the [aws-samples/sample-agentic-frameworks-on-aws](https://github.com/aws-samples/sample-agentic-frameworks-on-aws) repository.
 
 This post shares what I learned from hands-on validation of this workshop. It's the first in a 3-part series that progressively builds MCP tool integration, A2A multi-agent coordination, and an authenticated UI.
+
+## Prerequisites and Setup
+
+The validation environment requires:
+
+- An EKS cluster (Auto Mode enabled) up and running
+- `kubectl` and `aws` CLI configured
+- Bedrock Claude Haiku 4.5 model access enabled (cross-region inference profile `global.anthropic.claude-haiku-4-5-20251001-v1:0`)
+
+The workshop repository includes Terraform under `eks/infrastructure/terraform/` for one-click provisioning. It creates the EKS cluster, ECR, S3, Cognito, and Pod Identity in one go — the fastest path if you want to get started quickly.
+
+```bash title="Terminal"
+cd infrastructure/terraform
+terraform init
+terraform apply
+```
+
+This article sets up each resource manually to understand their roles. Skip to [Deployment and Verification](#deployment-and-verification) if you only want the results.
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">Setup steps (repository clone, ECR, S3, Pod Identity)</summary>
+
+Clone the repository and set environment variables.
+
+```bash title="Terminal"
+git clone https://github.com/aws-samples/sample-agentic-frameworks-on-aws.git
+cd sample-agentic-frameworks-on-aws/eks
+
+export AWS_REGION=ap-northeast-1
+export ACCOUNT_ID=$(aws sts get-caller-identity --query 'Account' --output text)
+export ECR_HOST=${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com
+export CLUSTER_NAME=eks-sandbox  # Change to your cluster name
+```
+
+Create ECR repositories for all 4 components.
+
+```bash title="Terminal"
+for repo in agents-on-eks/weather-mcp agents-on-eks/weather-agent \
+            agents-on-eks/travel-agent agents-on-eks/agent-ui; do
+  aws ecr create-repository --repository-name $repo --region $AWS_REGION
+done
+```
+
+Create S3 session buckets. The Weather Agent and Travel Agent each store per-user conversation history.
+
+```bash title="Terminal"
+aws s3 mb s3://weather-agent-session-${ACCOUNT_ID} --region $AWS_REGION
+aws s3 mb s3://travel-agent-session-${ACCOUNT_ID} --region $AWS_REGION
+```
+
+Create IAM roles for Pod Identity. Agents need access to Bedrock and S3.
+
+```bash title="Terminal"
+# Trust policy (shared by all Pod Identity roles)
+cat > /tmp/pod-identity-trust.json << 'EOF'
+{
+  "Version": "2012-10-17",
+  "Statement": [{
+    "Effect": "Allow",
+    "Principal": { "Service": "pods.eks.amazonaws.com" },
+    "Action": ["sts:AssumeRole", "sts:TagSession"]
+  }]
+}
+EOF
+
+# Weather Agent role
+cat > /tmp/weather-policy.json << EOF
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "BedrockAccess",
+      "Effect": "Allow",
+      "Action": ["bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream"],
+      "Resource": "*"
+    },
+    {
+      "Sid": "S3Access",
+      "Effect": "Allow",
+      "Action": ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"],
+      "Resource": "arn:aws:s3:::weather-agent-session-${ACCOUNT_ID}/*"
+    },
+    {
+      "Sid": "S3List",
+      "Effect": "Allow",
+      "Action": ["s3:ListBucket"],
+      "Resource": "arn:aws:s3:::weather-agent-session-${ACCOUNT_ID}"
+    }
+  ]
+}
+EOF
+
+aws iam create-role --role-name weather-agent-pod-role \
+  --assume-role-policy-document file:///tmp/pod-identity-trust.json
+aws iam put-role-policy --role-name weather-agent-pod-role \
+  --policy-name bedrock-s3 --policy-document file:///tmp/weather-policy.json
+
+# Pod Identity Association
+WEATHER_ROLE_ARN=$(aws iam get-role --role-name weather-agent-pod-role \
+  --query 'Role.Arn' --output text)
+aws eks create-pod-identity-association \
+  --cluster-name $CLUSTER_NAME --region $AWS_REGION \
+  --namespace agents --service-account weather-agent \
+  --role-arn $WEATHER_ROLE_ARN
+```
+
+Create the Travel Agent role similarly (change the S3 bucket name to `travel-agent-session-${ACCOUNT_ID}`).
+
+</details>
 
 ## Architecture Overview
 
@@ -187,16 +296,85 @@ In this validation, I set `DISABLE_AUTH=1` and ran in test mode with authenticat
 
 ## Building Containers with Kaniko
 
-With the agent implementation understood, the next step is containerizing and deploying to EKS. For container image builds, I used **Kaniko** — a tool developed by Google that **builds container images inside Kubernetes Pods without requiring a Docker daemon**.
+With the agent implementation understood, the next step is containerizing and deploying to EKS.
+
+The workshop repository includes `scripts/containers.sh` which uses `docker buildx` for builds. This is the easiest approach when Docker is available locally. Since my environment lacked a Docker daemon, I used **Kaniko** instead — a tool developed by Google that **builds container images inside Kubernetes Pods without requiring a Docker daemon**.
 
 Unlike `docker build`, which needs a privileged Docker daemon process, Kaniko interprets and executes Dockerfiles in user space, enabling image builds in unprivileged Pods. It's widely used in CI/CD pipelines and environments where running a Docker daemon isn't practical.
 
 The workflow was: upload the build context (source code) to S3, then run a Kaniko Job on EKS that fetches the context from S3, builds the image, and pushes directly to ECR.
 
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">Kaniko build environment setup</summary>
+
+Create the S3 bucket, IAM role, and Pod Identity Association for Kaniko.
+
+```bash title="Terminal"
+# S3 bucket for build contexts
+aws s3 mb s3://kaniko-build-${ACCOUNT_ID} --region $AWS_REGION
+
+# Kaniko IAM role (ECR push + S3 read)
+cat > /tmp/kaniko-policy.json << EOF
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": ["ecr:GetAuthorizationToken"],
+      "Resource": "*"
+    },
+    {
+      "Effect": "Allow",
+      "Action": [
+        "ecr:BatchCheckLayerAvailability", "ecr:CompleteLayerUpload",
+        "ecr:InitiateLayerUpload", "ecr:PutImage", "ecr:UploadLayerPart",
+        "ecr:BatchGetImage", "ecr:GetDownloadUrlForLayer"
+      ],
+      "Resource": "arn:aws:ecr:${AWS_REGION}:${ACCOUNT_ID}:repository/agents-on-eks/*"
+    },
+    {
+      "Effect": "Allow",
+      "Action": ["s3:GetObject", "s3:ListBucket"],
+      "Resource": [
+        "arn:aws:s3:::kaniko-build-${ACCOUNT_ID}",
+        "arn:aws:s3:::kaniko-build-${ACCOUNT_ID}/*"
+      ]
+    }
+  ]
+}
+EOF
+
+aws iam create-role --role-name kaniko-pod-role \
+  --assume-role-policy-document file:///tmp/pod-identity-trust.json
+aws iam put-role-policy --role-name kaniko-pod-role \
+  --policy-name ecr-s3 --policy-document file:///tmp/kaniko-policy.json
+
+# Kubernetes resources
+kubectl create ns build
+kubectl create serviceaccount kaniko -n build
+
+# Pod Identity Association
+KANIKO_ROLE_ARN=$(aws iam get-role --role-name kaniko-pod-role \
+  --query 'Role.Arn' --output text)
+aws eks create-pod-identity-association \
+  --cluster-name $CLUSTER_NAME --region $AWS_REGION \
+  --namespace build --service-account kaniko \
+  --role-arn $KANIKO_ROLE_ARN
+```
+
+</details>
+
+Upload build contexts to S3 and run Kaniko Jobs.
+
 ```bash title="Terminal"
 # Upload build context to S3
-tar czf /tmp/context.tar.gz .
-aws s3 cp /tmp/context.tar.gz s3://${BUCKET}/build/
+cd agents/weather/mcp-servers/weather-mcp-server
+tar czf /tmp/weather-mcp-context.tar.gz .
+aws s3 cp /tmp/weather-mcp-context.tar.gz s3://kaniko-build-${ACCOUNT_ID}/build/
+
+cd ../../  # agents/weather/
+tar czf /tmp/weather-agent-context.tar.gz .
+aws s3 cp /tmp/weather-agent-context.tar.gz s3://kaniko-build-${ACCOUNT_ID}/build/
 ```
 
 ```yaml title="kaniko-job.yaml"
@@ -207,6 +385,7 @@ metadata:
   name: kaniko-weather-mcp
   namespace: build
 spec:
+  backoffLimit: 1
   template:
     spec:
       serviceAccountName: kaniko
@@ -214,30 +393,49 @@ spec:
       - name: kaniko
         image: gcr.io/kaniko-project/executor:latest
         args:
-        - "--context=s3://${BUCKET}/build/context.tar.gz"
-        - "--destination=${ECR_URI}:latest"
+        - "--context=s3://kaniko-build-${ACCOUNT_ID}/build/weather-mcp-context.tar.gz"
+        - "--destination=${ECR_HOST}/agents-on-eks/weather-mcp:latest"
       restartPolicy: Never
 ```
 
-The critical piece is granting ECR push permissions via Pod Identity. I attached a policy including `ecr:PutImage` and `ecr:CompleteLayerUpload` to the `kaniko` service account in the `build` namespace. Build times were roughly 70s for the MCP Server and 130s for the Weather Agent.
+The critical piece is granting ECR push permissions via Pod Identity. I attached a policy including `ecr:PutImage` and `ecr:CompleteLayerUpload` to the `kaniko` service account in the `build` namespace. Build times were roughly 2 minutes for the MCP Server and 3 minutes for the Weather Agent.
 
 ## Deployment and Verification
 
 With images built by Kaniko and pushed to ECR, the Helm deployment is a two-step process — MCP Server first (since the Weather Agent references it), then the agent.
 
+The workshop repository includes `scripts/terraform-prep-env-weather-agent.sh` which auto-generates `workshop-mcp-weather-values.yaml` and `workshop-agent-weather-values.yaml` from Terraform outputs. Without Terraform, you can pass values directly via `--set` flags.
+
 ```bash title="Terminal"
 # 1. MCP Server (deploy first as Weather Agent depends on it)
 helm upgrade weather-mcp manifests/helm/mcp \
   --install -n mcp-servers --create-namespace \
-  -f workshop-mcp-weather-values.yaml
+  --set image.repository=${ECR_HOST}/agents-on-eks/weather-mcp \
+  --set image.tag=latest
 
-# 2. Weather Agent
+# 2. Weather Agent (MCP HTTP connection + test mode)
 helm upgrade weather-agent manifests/helm/agent \
   --install -n agents --create-namespace \
-  -f workshop-agent-weather-values.yaml
+  -f manifests/helm/agent/mcp-remote.yaml \
+  --set image.repository=${ECR_HOST}/agents-on-eks/weather-agent \
+  --set image.tag=latest \
+  --set env.DISABLE_AUTH=1 \
+  --set env.SESSION_STORE_BUCKET_NAME=weather-agent-session-${ACCOUNT_ID} \
+  --set serviceAccount.name=weather-agent \
+  --set a2a.http_url=http://weather-agent.agents:9000/
 ```
 
-A test request for NYC's 3-day forecast returned the following:
+`mcp-remote.yaml` is a values override file that switches the MCP connection from stdio (local) to HTTP (remote MCP Server). `a2a.http_url` sets the URL in the agent card to the Kubernetes Service FQDN — needed for Part 2's A2A integration.
+
+A test request for NYC's 3-day forecast returned the following. Use `kubectl port-forward` to access the service from outside the cluster:
+
+```bash title="Terminal"
+# port-forward for local access
+kubectl port-forward svc/weather-agent -n agents 3000:80 &
+curl -X POST http://localhost:3000/prompt \
+  -H "Content-Type: application/json" \
+  -d '{"text":"What is the weather forecast for New York City?"}'
+```
 
 ```text title="Output"
 Here's the weather forecast for New York City for the next 3 days:

@@ -63,23 +63,110 @@ Requests from the UI include Cognito JWT tokens in the `Authorization` header. A
 
 ## Deployment Steps
 
-UI deployment completes in three steps.
+UI deployment requires Cognito setup. The workshop repository manages this via `eks/infrastructure/terraform/cognito.tf`, but this article sets it up manually.
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">Cognito user pool setup steps</summary>
+
+```bash title="Terminal"
+# Create user pool
+POOL_ID=$(aws cognito-idp create-user-pool \
+  --pool-name agentic-ai-on-eks \
+  --admin-create-user-config AllowAdminCreateUserOnly=true \
+  --query 'UserPool.Id' --output text)
+
+# Create app client
+CLIENT_OUTPUT=$(aws cognito-idp create-user-pool-client \
+  --user-pool-id $POOL_ID \
+  --client-name agent-ui \
+  --generate-secret \
+  --allowed-o-auth-flows code \
+  --allowed-o-auth-scopes email openid profile \
+  --callback-urls '["http://localhost:8000/callback"]' \
+  --logout-urls '["http://localhost:8000/"]' \
+  --supported-identity-providers COGNITO \
+  --allowed-o-auth-flows-user-pool-client \
+  --explicit-auth-flows ALLOW_USER_PASSWORD_AUTH)
+
+CLIENT_ID=$(echo $CLIENT_OUTPUT | jq -r '.UserPoolClient.ClientId')
+CLIENT_SECRET=$(echo $CLIENT_OUTPUT | jq -r '.UserPoolClient.ClientSecret')
+
+# Create domain
+DOMAIN_PREFIX="agentic-ai-$(echo $RANDOM)"
+aws cognito-idp create-user-pool-domain \
+  --user-pool-id $POOL_ID --domain $DOMAIN_PREFIX
+
+# Create test users
+aws cognito-idp admin-create-user \
+  --user-pool-id $POOL_ID --username Alice \
+  --message-action SUPPRESS
+aws cognito-idp admin-create-user \
+  --user-pool-id $POOL_ID --username Bob \
+  --message-action SUPPRESS
+```
+
+</details>
+
+UI deployment completes in three steps. First, build the Agent UI container image using the same Kaniko workflow from Part 1.
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">Agent UI build steps</summary>
+
+```bash title="Terminal"
+cd ui
+tar czf /tmp/agent-ui-context.tar.gz .
+aws s3 cp /tmp/agent-ui-context.tar.gz s3://kaniko-build-${ACCOUNT_ID}/build/
+cd ..
+```
+
+```yaml title="kaniko-job.yaml"
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: kaniko-agent-ui
+  namespace: build
+spec:
+  backoffLimit: 1
+  template:
+    spec:
+      serviceAccountName: kaniko
+      containers:
+      - name: kaniko
+        image: gcr.io/kaniko-project/executor:latest
+        args:
+        - "--context=s3://kaniko-build-${ACCOUNT_ID}/build/agent-ui-context.tar.gz"
+        - "--destination=${ECR_HOST}/agents-on-eks/agent-ui:latest"
+      restartPolicy: Never
+```
+
+</details>
 
 **1. Set Cognito user passwords**
 
-Set passwords for Alice/Bob users created by Terraform.
-
 ```bash title="Terminal"
 aws cognito-idp admin-set-user-password \
-  --user-pool-id $COGNITO_POOL_ID \
+  --user-pool-id $POOL_ID \
   --username Alice --password "Passw0rd@" --permanent
 ```
 
 **2. Create OAuth secret**
 
-Register Cognito Client ID/Secret as a Kubernetes Secret. The UI Pod loads it via `envFrom`.
+Collect Cognito Client ID/Secret into a `.env` file and register as a Kubernetes Secret. The UI Pod loads it via `envFrom`.
+
+```bash title="Terminal (create ui/.env)"
+COGNITO_DOMAIN="https://${DOMAIN_PREFIX}.auth.${AWS_REGION}.amazoncognito.com"
+JWKS_URL="https://cognito-idp.${AWS_REGION}.amazonaws.com/${POOL_ID}/.well-known/jwks.json"
+
+cat > ui/.env << EOF
+OAUTH_CLIENT_ID=${CLIENT_ID}
+OAUTH_CLIENT_SECRET=${CLIENT_SECRET}
+OPENID_CONFIGURATION_URL=https://cognito-idp.${AWS_REGION}.amazonaws.com/${POOL_ID}/.well-known/openid-configuration
+OAUTH_JWKS_URL=${JWKS_URL}
+EOF
+```
 
 ```bash title="Terminal"
+kubectl create ns ui
 kubectl create secret generic agent-ui \
   --namespace ui \
   --from-env-file ui/.env
@@ -90,7 +177,8 @@ kubectl create secret generic agent-ui \
 ```bash title="Terminal"
 helm upgrade agent-ui manifests/helm/ui \
   --install -n ui --create-namespace \
-  -f workshop-ui-values.yaml
+  --set image.repository=${ECR_HOST}/agents-on-eks/agent-ui \
+  --set image.tag=latest
 ```
 
 After deployment, `kubectl port-forward svc/agent-ui -n ui 8000:80` makes the UI available at `http://localhost:8000`. Users are redirected to Cognito login, and after authentication, the Gradio chat interface appears.
@@ -102,7 +190,13 @@ The Helm chart includes an HPA template, enabled with `autoscaling.enabled=true`
 ```bash title="Terminal"
 helm upgrade weather-agent manifests/helm/agent \
   --namespace agents \
-  -f workshop-agent-weather-values.yaml \
+  -f manifests/helm/agent/mcp-remote.yaml \
+  --set image.repository=${ECR_HOST}/agents-on-eks/weather-agent \
+  --set image.tag=latest \
+  --set env.DISABLE_AUTH=1 \
+  --set env.SESSION_STORE_BUCKET_NAME=weather-agent-session-${ACCOUNT_ID} \
+  --set serviceAccount.name=weather-agent \
+  --set a2a.http_url=http://weather-agent.agents:9000/ \
   --set autoscaling.enabled=true \
   --set autoscaling.minReplicas=1 \
   --set autoscaling.maxReplicas=3 \
@@ -142,3 +236,61 @@ The idle footprint is lightweight at 8m CPU / 723Mi memory total. However, Weath
 - **723Mi total for 4 components** — The idle footprint is light. In production, session management (S3) and model invocation (Bedrock) costs dominate rather than compute.
 
 Looking back across the series, the key takeaway is that production AI agents introduce three design axes absent from traditional microservices: **protocol design (MCP / A2A), configuration externalization (ConfigMap / Secret), and session state management**. The workshop covers all three through its four-component architecture — a well-crafted learning experience.
+
+## Cleanup
+
+Once you're done with the validation, delete the created resources.
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">Resource deletion steps</summary>
+
+```bash title="Terminal"
+# Delete Helm releases
+helm uninstall agent-ui -n ui
+helm uninstall travel-agent -n agents
+helm uninstall weather-agent -n agents
+helm uninstall weather-mcp -n mcp-servers
+
+# Delete Kaniko jobs
+kubectl delete jobs --all -n build
+
+# Delete namespaces
+kubectl delete ns agents mcp-servers ui build
+
+# Delete Pod Identity Associations
+for assoc in $(aws eks list-pod-identity-associations \
+  --cluster-name $CLUSTER_NAME --region $AWS_REGION \
+  --query 'associations[].associationId' --output text); do
+  aws eks delete-pod-identity-association \
+    --cluster-name $CLUSTER_NAME --region $AWS_REGION \
+    --association-id $assoc
+done
+
+# Delete IAM roles
+for role in weather-agent-pod-role travel-agent-pod-role kaniko-pod-role; do
+  aws iam delete-role-policy --role-name $role --policy-name bedrock-s3 2>/dev/null
+  aws iam delete-role-policy --role-name $role --policy-name ecr-s3 2>/dev/null
+  aws iam delete-role --role-name $role
+done
+
+# Delete ECR repositories
+for repo in agents-on-eks/weather-mcp agents-on-eks/weather-agent \
+            agents-on-eks/travel-agent agents-on-eks/agent-ui; do
+  aws ecr delete-repository --repository-name $repo \
+    --region $AWS_REGION --force
+done
+
+# Delete S3 buckets
+for bucket in weather-agent-session-${ACCOUNT_ID} \
+              travel-agent-session-${ACCOUNT_ID} \
+              kaniko-build-${ACCOUNT_ID}; do
+  aws s3 rb s3://$bucket --force
+done
+
+# Delete Cognito user pool (domain must be deleted first)
+aws cognito-idp delete-user-pool-domain \
+  --user-pool-id $POOL_ID --domain $DOMAIN_PREFIX
+aws cognito-idp delete-user-pool --user-pool-id $POOL_ID
+```
+
+</details>

@@ -157,14 +157,53 @@ WEATHER INFORMATION PROTOCOL:
 
 ## ハマりどころ 1: エージェントカードの URL 問題
 
+Travel Agent のデプロイには、A2A 接続先を Helm values で指定する。
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">Travel Agent のデプロイ手順</summary>
+
+Travel Agent のコンテナイメージをビルドし（Part 1 と同じ Kaniko 手順）、Helm でデプロイする。ポイントは `a2a.a2a_agents.json` で Weather Agent の A2A エンドポイントを指定すること。
+
+```bash title="Terminal"
+# Travel Agent 用 values ファイル
+cat > /tmp/travel-values.yaml << EOF
+image:
+  repository: ${ECR_HOST}/agents-on-eks/travel-agent
+  tag: latest
+env:
+  DISABLE_AUTH: "1"
+  SESSION_STORE_BUCKET_NAME: travel-agent-session-${ACCOUNT_ID}
+serviceAccount:
+  name: travel-agent
+agent:
+  agent.md: null
+mcp:
+  mcp.json: null
+a2a:
+  a2a_agents.json: |
+    {
+      "urls": [
+        "http://weather-agent.agents:9000/"
+      ]
+    }
+EOF
+
+helm upgrade travel-agent manifests/helm/agent \
+  --install -n agents -f /tmp/travel-values.yaml
+```
+
+`agent.md: null` と `mcp.json: null` を指定すると ConfigMap が作成されず、Dockerfile に埋め込まれたデフォルトの設定ファイルが使われる。Travel Agent は MCP ツールを直接使わないため `mcp.json` は不要だ。
+
+</details>
+
 最初にデプロイしたとき、Travel Agent は Weather Agent への A2A 通信に失敗した。
 
 ```text title="Output"
 A2AClientHTTPError: HTTP Error 503: Network communication error
-fetching agent card from http://0.0.0.0:9000/.well-known/agent-card.json
+fetching agent card from https://weather-agent.example.com/.well-known/agent-card.json
 ```
 
-原因は Weather Agent のエージェントカードだ。A2A サーバーはデフォルトで `host=0.0.0.0` にバインドし、カードの `url` フィールドにもそのまま `http://0.0.0.0:9000/` を記載する。Travel Agent の初回ディスカバリー（`a2a_agents.json` の URL でのカード取得）自体は成功するが、LLM がカード内の `url` フィールドを読んで `a2a_send_message` の `target_agent_url` に渡すため、クラスター内で到達不能な `0.0.0.0` への接続を試みて失敗する。
+原因は Weather Agent のエージェントカードだ。A2A サーバーは `A2A_URL` 環境変数が未設定の場合、カードの `url` フィールドにデフォルト値（`0.0.0.0` やプレースホルダー）を記載する。Travel Agent の初回ディスカバリー（`a2a_agents.json` の URL でのカード取得）自体は成功するが、LLM がカード内の `url` フィールドを読んで `a2a_send_message` の `target_agent_url` に渡すため、クラスター内で到達不能な URL への接続を試みて失敗する。
 
 解決策は Helm values で `a2a.http_url` を Kubernetes Service の FQDN に設定すること。
 
@@ -178,13 +217,13 @@ a2a:
 
 ## ハマりどころ 2: S3 セッション履歴によるコンテキスト汚染
 
-エージェントカードの URL を修正した後も、Travel Agent は依然として `http://0.0.0.0:9000/` に接続しようとした。
+エージェントカードの URL を修正した後も、Travel Agent は依然として到達不能な URL に接続しようとした。
 
-原因は **S3 セッション履歴**だった。Travel Agent は S3 にユーザーごとの会話履歴を保持しており、古い URL を含む過去のメッセージが LLM のコンテキストに復元されていた。LLM はそのコンテキストから `0.0.0.0` という URL を学習し、`a2a_send_message` ツールの `target_agent_url` パラメータにそのまま渡していたのだ。
+原因は **S3 セッション履歴**だった。Travel Agent は S3 にユーザーごとの会話履歴を保持しており、古い URL を含む過去のメッセージが LLM のコンテキストに復元されていた。LLM はそのコンテキストから到達不能な URL を学習し、`a2a_send_message` ツールの `target_agent_url` パラメータにそのまま渡していたのだ。
 
 ```bash title="Terminal"
 # S3 セッションデータをクリア
-aws s3 rm s3://${TRAVEL_SESSION_BUCKET}/ --recursive
+aws s3 rm s3://travel-agent-session-${ACCOUNT_ID}/ --recursive
 ```
 
 セッションクリア後、Travel Agent は `a2a_list_discovered_agents` でエージェントカードから正しい URL を取得し、Weather Agent への A2A 通信に成功した。
@@ -194,6 +233,14 @@ aws s3 rm s3://${TRAVEL_SESSION_BUCKET}/ --recursive
 ## 動作確認
 
 すべての問題を解決した後、Travel Agent に旅行の相談を送ると、Weather Agent への A2A 委譲が正常に動作した。
+
+```bash title="Terminal"
+# port-forward でローカルからアクセスする場合
+kubectl port-forward svc/travel-agent -n agents 3000:80 &
+curl -X POST http://localhost:3000/prompt \
+  -H "Content-Type: application/json" \
+  -d '{"text":"I am planning a trip to Miami, Florida next week. What will the weather be like?"}'
+```
 
 ```text title="Output"
 User: "I'm planning a trip to Miami, Florida next week.

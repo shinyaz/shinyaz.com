@@ -157,14 +157,53 @@ Why such strict prohibitions? The LLM has general knowledge about weather and ca
 
 ## Gotcha 1: Agent Card URL Problem
 
+Deploying the Travel Agent requires specifying the A2A connection target via Helm values.
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">Travel Agent deployment steps</summary>
+
+Build the Travel Agent container image (same Kaniko workflow as Part 1) and deploy with Helm. The key is specifying the Weather Agent's A2A endpoint in `a2a.a2a_agents.json`.
+
+```bash title="Terminal"
+# Travel Agent values file
+cat > /tmp/travel-values.yaml << EOF
+image:
+  repository: ${ECR_HOST}/agents-on-eks/travel-agent
+  tag: latest
+env:
+  DISABLE_AUTH: "1"
+  SESSION_STORE_BUCKET_NAME: travel-agent-session-${ACCOUNT_ID}
+serviceAccount:
+  name: travel-agent
+agent:
+  agent.md: null
+mcp:
+  mcp.json: null
+a2a:
+  a2a_agents.json: |
+    {
+      "urls": [
+        "http://weather-agent.agents:9000/"
+      ]
+    }
+EOF
+
+helm upgrade travel-agent manifests/helm/agent \
+  --install -n agents -f /tmp/travel-values.yaml
+```
+
+Setting `agent.md: null` and `mcp.json: null` prevents ConfigMap creation, so the defaults embedded in the Dockerfile are used. The Travel Agent doesn't use MCP tools directly, so `mcp.json` isn't needed.
+
+</details>
+
 The first deployment failed immediately — Travel Agent couldn't reach Weather Agent via A2A.
 
 ```text title="Output"
 A2AClientHTTPError: HTTP Error 503: Network communication error
-fetching agent card from http://0.0.0.0:9000/.well-known/agent-card.json
+fetching agent card from https://weather-agent.example.com/.well-known/agent-card.json
 ```
 
-The root cause was the Weather Agent's agent card. The A2A server binds to `host=0.0.0.0` by default and publishes `http://0.0.0.0:9000/` as its `url` in the card. The initial discovery (fetching the card from the `a2a_agents.json` URL) succeeds, but the LLM reads the `url` field from the card and passes it as `target_agent_url` to `a2a_send_message`, attempting to connect to an unreachable `0.0.0.0` within the cluster.
+The root cause was the Weather Agent's agent card. When the `A2A_URL` environment variable is not set, the A2A server publishes a default value (such as `0.0.0.0` or a placeholder) as its `url` in the card. The initial discovery (fetching the card from the `a2a_agents.json` URL) succeeds, but the LLM reads the `url` field from the card and passes it as `target_agent_url` to `a2a_send_message`, attempting to connect to an unreachable URL within the cluster.
 
 The fix: set `a2a.http_url` in Helm values to the Kubernetes Service FQDN.
 
@@ -178,13 +217,13 @@ This overwrites the agent card's `url` to `http://weather-agent.agents:9000/`, m
 
 ## Gotcha 2: S3 Session History Poisoning LLM Context
 
-After fixing the agent card URL, the Travel Agent still tried connecting to `http://0.0.0.0:9000/`.
+After fixing the agent card URL, the Travel Agent still tried connecting to the unreachable URL.
 
-The culprit was **S3 session history**. The Travel Agent persists per-user conversation history in S3. Messages from earlier failed attempts — containing the old `0.0.0.0` URL — were restored into the LLM's context. The LLM learned the stale URL from its conversation history and kept passing it to the `a2a_send_message` tool's `target_agent_url` parameter.
+The culprit was **S3 session history**. The Travel Agent persists per-user conversation history in S3. Messages from earlier failed attempts — containing the old unreachable URL — were restored into the LLM's context. The LLM learned the stale URL from its conversation history and kept passing it to the `a2a_send_message` tool's `target_agent_url` parameter.
 
 ```bash title="Terminal"
 # Clear S3 session data
-aws s3 rm s3://${TRAVEL_SESSION_BUCKET}/ --recursive
+aws s3 rm s3://travel-agent-session-${ACCOUNT_ID}/ --recursive
 ```
 
 After clearing sessions, the Travel Agent fetched the correct URL from the agent card via `a2a_list_discovered_agents` and successfully communicated with the Weather Agent.
@@ -194,6 +233,14 @@ This is a problem unique to AI agents. In traditional microservices, config chan
 ## Verification
 
 With both issues resolved, a travel question triggered successful A2A delegation to the Weather Agent.
+
+```bash title="Terminal"
+# port-forward for local access
+kubectl port-forward svc/travel-agent -n agents 3000:80 &
+curl -X POST http://localhost:3000/prompt \
+  -H "Content-Type: application/json" \
+  -d '{"text":"I am planning a trip to Miami, Florida next week. What will the weather be like?"}'
+```
 
 ```text title="Output"
 User: "I'm planning a trip to Miami, Florida next week.

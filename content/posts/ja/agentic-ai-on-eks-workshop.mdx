@@ -14,9 +14,118 @@ seriesOrder: 1
 
 LLM を API 経由で呼ぶだけの時代は終わりつつある。ツールを使い、他のエージェントと協調し、セッション状態を保持する「AI エージェント」をどうやって本番運用するか — これが 2026 年のインフラエンジニアに突きつけられている問いだ。
 
-AWS が公開した[Agentic AI on EKS](https://catalog.workshops.aws/agentic-ai-on-eks/en-US)ワークショップは、この問いに対する一つの回答を示している。Strands Agents SDK、MCP（Model Context Protocol）、A2A（Agent-to-Agent）プロトコルを組み合わせ、EKS 上に本番対応のエージェントプラットフォームを構築するハンズオンだ。
+AWS が公開した[Agentic AI on EKS](https://catalog.workshops.aws/agentic-ai-on-eks/en-US)ワークショップは、この問いに対する一つの回答を示している。Strands Agents SDK、MCP（Model Context Protocol）、A2A（Agent-to-Agent）プロトコルを組み合わせ、EKS 上に本番対応のエージェントプラットフォームを構築するハンズオンだ。ソースコードは [aws-samples/sample-agentic-frameworks-on-aws](https://github.com/aws-samples/sample-agentic-frameworks-on-aws) リポジトリの `eks/` ディレクトリにある。
 
 本記事では、このワークショップを実際に検証した際の知見を共有する。全 3 回のシリーズで、MCP によるツール連携、A2A によるマルチエージェント協調、認証 UI まで段階的に構築していく。
+
+## 前提条件と事前準備
+
+検証環境の前提条件は以下のとおりだ。
+
+- EKS クラスター（Auto Mode 有効）が稼働中
+- `kubectl` と `aws` CLI が設定済み
+- Bedrock の Claude Haiku 4.5 モデルアクセスが有効（cross-region inference profile `global.anthropic.claude-haiku-4-5-20251001-v1:0`）
+
+ワークショップのリポジトリには `eks/infrastructure/terraform/` に Terraform による一括構築が用意されている。EKS クラスター、ECR、S3、Cognito、Pod Identity をまとめて作成できるので、手早く試したい場合はそちらを使うのが最短ルートだ。
+
+```bash title="Terminal"
+cd infrastructure/terraform
+terraform init
+terraform apply
+```
+
+本記事では各リソースの役割を理解するために手動で構築した。結果だけ見たい場合は[デプロイと動作確認](#デプロイと動作確認)まで読み飛ばしてほしい。
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">事前準備（リポジトリクローン、ECR、S3、Pod Identity）</summary>
+
+リポジトリのクローンと環境変数の設定。
+
+```bash title="Terminal"
+git clone https://github.com/aws-samples/sample-agentic-frameworks-on-aws.git
+cd sample-agentic-frameworks-on-aws/eks
+
+export AWS_REGION=ap-northeast-1
+export ACCOUNT_ID=$(aws sts get-caller-identity --query 'Account' --output text)
+export ECR_HOST=${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com
+export CLUSTER_NAME=eks-sandbox  # 自分のクラスター名に変更
+```
+
+ECR リポジトリの作成。4 コンポーネント分を一括で作る。
+
+```bash title="Terminal"
+for repo in agents-on-eks/weather-mcp agents-on-eks/weather-agent \
+            agents-on-eks/travel-agent agents-on-eks/agent-ui; do
+  aws ecr create-repository --repository-name $repo --region $AWS_REGION
+done
+```
+
+S3 セッションバケットの作成。Weather Agent と Travel Agent がそれぞれユーザーごとの会話履歴を保持する。
+
+```bash title="Terminal"
+aws s3 mb s3://weather-agent-session-${ACCOUNT_ID} --region $AWS_REGION
+aws s3 mb s3://travel-agent-session-${ACCOUNT_ID} --region $AWS_REGION
+```
+
+Pod Identity 用の IAM ロール作成。エージェントが Bedrock と S3 にアクセスするために必要だ。
+
+```bash title="Terminal"
+# Trust policy（Pod Identity 共通）
+cat > /tmp/pod-identity-trust.json << 'EOF'
+{
+  "Version": "2012-10-17",
+  "Statement": [{
+    "Effect": "Allow",
+    "Principal": { "Service": "pods.eks.amazonaws.com" },
+    "Action": ["sts:AssumeRole", "sts:TagSession"]
+  }]
+}
+EOF
+
+# Weather Agent 用ロール
+cat > /tmp/weather-policy.json << EOF
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "BedrockAccess",
+      "Effect": "Allow",
+      "Action": ["bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream"],
+      "Resource": "*"
+    },
+    {
+      "Sid": "S3Access",
+      "Effect": "Allow",
+      "Action": ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"],
+      "Resource": "arn:aws:s3:::weather-agent-session-${ACCOUNT_ID}/*"
+    },
+    {
+      "Sid": "S3List",
+      "Effect": "Allow",
+      "Action": ["s3:ListBucket"],
+      "Resource": "arn:aws:s3:::weather-agent-session-${ACCOUNT_ID}"
+    }
+  ]
+}
+EOF
+
+aws iam create-role --role-name weather-agent-pod-role \
+  --assume-role-policy-document file:///tmp/pod-identity-trust.json
+aws iam put-role-policy --role-name weather-agent-pod-role \
+  --policy-name bedrock-s3 --policy-document file:///tmp/weather-policy.json
+
+# Pod Identity Association
+WEATHER_ROLE_ARN=$(aws iam get-role --role-name weather-agent-pod-role \
+  --query 'Role.Arn' --output text)
+aws eks create-pod-identity-association \
+  --cluster-name $CLUSTER_NAME --region $AWS_REGION \
+  --namespace agents --service-account weather-agent \
+  --role-arn $WEATHER_ROLE_ARN
+```
+
+Travel Agent 用も同様に作成する（S3 バケット名を `travel-agent-session-${ACCOUNT_ID}` に変更）。
+
+</details>
 
 ## アーキテクチャの全体像
 
@@ -187,16 +296,85 @@ FastAPI サーバーがリクエストを受けてからレスポンスを返す
 
 ## Kaniko によるコンテナビルド
 
-エージェントの実装を理解したところで、これをコンテナ化して EKS にデプロイする。今回のコンテナイメージビルドには **Kaniko** を採用した。
+エージェントの実装を理解したところで、これをコンテナ化して EKS にデプロイする。
+
+ワークショップのリポジトリには `scripts/containers.sh` で `docker buildx` を使うビルドスクリプトが用意されている。ローカルに Docker がある環境ではこれが最も手軽だ。今回は Docker デーモンのない環境で検証したため、**Kaniko** を採用した。
 
 Kaniko は Google が開発したコンテナイメージビルドツールで、**Docker デーモンに依存せず、Kubernetes Pod 内でコンテナイメージをビルドできる**のが最大の特長だ。通常の `docker build` は Docker デーモン（特権プロセス）が必要だが、Kaniko はユーザー空間で Dockerfile を解釈・実行するため、特権なしの Pod でもイメージビルドが可能になる。CI/CD パイプラインや、Docker デーモンを動かせない環境でのビルド手段として広く使われている。
 
 今回の構成では、ビルドコンテキスト（ソースコード一式）を S3 にアップロードし、EKS 上の Kaniko Job が S3 からコンテキストを取得してビルド、完成したイメージを ECR に直接 push する流れを取った。
 
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">Kaniko ビルド環境の構築手順</summary>
+
+Kaniko 用の S3 バケット、IAM ロール、Pod Identity Association を作成する。
+
+```bash title="Terminal"
+# S3 ビルドコンテキスト用バケット
+aws s3 mb s3://kaniko-build-${ACCOUNT_ID} --region $AWS_REGION
+
+# Kaniko 用 IAM ロール（ECR push + S3 read）
+cat > /tmp/kaniko-policy.json << EOF
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": ["ecr:GetAuthorizationToken"],
+      "Resource": "*"
+    },
+    {
+      "Effect": "Allow",
+      "Action": [
+        "ecr:BatchCheckLayerAvailability", "ecr:CompleteLayerUpload",
+        "ecr:InitiateLayerUpload", "ecr:PutImage", "ecr:UploadLayerPart",
+        "ecr:BatchGetImage", "ecr:GetDownloadUrlForLayer"
+      ],
+      "Resource": "arn:aws:ecr:${AWS_REGION}:${ACCOUNT_ID}:repository/agents-on-eks/*"
+    },
+    {
+      "Effect": "Allow",
+      "Action": ["s3:GetObject", "s3:ListBucket"],
+      "Resource": [
+        "arn:aws:s3:::kaniko-build-${ACCOUNT_ID}",
+        "arn:aws:s3:::kaniko-build-${ACCOUNT_ID}/*"
+      ]
+    }
+  ]
+}
+EOF
+
+aws iam create-role --role-name kaniko-pod-role \
+  --assume-role-policy-document file:///tmp/pod-identity-trust.json
+aws iam put-role-policy --role-name kaniko-pod-role \
+  --policy-name ecr-s3 --policy-document file:///tmp/kaniko-policy.json
+
+# Kubernetes リソース
+kubectl create ns build
+kubectl create serviceaccount kaniko -n build
+
+# Pod Identity Association
+KANIKO_ROLE_ARN=$(aws iam get-role --role-name kaniko-pod-role \
+  --query 'Role.Arn' --output text)
+aws eks create-pod-identity-association \
+  --cluster-name $CLUSTER_NAME --region $AWS_REGION \
+  --namespace build --service-account kaniko \
+  --role-arn $KANIKO_ROLE_ARN
+```
+
+</details>
+
+ビルドコンテキストを S3 にアップロードし、Kaniko Job を実行する。
+
 ```bash title="Terminal"
 # ビルドコンテキストをS3にアップロード
+cd agents/weather/mcp-servers/weather-mcp-server
 tar czf /tmp/weather-mcp-context.tar.gz .
-aws s3 cp /tmp/weather-mcp-context.tar.gz s3://${BUCKET}/build/
+aws s3 cp /tmp/weather-mcp-context.tar.gz s3://kaniko-build-${ACCOUNT_ID}/build/
+
+cd ../../  # agents/weather/
+tar czf /tmp/weather-agent-context.tar.gz .
+aws s3 cp /tmp/weather-agent-context.tar.gz s3://kaniko-build-${ACCOUNT_ID}/build/
 ```
 
 ```yaml title="kaniko-job.yaml"
@@ -207,6 +385,7 @@ metadata:
   name: kaniko-weather-mcp
   namespace: build
 spec:
+  backoffLimit: 1
   template:
     spec:
       serviceAccountName: kaniko
@@ -214,33 +393,46 @@ spec:
       - name: kaniko
         image: gcr.io/kaniko-project/executor:latest
         args:
-        - "--context=s3://${BUCKET}/build/weather-mcp-context.tar.gz"
-        - "--destination=${ECR_URI}:latest"
+        - "--context=s3://kaniko-build-${ACCOUNT_ID}/build/weather-mcp-context.tar.gz"
+        - "--destination=${ECR_HOST}/agents-on-eks/weather-mcp:latest"
       restartPolicy: Never
 ```
 
-ポイントは Pod Identity で ECR push 権限を付与すること。`ecr:PutImage` と `ecr:CompleteLayerUpload` を含むポリシーを `build` namespace の `kaniko` サービスアカウントに紐づけた。ビルド時間は MCP Server が約 70 秒、Weather Agent が約 130 秒だった。
+ポイントは Pod Identity で ECR push 権限を付与すること。`ecr:PutImage` と `ecr:CompleteLayerUpload` を含むポリシーを `build` namespace の `kaniko` サービスアカウントに紐づけた。ビルド時間は MCP Server が約 2 分、Weather Agent が約 3 分だった。
 
 ## デプロイと動作確認
 
 Kaniko でビルドしたイメージを使い、Helm で EKS にデプロイする。MCP Server → Weather Agent の順に 2 ステップで完了する。
 
+ワークショップのリポジトリでは `scripts/terraform-prep-env-weather-agent.sh` が Terraform の出力から `workshop-mcp-weather-values.yaml` と `workshop-agent-weather-values.yaml` を自動生成する。Terraform を使わない場合は、以下のように Helm の `--set` フラグで直接指定できる。
+
 ```bash title="Terminal"
 # 1. MCP Server（Weather Agent が参照するため先にデプロイ）
 helm upgrade weather-mcp manifests/helm/mcp \
   --install -n mcp-servers --create-namespace \
-  -f workshop-mcp-weather-values.yaml
+  --set image.repository=${ECR_HOST}/agents-on-eks/weather-mcp \
+  --set image.tag=latest
 
-# 2. Weather Agent
+# 2. Weather Agent（MCP HTTP接続 + テストモード）
 helm upgrade weather-agent manifests/helm/agent \
   --install -n agents --create-namespace \
-  -f workshop-agent-weather-values.yaml
+  -f manifests/helm/agent/mcp-remote.yaml \
+  --set image.repository=${ECR_HOST}/agents-on-eks/weather-agent \
+  --set image.tag=latest \
+  --set env.DISABLE_AUTH=1 \
+  --set env.SESSION_STORE_BUCKET_NAME=weather-agent-session-${ACCOUNT_ID} \
+  --set serviceAccount.name=weather-agent \
+  --set a2a.http_url=http://weather-agent.agents:9000/
 ```
 
-動作確認では、NYC の 3 日間天気予報を正常に取得できた。
+`mcp-remote.yaml` は MCP 接続先を stdio（ローカル）から HTTP（リモート MCP Server）に切り替える values override ファイルだ。`a2a.http_url` は Part 2 の A2A 連携で必要になる設定で、エージェントカードに記載される URL を Kubernetes Service の FQDN に設定する。
+
+動作確認では、NYC の 3 日間天気予報を正常に取得できた。クラスター内部から curl で直接アクセスするか、`kubectl port-forward` でローカルに転送して確認する。
 
 ```bash title="Terminal"
-curl -X POST http://weather-agent.agents/prompt \
+# port-forward でローカルからアクセスする場合
+kubectl port-forward svc/weather-agent -n agents 3000:80 &
+curl -X POST http://localhost:3000/prompt \
   -H "Content-Type: application/json" \
   -d '{"text":"What is the weather forecast for New York City?"}'
 ```

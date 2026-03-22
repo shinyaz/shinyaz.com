@@ -63,23 +63,110 @@ UI からエージェントへのリクエストには Cognito の JWT トーク
 
 ## デプロイ手順
 
-UI のデプロイは 3 ステップで完了する。
+UI のデプロイには Cognito のセットアップが必要だ。ワークショップのリポジトリでは `eks/infrastructure/terraform/cognito.tf` で Terraform 管理されているが、本記事では手動で構築する。
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">Cognito ユーザープールの構築手順</summary>
+
+```bash title="Terminal"
+# ユーザープールの作成
+POOL_ID=$(aws cognito-idp create-user-pool \
+  --pool-name agentic-ai-on-eks \
+  --admin-create-user-config AllowAdminCreateUserOnly=true \
+  --query 'UserPool.Id' --output text)
+
+# アプリクライアントの作成
+CLIENT_OUTPUT=$(aws cognito-idp create-user-pool-client \
+  --user-pool-id $POOL_ID \
+  --client-name agent-ui \
+  --generate-secret \
+  --allowed-o-auth-flows code \
+  --allowed-o-auth-scopes email openid profile \
+  --callback-urls '["http://localhost:8000/callback"]' \
+  --logout-urls '["http://localhost:8000/"]' \
+  --supported-identity-providers COGNITO \
+  --allowed-o-auth-flows-user-pool-client \
+  --explicit-auth-flows ALLOW_USER_PASSWORD_AUTH)
+
+CLIENT_ID=$(echo $CLIENT_OUTPUT | jq -r '.UserPoolClient.ClientId')
+CLIENT_SECRET=$(echo $CLIENT_OUTPUT | jq -r '.UserPoolClient.ClientSecret')
+
+# ドメインの作成
+DOMAIN_PREFIX="agentic-ai-$(echo $RANDOM)"
+aws cognito-idp create-user-pool-domain \
+  --user-pool-id $POOL_ID --domain $DOMAIN_PREFIX
+
+# テストユーザーの作成
+aws cognito-idp admin-create-user \
+  --user-pool-id $POOL_ID --username Alice \
+  --message-action SUPPRESS
+aws cognito-idp admin-create-user \
+  --user-pool-id $POOL_ID --username Bob \
+  --message-action SUPPRESS
+```
+
+</details>
+
+UI のデプロイは 3 ステップで完了する。まず Agent UI のコンテナイメージを Part 1 と同じ Kaniko 手順でビルドしておく。
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">Agent UI のビルド手順</summary>
+
+```bash title="Terminal"
+cd ui
+tar czf /tmp/agent-ui-context.tar.gz .
+aws s3 cp /tmp/agent-ui-context.tar.gz s3://kaniko-build-${ACCOUNT_ID}/build/
+cd ..
+```
+
+```yaml title="kaniko-job.yaml"
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: kaniko-agent-ui
+  namespace: build
+spec:
+  backoffLimit: 1
+  template:
+    spec:
+      serviceAccountName: kaniko
+      containers:
+      - name: kaniko
+        image: gcr.io/kaniko-project/executor:latest
+        args:
+        - "--context=s3://kaniko-build-${ACCOUNT_ID}/build/agent-ui-context.tar.gz"
+        - "--destination=${ECR_HOST}/agents-on-eks/agent-ui:latest"
+      restartPolicy: Never
+```
+
+</details>
 
 **1. Cognito ユーザーのパスワード設定**
 
-Terraform で作成した Alice / Bob ユーザーにパスワードを設定する。
-
 ```bash title="Terminal"
 aws cognito-idp admin-set-user-password \
-  --user-pool-id $COGNITO_POOL_ID \
+  --user-pool-id $POOL_ID \
   --username Alice --password "Passw0rd@" --permanent
 ```
 
 **2. OAuth シークレットの作成**
 
-Cognito の Client ID / Secret を Kubernetes Secret として登録する。UI の Pod はこの Secret を `envFrom` で読み込む。
+Cognito の Client ID / Secret を `.env` ファイルにまとめ、Kubernetes Secret として登録する。UI の Pod はこの Secret を `envFrom` で読み込む。
+
+```bash title="Terminal (ui/.env の作成)"
+COGNITO_DOMAIN="https://${DOMAIN_PREFIX}.auth.${AWS_REGION}.amazoncognito.com"
+JWKS_URL="https://cognito-idp.${AWS_REGION}.amazonaws.com/${POOL_ID}/.well-known/jwks.json"
+
+cat > ui/.env << EOF
+OAUTH_CLIENT_ID=${CLIENT_ID}
+OAUTH_CLIENT_SECRET=${CLIENT_SECRET}
+OPENID_CONFIGURATION_URL=https://cognito-idp.${AWS_REGION}.amazonaws.com/${POOL_ID}/.well-known/openid-configuration
+OAUTH_JWKS_URL=${JWKS_URL}
+EOF
+```
 
 ```bash title="Terminal"
+kubectl create ns ui
 kubectl create secret generic agent-ui \
   --namespace ui \
   --from-env-file ui/.env
@@ -90,7 +177,8 @@ kubectl create secret generic agent-ui \
 ```bash title="Terminal"
 helm upgrade agent-ui manifests/helm/ui \
   --install -n ui --create-namespace \
-  -f workshop-ui-values.yaml
+  --set image.repository=${ECR_HOST}/agents-on-eks/agent-ui \
+  --set image.tag=latest
 ```
 
 デプロイ後、`kubectl port-forward svc/agent-ui -n ui 8000:80` で `http://localhost:8000` にアクセスすると、Cognito のログイン画面にリダイレクトされ、認証後に Gradio チャット画面が表示される。
@@ -102,7 +190,13 @@ Helm チャートには HPA テンプレートが組み込まれており、`aut
 ```bash title="Terminal"
 helm upgrade weather-agent manifests/helm/agent \
   --namespace agents \
-  -f workshop-agent-weather-values.yaml \
+  -f manifests/helm/agent/mcp-remote.yaml \
+  --set image.repository=${ECR_HOST}/agents-on-eks/weather-agent \
+  --set image.tag=latest \
+  --set env.DISABLE_AUTH=1 \
+  --set env.SESSION_STORE_BUCKET_NAME=weather-agent-session-${ACCOUNT_ID} \
+  --set serviceAccount.name=weather-agent \
+  --set a2a.http_url=http://weather-agent.agents:9000/ \
   --set autoscaling.enabled=true \
   --set autoscaling.minReplicas=1 \
   --set autoscaling.maxReplicas=3 \
@@ -142,3 +236,61 @@ travel-agent    cpu: 1%/50%   1         3         1
 - **4 コンポーネント合計 723Mi** — アイドル時のフットプリントは軽量。ただし LLM 呼び出しを含む実運用では、セッション管理（S3）とモデル呼び出し（Bedrock）のコストが支配的になる。
 
 シリーズ全体を通じて見えてきたのは、AI エージェントの本番運用では**プロトコル設計（MCP / A2A）、設定の外部化（ConfigMap / Secret）、セッション状態管理**の 3 つが従来のマイクロサービスにはない新しい設計軸になるということだ。ワークショップはこの 3 軸を 4 コンポーネントの構成で体験できる、よくできた教材だった。
+
+## クリーンアップ
+
+検証が終わったら、作成したリソースを削除する。
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">リソース削除手順</summary>
+
+```bash title="Terminal"
+# Helm releases の削除
+helm uninstall agent-ui -n ui
+helm uninstall travel-agent -n agents
+helm uninstall weather-agent -n agents
+helm uninstall weather-mcp -n mcp-servers
+
+# Kaniko jobs の削除
+kubectl delete jobs --all -n build
+
+# Namespace の削除
+kubectl delete ns agents mcp-servers ui build
+
+# Pod Identity Association の削除
+for assoc in $(aws eks list-pod-identity-associations \
+  --cluster-name $CLUSTER_NAME --region $AWS_REGION \
+  --query 'associations[].associationId' --output text); do
+  aws eks delete-pod-identity-association \
+    --cluster-name $CLUSTER_NAME --region $AWS_REGION \
+    --association-id $assoc
+done
+
+# IAM ロールの削除
+for role in weather-agent-pod-role travel-agent-pod-role kaniko-pod-role; do
+  aws iam delete-role-policy --role-name $role --policy-name bedrock-s3 2>/dev/null
+  aws iam delete-role-policy --role-name $role --policy-name ecr-s3 2>/dev/null
+  aws iam delete-role --role-name $role
+done
+
+# ECR リポジトリの削除
+for repo in agents-on-eks/weather-mcp agents-on-eks/weather-agent \
+            agents-on-eks/travel-agent agents-on-eks/agent-ui; do
+  aws ecr delete-repository --repository-name $repo \
+    --region $AWS_REGION --force
+done
+
+# S3 バケットの削除
+for bucket in weather-agent-session-${ACCOUNT_ID} \
+              travel-agent-session-${ACCOUNT_ID} \
+              kaniko-build-${ACCOUNT_ID}; do
+  aws s3 rb s3://$bucket --force
+done
+
+# Cognito ユーザープールの削除（ドメインを先に削除する必要がある）
+aws cognito-idp delete-user-pool-domain \
+  --user-pool-id $POOL_ID --domain $DOMAIN_PREFIX
+aws cognito-idp delete-user-pool --user-pool-id $POOL_ID
+```
+
+</details>
