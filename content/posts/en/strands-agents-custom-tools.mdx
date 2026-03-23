@@ -1,7 +1,7 @@
 ---
 title: "Strands Agents SDK Guide — Custom Tool Design Patterns"
 description: "Deep dive into Strands Agents SDK custom tools. Build multi-step tool chains, observe how the LLM handles tool errors gracefully, and control agent behavior with system prompts — all verified with real code and metrics."
-date: 2026-03-24
+date: 2026-03-03
 published: true
 featured: false
 categories: [ai-agents]
@@ -12,7 +12,7 @@ seriesOrder: 2
 
 ## Introduction
 
-In the [previous article](/en/blog/2026/03/24/strands-agents-quickstart), we ran through the Strands Agents SDK Quickstart and confirmed how the agent loop works. We learned that the `@tool` decorator turns a function into a tool, but building practical agents requires understanding how to design tools well.
+In the [previous article](/en/blog/2026/03/03/strands-agents-quickstart), we ran through the Strands Agents SDK Quickstart and confirmed how the agent loop works. We learned that the `@tool` decorator turns a function into a tool, but building practical agents requires understanding how to design tools well.
 
 This article digs deeper into custom tool design from three angles.
 
@@ -24,7 +24,7 @@ See the official docs at [Creating Custom Tools](https://strandsagents.com/docs/
 
 ## Setup
 
-Use the same environment from the [previous article](/en/blog/2026/03/24/strands-agents-quickstart). For a fresh start:
+Use the same environment from the [previous article](/en/blog/2026/03/03/strands-agents-quickstart). For a fresh start:
 
 ```bash title="Terminal"
 mkdir my_agent && cd my_agent

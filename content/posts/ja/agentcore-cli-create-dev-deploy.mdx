@@ -1,9 +1,11 @@
 ---
-title: "AgentCore CLIで4コマンドでAIエージェントをAWSにデプロイする"
+title: "AgentCore CLI 実践 — 4コマンドでAIエージェントをAWSにデプロイする"
 description: "AgentCore CLIを使ってStrands Agentsプロジェクトの作成からローカル開発、AWSデプロイ、動作確認までを検証。CDKの知識なしに約1分半でエージェントをデプロイできる開発者体験と、OpenTelemetryベースのログ基盤を共有する。"
 date: "2026-03-23"
 published: true
 featured: false
+series: "agentcore-cli"
+seriesOrder: 1
 categories: [ai-agents]
 tags: ["bedrock", "agentcore", "agentcore-cli", "strands-agents", "ai-agents"]
 ---
@@ -13,6 +15,8 @@ tags: ["bedrock", "agentcore", "agentcore-cli", "strands-agents", "ai-agents"]
 Amazon Bedrock AgentCore は、任意のフレームワークとモデルを使って AI エージェントをセキュアにデプロイ・運用するためのサービスだ。2025年7月に[プレビューとして発表](https://aws.amazon.com/about-aws/whats-new/2025/07/amazon-bedrock-agentcore-preview/)され、2025年10月に[一般提供が開始](https://aws.amazon.com/about-aws/whats-new/2025/10/amazon-bedrock-agentcore-available/)された。Runtime、Memory、Gateway、Identity などのコンポーネントが提供されており、現在は9リージョンで利用可能だ。
 
 AgentCore のプロジェクト作成・デプロイを支援する CLI ツールとして、Python ベースの [Bedrock AgentCore Starter Toolkit](https://github.com/aws/bedrock-agentcore-starter-toolkit) と、Node.js ベースの [AgentCore CLI](https://github.com/aws/agentcore-cli) の2つが公開されている。メンテナーによると [AgentCore CLI は Starter Toolkit の後継であり、Starter Toolkit は非推奨化が進められている](https://github.com/aws/agentcore-cli/issues/317#issuecomment-3936726654)。新規プロジェクトには AgentCore CLI が推奨されている。両者は `agentcore` という同名のコマンドを提供するため、[AgentCore CLI の README](https://github.com/aws/agentcore-cli#installation) では Starter Toolkit を先にアンインストールするよう案内されている。AgentCore CLI 自体はまだ Preview 段階（v0.3.0-preview）で、GA に向けて開発中とのことだ。
+
+**AgentCore CLI は Public Preview（v0.3.0-preview）段階であり、コマンド体系や生成テンプレートは GA までに変更される可能性がある。本記事の内容は 2026年3月時点の動作に基づいている。本番ワークロードへの適用は GA を待つことを推奨する。**
 
 本記事では、AgentCore CLI を使って `create → dev → deploy → invoke` の一連のライフサイクルを実際に検証した。CDK を意識せずにエージェントをデプロイできるか、ローカル開発の体験はどうか、デプロイ後のオブザーバビリティはどうなっているか、といった点を確認した結果を共有する。公式ドキュメントは [GitHub リポジトリの docs/](https://github.com/aws/agentcore-cli/tree/main/docs) を参照。
 
@@ -426,7 +430,9 @@ AgentCore CLI を使って、プロジェクト作成からデプロイ、動作
 - **構造化ログが標準装備** — デプロイ後のエージェントは OpenTelemetry ベースの構造化ログが自動で有効になり、トレース ID 付きでモデル呼び出しやツール実行の全過程が記録される。`agentcore logs` で手軽に確認できる。
 - **設定ファイル中心の宣言的な設計** — `agentcore.json` にエージェント、メモリ、クレデンシャル、評価器をすべて宣言的に定義し、`agentcore deploy` で反映する。リソースの追加・削除も `agentcore add` / `agentcore remove` → `agentcore deploy` のパターンで統一されている。
 
-今回はシンプルな構成での検証だったが、CLI は Memory（SEMANTIC / SUMMARIZATION / USER_PREFERENCE）、Gateway（MCP サーバー連携）、Evaluations（LLM-as-a-Judge による品質評価）などの機能もサポートしている。特に Evaluations はエージェントの品質管理において重要な機能なので、別途検証したい。
+今回はシンプルな構成での検証だったが、CLI は Memory（SEMANTIC / SUMMARIZATION / USER_PREFERENCE）、Gateway（MCP サーバー連携）、Evaluations（LLM-as-a-Judge による品質評価）などの機能もサポートしている。本シリーズの続編でこれらの機能を順に検証していく。
+
+**繰り返しになるが、AgentCore CLI は Preview 段階のツールだ。** 開発体験は良好だが、CLI のコマンドやオプション、生成されるコードのテンプレートは今後変更される可能性がある。最新の仕様は [GitHub リポジトリ](https://github.com/aws/agentcore-cli)で確認してほしい。
 
 ## クリーンアップ
 

@@ -1,7 +1,7 @@
 ---
 title: "Strands Agents SDK Guide — Building a Team of Specialists with Multi-Agent"
 description: "Coordinate multiple agents using the Agents as Tools pattern in Strands Agents SDK. Build a summarizer and translator as specialized agents, orchestrated by a coordinator — verified with real code and metrics."
-date: 2026-03-24
+date: 2026-03-03
 published: true
 featured: false
 categories: [ai-agents]
@@ -12,7 +12,7 @@ seriesOrder: 5
 
 ## Introduction
 
-In the [previous article](/en/blog/2026/03/24/strands-agents-conversation), we learned about conversation memory and context management. At this point, we've covered nearly everything a single agent can do.
+In the [previous article](/en/blog/2026/03/03/strands-agents-conversation), we learned about conversation memory and context management. At this point, we've covered nearly everything a single agent can do.
 
 But real-world tasks sometimes exceed what one agent can handle. "Summarize this text, then translate it to Japanese" is more efficiently handled by multiple agents with different specialties working together.
 
@@ -37,7 +37,7 @@ Think of it like a human team: a manager (orchestrator) delegates work to specia
 
 ## Setup
 
-Use the same environment from the [previous article](/en/blog/2026/03/24/strands-agents-conversation).
+Use the same environment from the [previous article](/en/blog/2026/03/03/strands-agents-conversation).
 
 ```python title="Python (shared config)"
 from strands import Agent, tool
@@ -163,10 +163,10 @@ Over 5 articles, we've covered the fundamentals of Strands Agents SDK.
 
 | # | Topic | What We Learned |
 |---|---|---|
-| [1](/en/blog/2026/03/24/strands-agents-quickstart) | Quickstart | Agent loop, `@tool`, metrics |
-| [2](/en/blog/2026/03/24/strands-agents-custom-tools) | Custom Tools | Multi-step, error handling, system prompts |
-| [3](/en/blog/2026/03/24/strands-agents-mcp-tools) | MCP | External tool connection, mixing with custom tools |
-| [4](/en/blog/2026/03/24/strands-agents-conversation) | Conversation | Multi-turn, SlidingWindow |
+| [1](/en/blog/2026/03/03/strands-agents-quickstart) | Quickstart | Agent loop, `@tool`, metrics |
+| [2](/en/blog/2026/03/03/strands-agents-custom-tools) | Custom Tools | Multi-step, error handling, system prompts |
+| [3](/en/blog/2026/03/03/strands-agents-mcp-tools) | MCP | External tool connection, mixing with custom tools |
+| [4](/en/blog/2026/03/03/strands-agents-conversation) | Conversation | Multi-turn, SlidingWindow |
 | 5 (this article) | Multi-Agent | Agents as Tools, orchestrator |
 
 From here, you can explore more advanced topics like [Swarm](https://strandsagents.com/docs/user-guide/concepts/multi-agent/swarm/), [Graph](https://strandsagents.com/docs/user-guide/concepts/multi-agent/graph/) patterns, [Session Management](https://strandsagents.com/docs/user-guide/concepts/agents/session-management/), and [Observability](https://strandsagents.com/docs/user-guide/observability-evaluation/observability/).

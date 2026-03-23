@@ -1,0 +1,348 @@
+---
+title: "AgentCore CLI 実践 — 主要機能を統合して技術トレンドアドバイザーを構築する"
+description: "AgentCore CLI の Runtime・Memory・Gateway・Evaluations を1つのプロジェクトに統合し、ユーザーの専門分野を記憶して最新技術トレンドをパーソナライズ検索する技術トレンドアドバイザーを構築。シリーズの総集編として主要機能の統合手順と動作を検証する。"
+date: "2026-03-23"
+published: true
+featured: false
+series: "agentcore-cli"
+seriesOrder: 5
+seriesExtra: true
+categories: [ai-agents]
+tags: ["bedrock", "agentcore", "agentcore-cli", "agentcore-memory", "agentcore-gateway", "agentcore-evaluations", "strands-agents", "ai-agents"]
+---
+
+## はじめに
+
+本シリーズでは、AgentCore CLI の4つの主要機能を個別に検証してきた。
+
+- [第1回](/ja/blog/2026/03/23/agentcore-cli-create-dev-deploy) — Runtime（基本ライフサイクル）
+- [第2回](/ja/blog/2026/03/23/agentcore-cli-memory-persistence) — Memory（会話の記憶）
+- [第3回](/ja/blog/2026/03/23/agentcore-cli-gateway-mcp-server) — Gateway（外部 MCP サーバー接続）
+- [第4回](/ja/blog/2026/03/23/agentcore-cli-evaluations-quality) — Evaluations（品質計測）
+
+最終回の本記事では、これら4つの機能を1つのプロジェクトに統合し、「技術トレンドアドバイザー」を構築する。ユーザーの専門分野を記憶し（Memory）、Web 検索で最新情報を取得し（Gateway）、応答品質を自動計測する（Evaluations）エージェントだ。
+
+**AgentCore CLI は Public Preview（v0.3.0-preview）段階であり、コマンド体系や生成テンプレートは GA までに変更される可能性がある。本記事の内容は 2026年3月時点の動作に基づいている。**
+
+## 前提条件
+
+- [第1回](/ja/blog/2026/03/23/agentcore-cli-create-dev-deploy)の環境が構築済み（Node.js 20+、uv、AWS CLI、AgentCore CLI v0.3.0-preview）
+- **us-east-1 リージョン**の AWS アカウント — Evaluator の CloudFormation リソースが ap-northeast-1 では未サポートのため（[第4回](/ja/blog/2026/03/23/agentcore-cli-evaluations-quality)参照）
+
+`AWS_REGION` 環境変数が設定されている場合、`aws-targets.json` のリージョンより優先されることがある。us-east-1 以外に設定されている場合は、`export AWS_REGION=us-east-1` で上書きするか、`unset AWS_REGION` で解除してから実行する。
+
+## 構築するエージェント
+
+| 機能 | 役割 |
+|------|------|
+| Runtime | カスタム system_prompt で技術トレンドアドバイザーとして動作 |
+| Memory | ユーザーの専門分野・技術スタック・関心領域を記憶 |
+| Gateway | Exa AI の Web 検索でリアルタイムの技術トレンドを取得 |
+| Evaluations | 応答の正確性・有用性・パーソナライズ度を自動計測 |
+
+## プロジェクト構築
+
+[第3回](/ja/blog/2026/03/23/agentcore-cli-gateway-mcp-server)で学んだ通り、Gateway を使う場合は `--no-agent` でプロジェクトを作成し、Gateway 設定後にエージェントを追加する。
+
+### Step 1〜3: プロジェクト作成と Gateway 設定
+
+```bash title="Terminal"
+agentcore create --name AgentCoreFull --no-agent --skip-git
+cd AgentCoreFull
+
+# Gateway を追加
+agentcore add gateway --name my-gateway
+
+# Exa AI MCP サーバーをターゲットに追加
+agentcore add gateway-target \
+  --type mcp-server \
+  --name exa-search \
+  --endpoint https://mcp.exa.ai/mcp \
+  --gateway my-gateway
+```
+
+### Step 4: エージェントを追加（Memory + Gateway 統合）
+
+`--memory longAndShortTerm` を指定すると、Gateway クライアントと Memory セッションマネージャーの両方が自動生成される。
+
+```bash title="Terminal"
+agentcore add agent \
+  --name TechAdvisor \
+  --framework Strands \
+  --model-provider Bedrock \
+  --language Python \
+  --memory longAndShortTerm
+```
+
+### Step 5: 評価器を追加
+
+```bash title="Terminal"
+agentcore add evaluator \
+  --name ResponseQuality \
+  --level SESSION \
+  --model us.anthropic.claude-sonnet-4-5-20250929-v1:0 \
+  --instructions "Evaluate the overall quality of the agent's response. Consider accuracy, helpfulness, personalization based on user context, and clarity. Context: {context}" \
+  --rating-scale 1-5-quality
+```
+
+### system_prompt のカスタマイズ
+
+自動生成された `main.py` の system_prompt を技術トレンドアドバイザー向けに変更する。
+
+```python title="app/TechAdvisor/main.py（system_prompt 部分）"
+system_prompt="""
+    You are a personalized tech trend advisor. You remember the user's
+    technical background, skills, and interests from previous conversations.
+    When asked about trends or recommendations, search the web for the
+    latest information and tailor your advice based on what you know about
+    the user. Always be specific and actionable.
+""",
+```
+
+`main.py` の全体は、[第2回](/ja/blog/2026/03/23/agentcore-cli-memory-persistence)の Memory 統合コードと[第3回](/ja/blog/2026/03/23/agentcore-cli-gateway-mcp-server)の Gateway クライアントコードが組み合わさった構成だ。`get_all_gateway_mcp_clients()` で Gateway ツールを取得し、`get_memory_session_manager()` でセッションマネージャーを初期化する。
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">main.py（Memory + Gateway 統合済みの全体）</summary>
+
+```python title="app/TechAdvisor/main.py"
+from strands import Agent, tool
+from bedrock_agentcore.runtime import BedrockAgentCoreApp
+from model.load import load_model
+from mcp_client.client import get_all_gateway_mcp_clients
+from memory.session import get_memory_session_manager
+
+app = BedrockAgentCoreApp()
+log = app.logger
+
+mcp_clients = get_all_gateway_mcp_clients()
+
+tools = []
+
+@tool
+def add_numbers(a: int, b: int) -> int:
+    """Return the sum of two numbers"""
+    return a+b
+tools.append(add_numbers)
+
+for mcp_client in mcp_clients:
+    if mcp_client:
+        tools.append(mcp_client)
+
+
+def agent_factory():
+    cache = {}
+    def get_or_create_agent(session_id, user_id):
+        key = f"{session_id}/{user_id}"
+        if key not in cache:
+            cache[key] = Agent(
+                model=load_model(),
+                session_manager=get_memory_session_manager(session_id, user_id),
+                system_prompt="""
+                    You are a personalized tech trend advisor. You remember
+                    the user's technical background, skills, and interests
+                    from previous conversations. When asked about trends or
+                    recommendations, search the web for the latest information
+                    and tailor your advice based on what you know about the
+                    user. Always be specific and actionable.
+                """,
+                tools=tools
+            )
+        return cache[key]
+    return get_or_create_agent
+get_or_create_agent = agent_factory()
+
+
+@app.entrypoint
+async def invoke(payload, context):
+    log.info("Invoking Agent.....")
+
+    session_id = getattr(context, 'session_id', 'default-session')
+    user_id = getattr(context, 'user_id', 'default-user')
+    agent = get_or_create_agent(session_id, user_id)
+
+    stream = agent.stream_async(payload.get("prompt"))
+
+    async for event in stream:
+        if "data" in event and isinstance(event["data"], str):
+            yield event["data"]
+
+
+if __name__ == "__main__":
+    app.run()
+```
+
+</details>
+
+### デプロイ
+
+```bash title="Terminal"
+ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+cat > agentcore/aws-targets.json << EOF
+[{"name":"default","account":"${ACCOUNT_ID}","region":"us-east-1"}]
+EOF
+
+agentcore deploy -y
+```
+
+### デプロイ状態の確認
+
+```bash title="Terminal"
+agentcore status --json
+```
+
+```json title="Output"
+{
+  "success": true,
+  "projectName": "AgentCoreFull",
+  "targetName": "default",
+  "targetRegion": "us-east-1",
+  "resources": [
+    {
+      "resourceType": "agent",
+      "name": "TechAdvisor",
+      "deploymentState": "deployed",
+      "detail": "READY"
+    },
+    {
+      "resourceType": "memory",
+      "name": "TechAdvisorMemory",
+      "deploymentState": "deployed",
+      "detail": "SEMANTIC, USER_PREFERENCE, SUMMARIZATION"
+    },
+    {
+      "resourceType": "gateway",
+      "name": "my-gateway",
+      "deploymentState": "local-only",
+      "detail": "1 target"
+    },
+    {
+      "resourceType": "evaluator",
+      "name": "ResponseQuality",
+      "deploymentState": "deployed",
+      "detail": "SESSION — LLM-as-a-Judge — ACTIVE"
+    }
+  ]
+}
+```
+
+4つのリソースすべてがデプロイされた。
+
+## 検証: Memory + Gateway の統合動作
+
+### セッション1: 自己紹介
+
+```bash title="Terminal"
+agentcore invoke \
+  "Hi! I'm a platform engineer specializing in Kubernetes and Go. I work on building internal developer platforms. I'm particularly interested in GitOps, service mesh, and observability." \
+  --stream \
+  --session-id session-full-test-001-self-introduction \
+  --user-id user-engineer \
+  --agent TechAdvisor
+```
+
+```text title="Output"
+Hello! It's great to meet you! I'll remember that you're a platform engineer
+with expertise in:
+
+- **Core Skills**: Kubernetes and Go
+- **Focus Area**: Building internal developer platforms
+- **Key Interests**: GitOps, service mesh, and observability
+```
+
+### セッション2: パーソナライズされたトレンド検索
+
+Memory の長期メモリ抽出を待つ（[第2回](/ja/blog/2026/03/23/agentcore-cli-memory-persistence)で確認した通り、1〜2分かかる）。
+
+```bash title="Terminal"
+sleep 120
+```
+
+別のセッションで最新トレンドを聞く。
+
+```bash title="Terminal"
+agentcore invoke \
+  "What are the latest tech trends that would be relevant to my work? Search the web for recent developments." \
+  --stream \
+  --session-id session-full-test-002-trend-search-conv \
+  --user-id user-engineer \
+  --agent TechAdvisor
+```
+
+```text title="Output（抜粋）"
+I'll search for the latest developments in areas most relevant to your
+platform engineering work, focusing on GitOps, service mesh, observability,
+Kubernetes, and internal developer platforms.
+```
+
+エージェントが Memory から専門分野を取得し、Gateway 経由で Exa AI の Web 検索を実行した。以下はパーソナライズされた応答の抜粋だ。
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">応答の全文（抜粋）</summary>
+
+```text title="Output（続き）"
+## 🕸️ Service Mesh: eBPF Revolution & Sidecarless Architecture
+
+**Cilium has won the service mesh performance battle** - adopted as default
+CNI by GKE, EKS, and AKS. 40-60% lower latency, 50-70% less memory vs
+traditional sidecars.
+
+## 📊 Observability: OpenTelemetry Dominance & AI-Powered Insights
+
+**71% of orgs use both Prometheus + OTel** (up 50% YoY). New: OTel profiling
+(continuous profiling now in OTel spec).
+
+## 🎯 Top Actionable Recommendations for You:
+
+1. **Pilot Cilium** on a dev cluster - gain eBPF expertise (rare skill)
+2. **Build your first golden path** in Backstage with auto-OTel instrumentation
+3. **Evaluate Istio Ambient** if you need service mesh features without sidecar overhead
+```
+
+</details>
+
+セッション1で伝えた専門分野（Kubernetes、Go、GitOps、service mesh、observability）を記憶した上で、Gateway 経由で Exa AI の Web 検索を実行し、パーソナライズされた最新トレンド情報を返した。Memory と Gateway が統合されて動作していることが確認できた。
+
+## 検証: Evaluations による品質計測
+
+トレースがインデックスされるまで約10分待ってから、評価を実行する。
+
+```bash title="Terminal"
+agentcore run evals \
+  --agent TechAdvisor \
+  --evaluator ResponseQuality \
+  --days 1
+```
+
+```text title="Output"
+Agent: TechAdvisor | Mar 23, 2026, 11:35 AM | Sessions: 2 | Lookback: 1d
+
+  ResponseQuality: 5.00
+
+Results saved to: agentcore/.cli/eval-results/eval_2026-03-23_11-35-41.json
+```
+
+2つのセッション（自己紹介 + トレンド検索）が評価され、ResponseQuality スコアは 5.00（Excellent）だった。評価プロンプトに「personalization based on user context」を含めたことで、Memory を活用したパーソナライズの品質も評価対象になっている。
+
+## まとめ
+
+AgentCore CLI の4つの主要機能を1つのプロジェクトに統合し、技術トレンドアドバイザーを構築した。
+
+- **主要機能の統合は CLI のワークフローに沿うだけで実現できる** — `--no-agent` → Gateway → ターゲット → エージェント（`--memory longAndShortTerm`）→ 評価器の順で `add` し、`deploy` するだけだ。各機能のコード統合は CLI が自動で行い、手動でのコード記述は system_prompt のカスタマイズのみだった。
+- **Memory + Gateway の組み合わせが実用的** — ユーザーの専門分野を記憶した上で、Web 検索でリアルタイム情報を取得してパーソナライズする。「自分のことを覚えていて、最新情報も調べてくれるアシスタント」が CLI のコマンドだけで構築できる。
+- **Evaluations で統合エージェントの品質を計測できる** — 評価プロンプトにパーソナライズの観点を含めることで、Memory の活用度も品質指標に組み込める。
+- **リージョン制約に注意** — Evaluator の CloudFormation リソースは一部リージョンでのみサポートされている。これらの機能を統合する場合は us-east-1 など対応リージョンを使う必要がある。
+
+本シリーズを通じて、AgentCore CLI が `agentcore.json` と `mcp.json` を中心とした宣言的な設計で、エージェントの開発から品質管理までを一貫して行えることを確認した。個別の機能を理解した上で統合すると、CLI の設計思想がより明確に見えてくる。
+
+## クリーンアップ
+
+```bash title="Terminal"
+# プロジェクト内のリソース定義をすべて削除
+agentcore remove all --force
+
+# AWS リソースを削除
+agentcore deploy -y
+
+# CLI のアンインストール（不要な場合）
+npm uninstall -g @aws/agentcore
+```

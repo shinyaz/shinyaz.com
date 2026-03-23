@@ -1,7 +1,7 @@
 ---
 title: "Strands Agents SDK 入門 — マルチエージェントで専門家チームを作る"
 description: "Strands Agents SDK の Agents as Tools パターンで複数エージェントを協調させる。要約エージェントと翻訳エージェントをオーケストレーターが連携させる実例をコードとメトリクスで確認する。"
-date: 2026-03-24
+date: 2026-03-03
 published: true
 featured: false
 categories: [ai-agents]
@@ -12,7 +12,7 @@ seriesOrder: 5
 
 ## はじめに
 
-[前回の記事](/ja/blog/2026/03/24/strands-agents-conversation)では会話の記憶とコンテキスト管理を学んだ。ここまでのシリーズで、単一エージェントの機能はほぼ網羅した。
+[前回の記事](/ja/blog/2026/03/03/strands-agents-conversation)では会話の記憶とコンテキスト管理を学んだ。ここまでのシリーズで、単一エージェントの機能はほぼ網羅した。
 
 しかし、現実のタスクは 1 つのエージェントでは手に負えないことがある。「テキストを要約して、さらに日本語に翻訳して」のように、異なる専門性を持つ複数のエージェントが協調する方が効率的だ。
 
@@ -37,7 +37,7 @@ graph TD
 
 ## セットアップ
 
-[前回の記事](/ja/blog/2026/03/24/strands-agents-conversation)の環境をそのまま使う。
+[前回の記事](/ja/blog/2026/03/03/strands-agents-conversation)の環境をそのまま使う。
 
 ```python title="Python (共通設定)"
 from strands import Agent, tool
@@ -163,10 +163,10 @@ Tokens: 3294
 
 | 回 | テーマ | 学んだこと |
 |---|---|---|
-| [第 1 回](/ja/blog/2026/03/24/strands-agents-quickstart) | Quickstart | エージェントループ、`@tool`、メトリクス |
-| [第 2 回](/ja/blog/2026/03/24/strands-agents-custom-tools) | カスタムツール | マルチステップ、エラー処理、システムプロンプト |
-| [第 3 回](/ja/blog/2026/03/24/strands-agents-mcp-tools) | MCP | 外部ツール接続、自作ツールとの併用 |
-| [第 4 回](/ja/blog/2026/03/24/strands-agents-conversation) | 会話管理 | マルチターン、SlidingWindow |
+| [第 1 回](/ja/blog/2026/03/03/strands-agents-quickstart) | Quickstart | エージェントループ、`@tool`、メトリクス |
+| [第 2 回](/ja/blog/2026/03/03/strands-agents-custom-tools) | カスタムツール | マルチステップ、エラー処理、システムプロンプト |
+| [第 3 回](/ja/blog/2026/03/03/strands-agents-mcp-tools) | MCP | 外部ツール接続、自作ツールとの併用 |
+| [第 4 回](/ja/blog/2026/03/03/strands-agents-conversation) | 会話管理 | マルチターン、SlidingWindow |
 | 第 5 回（本記事） | マルチエージェント | Agents as Tools、オーケストレーター |
 
 ここから先は [Swarm](https://strandsagents.com/docs/user-guide/concepts/multi-agent/swarm/) や [Graph](https://strandsagents.com/docs/user-guide/concepts/multi-agent/graph/) パターン、[セッション管理](https://strandsagents.com/docs/user-guide/concepts/agents/session-management/)、[オブザーバビリティ](https://strandsagents.com/docs/user-guide/observability-evaluation/observability/) など、より高度なトピックに進むことができる。

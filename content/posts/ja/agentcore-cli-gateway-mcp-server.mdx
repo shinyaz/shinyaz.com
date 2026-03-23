@@ -1,0 +1,297 @@
+---
+title: "AgentCore CLI 実践 — Gateway で外部MCPサーバーを接続する"
+description: "AgentCore CLI の Gateway 機能を検証。外部 MCP サーバーをターゲットとして登録し、エージェントから Gateway 経由でツールを呼び出す手順と、プロジェクト構成の順序やデプロイ時の接続検証など実運用で知っておくべきポイントを共有する。"
+date: "2026-03-23"
+published: true
+featured: false
+series: "agentcore-cli"
+seriesOrder: 3
+categories: [ai-agents]
+tags: ["bedrock", "agentcore", "agentcore-cli", "agentcore-gateway", "mcp", "strands-agents", "ai-agents"]
+---
+
+## はじめに
+
+[第1回](/ja/blog/2026/03/23/agentcore-cli-create-dev-deploy)では基本ライフサイクル、[第2回](/ja/blog/2026/03/23/agentcore-cli-memory-persistence)では Memory による記憶の永続化を検証した。今回は Gateway を使って、外部の MCP サーバーをエージェントに接続する。
+
+AgentCore Gateway は、MCP 互換のプロキシとして機能し、エージェントからバックエンドツールへのリクエストルーティング、認証、ツールディスカバリーを担う。エージェントは Gateway の URL だけを知っていればよく、背後にある MCP サーバーや API の詳細を意識する必要がない。
+
+本記事では、外部の MCP サーバー（[Exa AI](https://exa.ai/) の Web 検索）を Gateway ターゲットとして登録し、エージェントから Gateway 経由でツールを呼び出す一連の流れを検証する。Gateway の[CLI ドキュメント](https://github.com/aws/agentcore-cli/blob/main/docs/gateway.md)と[設定リファレンス](https://github.com/aws/agentcore-cli/blob/main/docs/configuration.md#mcpjson)も参照。
+
+**AgentCore CLI は Public Preview（v0.3.0-preview）段階であり、コマンド体系や生成テンプレートは GA までに変更される可能性がある。本記事の内容は 2026年3月時点の動作に基づいている。**
+
+## 前提条件
+
+- [第1回](/ja/blog/2026/03/23/agentcore-cli-create-dev-deploy)の環境が構築済み（Node.js 20+、uv、AWS CLI、AgentCore CLI v0.3.0-preview）
+- AgentCore が利用可能なリージョンの AWS アカウント
+
+## Gateway の概要
+
+ターゲットタイプは `mcp-server`（外部 MCP サーバー）、`api-gateway`（API Gateway REST API）、`open-api-schema`（OpenAPI スキーマ）、`smithy-model`（Smithy モデル）、`lambda-function-arn`（Lambda 関数）の5種類がある。本記事では最もシンプルな `mcp-server` タイプを使う。他のタイプの詳細は[CLI ドキュメント](https://github.com/aws/agentcore-cli/blob/main/docs/gateway.md#gateway-targets)を参照。
+
+## プロジェクト作成
+
+Gateway を使う場合、プロジェクト構成の順序が重要だ。[CLI ドキュメント](https://github.com/aws/agentcore-cli/blob/main/docs/gateway.md)の Quick Start に記載されている通り、Gateway とターゲットを先に設定してからエージェントを追加すると、Gateway クライアントコードが自動生成される。逆順だと手動統合が必要になる。
+
+```text title="推奨される構成順序"
+1. agentcore create --no-agent    # エージェントなしでプロジェクト作成
+2. agentcore add gateway          # Gateway を追加
+3. agentcore add gateway-target   # ターゲットを追加
+4. agentcore add agent            # エージェントを追加（Gateway 自動統合）
+5. agentcore deploy               # デプロイ
+```
+
+### Step 1: エージェントなしでプロジェクトを作成
+
+```bash title="Terminal"
+agentcore create --name AgentCoreGwTest --no-agent --skip-git
+cd AgentCoreGwTest
+```
+
+### Step 2: Gateway を追加
+
+```bash title="Terminal"
+agentcore add gateway --name my-gateway --json
+```
+
+```json title="Output"
+{"success": true, "gatewayName": "my-gateway"}
+```
+
+Gateway の設定は `agentcore.json` ではなく `agentcore/mcp.json` に保存される。これは Gateway 専用の設定ファイルだ。
+
+```json title="agentcore/mcp.json"
+{
+  "agentCoreGateways": [
+    {
+      "name": "my-gateway",
+      "description": "Gateway for my-gateway",
+      "targets": [],
+      "authorizerType": "NONE",
+      "enableSemanticSearch": true,
+      "exceptionLevel": "NONE"
+    }
+  ]
+}
+```
+
+`authorizerType: "NONE"` はインバウンド認証なし（開発・テスト用）。本番環境では `AWS_IAM` または `CUSTOM_JWT` を使う。
+
+### Step 3: Gateway ターゲットを追加
+
+外部 MCP サーバーとして [Exa AI](https://exa.ai/) の Web 検索エンドポイントを使う。Exa AI は認証なしで利用できる公開 MCP サーバーだ。
+
+```bash title="Terminal"
+agentcore add gateway-target \
+  --type mcp-server \
+  --name exa-search \
+  --endpoint https://mcp.exa.ai/mcp \
+  --gateway my-gateway \
+  --json
+```
+
+```json title="Output"
+{"success": true, "toolName": "exa-search"}
+```
+
+### Step 4: エージェントを追加
+
+Gateway 設定済みの状態でエージェントを追加する。`--no-agent` で作成したプロジェクトでは `--language` と `--memory` の明示的な指定が必要だ。
+
+```bash title="Terminal"
+agentcore add agent \
+  --name GwAgent \
+  --framework Strands \
+  --model-provider Bedrock \
+  --language Python \
+  --memory none \
+  --json
+```
+
+```json title="Output"
+{"success": true, "agentName": "GwAgent"}
+```
+
+## 自動生成される Gateway クライアントコード
+
+Gateway 設定後にエージェントを追加したことで、`mcp_client/client.py` に Gateway クライアントコードが自動生成される。
+
+```python title="app/GwAgent/mcp_client/client.py"
+import os
+import logging
+from mcp.client.streamable_http import streamablehttp_client
+from strands.tools.mcp.mcp_client import MCPClient
+
+logger = logging.getLogger(__name__)
+
+
+def get_my_gateway_mcp_client() -> MCPClient | None:
+    """Returns an MCP Client connected to the my-gateway gateway."""
+    url = os.environ.get("AGENTCORE_GATEWAY_MY_GATEWAY_URL")
+    if not url:
+        logger.warning("AGENTCORE_GATEWAY_MY_GATEWAY_URL not set — my-gateway gateway tools unavailable")
+        return None
+    return MCPClient(lambda: streamablehttp_client(url))
+
+def get_all_gateway_mcp_clients() -> list[MCPClient]:
+    """Returns MCP clients for all configured gateways."""
+    clients = []
+    client = get_my_gateway_mcp_client()
+    if client:
+        clients.append(client)
+    return clients
+```
+
+ポイントは以下の通り。
+
+- `AGENTCORE_GATEWAY_MY_GATEWAY_URL` 環境変数から Gateway URL を取得する。Gateway 名 `my-gateway` がアッパーケース + アンダースコアに変換される（`MY_GATEWAY`）
+- 環境変数が未設定の場合は `None` を返し、Gateway ツールは利用不可になる（ローカル dev で未デプロイの場合）
+- `get_all_gateway_mcp_clients()` で全 Gateway のクライアントをまとめて取得できる
+
+`main.py` では、[第1回](/ja/blog/2026/03/23/agentcore-cli-create-dev-deploy)のデフォルトテンプレートの `get_streamable_http_mcp_client()` の代わりに `get_all_gateway_mcp_clients()` が使われる。
+
+```python title="app/GwAgent/main.py（import 部分）"
+from mcp_client.client import get_all_gateway_mcp_clients
+
+# ...
+mcp_clients = get_all_gateway_mcp_clients()
+```
+
+## AWS へのデプロイ
+
+### デプロイターゲットの設定
+
+```bash title="Terminal"
+ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+
+cat > agentcore/aws-targets.json << EOF
+[
+  {
+    "name": "default",
+    "description": "Tokyo (ap-northeast-1)",
+    "account": "${ACCOUNT_ID}",
+    "region": "ap-northeast-1"
+  }
+]
+EOF
+```
+
+### デプロイの実行
+
+```bash title="Terminal"
+agentcore deploy -y
+```
+
+Gateway のデプロイは CloudFormation とは別のフェーズで行われる。デプロイログには以下の2つのフェーズが表示される。
+
+1. **Deploying gateways...** — AgentCore Gateway API を使って Gateway とターゲットを作成。このフェーズでターゲットの MCP サーバーへの接続確認も行われる
+2. **Deploy to AWS...** — CloudFormation で Runtime（エージェント）をデプロイ
+
+Gateway ターゲットのデプロイ時に MCP サーバーへの接続確認が行われるため、ターゲットの MCP サーバーが到達不能だとデプロイが失敗する。これは重要な制約で、外部 MCP サーバーの可用性がデプロイの成否に直結する。
+
+デプロイ完了後、Gateway URL が Outputs に表示される。
+
+```text title="Output"
+✓ Deployed to 'default' (stack: AgentCore-AgentCoreGwTest-default)
+
+Outputs:
+  McpGatewayMyGatewayUrlOutput: https://agentcoregwtest-my-gateway-XXXXXXXXXX.gateway.bedrock-agentcore.ap-northeast-1.amazonaws.com/mcp
+```
+
+### デプロイ状態の確認
+
+```bash title="Terminal"
+agentcore status --json
+```
+
+```json title="Output"
+{
+  "success": true,
+  "projectName": "AgentCoreGwTest",
+  "targetName": "default",
+  "targetRegion": "ap-northeast-1",
+  "resources": [
+    {
+      "resourceType": "agent",
+      "name": "GwAgent",
+      "deploymentState": "deployed",
+      "detail": "READY"
+    },
+    {
+      "resourceType": "gateway",
+      "name": "my-gateway",
+      "deploymentState": "local-only",
+      "detail": "1 target"
+    }
+  ]
+}
+```
+
+`agent` が `READY`、`gateway` に `1 target` が表示されていればデプロイ完了だ。Gateway の `deploymentState` が `local-only` と表示されるのは、Gateway が CloudFormation ではなく AgentCore API で管理されているためだ。
+
+## Gateway 経由のツール呼び出しを検証する
+
+デプロイ済みエージェントに、Gateway 経由で Exa AI の Web 検索ツールを使わせる。
+
+```bash title="Terminal"
+agentcore invoke \
+  "Search the web for 'AgentCore CLI latest version' and tell me what you find." \
+  --stream \
+  --agent GwAgent
+```
+
+```text title="Output"
+Based on my web search, I found information about two different "AgentCore CLI" tools:
+
+## 1. AWS AgentCore CLI (Primary Result)
+
+**Latest Version:** v0.3.0-preview.5.1 (Released March 12, 2026)
+- **Status:** Preview/Prerelease
+- **Repository:** https://github.com/aws/agentcore-cli
+- **Language:** TypeScript (97.3%)
+- **License:** Apache License 2.0
+
+This is the official CLI for Amazon Bedrock AgentCore, which helps developers
+create, develop locally, and deploy AI agents to AWS.
+```
+
+エージェントが Gateway 経由で Exa AI の MCP サーバーに接続し、Web 検索を実行して結果を返した。エージェントのコードには Web 検索の実装は一切なく、Gateway がバックエンドの MCP サーバーへのルーティングと認証を透過的に処理している。
+
+## ローカル開発での Gateway 利用
+
+[CLI ドキュメント](https://github.com/aws/agentcore-cli/blob/main/docs/local-development.md#gateway-environment-variables)によると、`agentcore dev` はデプロイ済み Gateway の環境変数を自動注入する。つまり、一度 `agentcore deploy` で Gateway を作成すれば、ローカル開発でもデプロイ済みの Gateway を経由してツールを呼び出せる。
+
+```text title="自動注入される環境変数"
+AGENTCORE_GATEWAY_MY_GATEWAY_URL=https://{gateway-id}.gateway.agentcore.{region}.amazonaws.com
+AGENTCORE_GATEWAY_MY_GATEWAY_AUTH_TYPE=NONE
+```
+
+Gateway 環境変数は `deployed-state.json` から読み取られるため、未デプロイの状態では注入されない。
+
+## 認証について
+
+本記事では `authorizerType: "NONE"`（認証なし）で検証した。本番環境では、インバウンド認証（エージェント → Gateway）に `AWS_IAM` または `CUSTOM_JWT` を、アウトバウンド認証（Gateway → ターゲット）に `oauth` や `api-key` を設定する必要がある。認証の詳細は[CLI ドキュメント](https://github.com/aws/agentcore-cli/blob/main/docs/gateway.md#authentication)を参照。
+
+## まとめ
+
+AgentCore CLI の Gateway 機能を使って、外部 MCP サーバーをエージェントに接続する一連の流れを検証した。
+
+- **構成の順序が重要** — Gateway → ターゲット → エージェントの順で設定すると、Gateway クライアントコードが自動生成される。逆順だと手動統合が必要になる。`--no-agent` でプロジェクトを作成し、Gateway 設定後にエージェントを追加するのが推奨パターンだ。
+- **デプロイ時にターゲットの接続確認が行われる** — Gateway ターゲットの MCP サーバーが到達不能だとデプロイが失敗する。外部 MCP サーバーの可用性がデプロイの成否に直結するため、信頼性の高いエンドポイントを選ぶ必要がある。
+- **Gateway は CloudFormation とは別フェーズでデプロイされる** — Gateway は AgentCore API で直接管理され、Runtime は CloudFormation でデプロイされる。`agentcore status` で Gateway の `deploymentState` が `local-only` と表示されるのはこのためだ。
+- **ローカル dev でもデプロイ済み Gateway を利用できる** — 一度デプロイすれば、`agentcore dev` が Gateway の環境変数を自動注入し、ローカルのエージェントからデプロイ済み Gateway 経由でツールを呼び出せる。
+
+次回は Evaluations 機能を使って、エージェントの品質を LLM-as-a-Judge で計測する方法を検証する。
+
+## クリーンアップ
+
+```bash title="Terminal"
+# プロジェクト内のリソース定義をすべて削除
+agentcore remove all --force
+
+# AWS リソースを削除
+agentcore deploy -y
+
+# CLI のアンインストール（不要な場合）
+npm uninstall -g @aws/agentcore
+```

@@ -1,0 +1,400 @@
+---
+title: "AgentCore CLI 実践 — Memory で会話の記憶を永続化する"
+description: "AgentCore CLI の Memory 機能を検証。SEMANTIC・USER_PREFERENCE・SUMMARIZATION の3戦略で会話の記憶をセッション横断で永続化する手順と、抽出の非同期性やセッション ID の制約など実運用で知っておくべきポイントを共有する。"
+date: "2026-03-23"
+published: true
+featured: false
+series: "agentcore-cli"
+seriesOrder: 2
+categories: [ai-agents]
+tags: ["bedrock", "agentcore", "agentcore-cli", "agentcore-memory", "strands-agents", "ai-agents"]
+---
+
+## はじめに
+
+[前回の記事](/ja/blog/2026/03/23/agentcore-cli-create-dev-deploy)では、AgentCore CLI の基本ライフサイクル（`create → dev → deploy → invoke`）を検証した。デフォルト構成ではエージェントに記憶がなく、セッションが変わると会話の文脈が失われる。
+
+AgentCore Memory は、会話から得られた情報を自動的に抽出・永続化し、セッションを跨いでエージェントが「覚えている」状態を実現するサービスだ。短期メモリ（セッション内の会話履歴）と長期メモリ（セッション横断の知識抽出）の2層構造で、長期メモリには SEMANTIC（事実情報）、USER_PREFERENCE（ユーザー設定）、SUMMARIZATION（会話要約）の3つの[ビルトイン戦略](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/built-in-strategies.html)が用意されている。
+
+本記事では、AgentCore CLI を使って Memory 付きエージェントを作成・デプロイし、セッションを跨いだ記憶の永続化を実際に検証した結果を共有する。Memory の[CLI ドキュメント](https://github.com/aws/agentcore-cli/blob/main/docs/memory.md)と[設定リファレンス](https://github.com/aws/agentcore-cli/blob/main/docs/configuration.md)も参照。
+
+**AgentCore CLI は Public Preview（v0.3.0-preview）段階であり、コマンド体系や生成テンプレートは GA までに変更される可能性がある。本記事の内容は 2026年3月時点の動作に基づいている。**
+
+## 前提条件
+
+- [第1回](/ja/blog/2026/03/23/agentcore-cli-create-dev-deploy)の環境が構築済み（Node.js 20+、uv、AWS CLI、AgentCore CLI v0.3.0-preview）
+- AgentCore が利用可能なリージョンの AWS アカウント
+
+## Memory の3つのオプション
+
+`agentcore create` の `--memory` オプションには3つの選択肢がある。
+
+| オプション | 短期メモリ | 長期メモリ戦略 |
+|-----------|-----------|--------------|
+| `none` | なし | なし |
+| `shortTerm` | あり | なし |
+| `longAndShortTerm` | あり | SEMANTIC + USER_PREFERENCE + SUMMARIZATION |
+
+`shortTerm` はセッション内の会話履歴のみを保持する。セッションが変わると文脈は失われる。`longAndShortTerm` は短期メモリに加えて、会話から事実・設定・要約を自動抽出し、セッションを跨いで永続化する。
+
+本記事では `longAndShortTerm` を使って、3つの長期メモリ戦略すべてを検証する。
+
+## プロジェクト作成
+
+`--memory longAndShortTerm` を指定してプロジェクトを作成する。
+
+```bash title="Terminal"
+agentcore create \
+  --name AgentCoreMemTest \
+  --framework Strands \
+  --model-provider Bedrock \
+  --memory longAndShortTerm \
+  --skip-git
+cd AgentCoreMemTest
+```
+
+### 生成される agentcore.json
+
+`memories` 配列に3つの戦略が自動設定される。各戦略には `namespaces` が定義されており、`{actorId}` と `{sessionId}` がランタイムで実際の値に置換される。
+
+```json title="agentcore/agentcore.json（memories 部分）"
+{
+  "memories": [
+    {
+      "type": "AgentCoreMemory",
+      "name": "AgentCoreMemTestMemory",
+      "eventExpiryDuration": 30,
+      "strategies": [
+        {
+          "type": "SEMANTIC",
+          "namespaces": ["/users/{actorId}/facts"]
+        },
+        {
+          "type": "USER_PREFERENCE",
+          "namespaces": ["/users/{actorId}/preferences"]
+        },
+        {
+          "type": "SUMMARIZATION",
+          "namespaces": ["/summaries/{actorId}/{sessionId}"]
+        }
+      ]
+    }
+  ]
+}
+```
+
+`eventExpiryDuration: 30` はイベント（会話データ）の保持期間で、7〜365日の範囲で設定できる。
+
+### 3つの戦略の役割
+
+| 戦略 | 抽出対象 | namespace | 用途 |
+|------|---------|-----------|------|
+| SEMANTIC | 事実情報（名前、職業、プロジェクト名など） | `/users/{actorId}/facts` | ユーザーに関する知識ベース構築 |
+| USER_PREFERENCE | 設定・好み（エディタ、テーマ、言語など） | `/users/{actorId}/preferences` | パーソナライズされた応答 |
+| SUMMARIZATION | 会話の要約 | `/summaries/{actorId}/{sessionId}` | 長い会話の文脈圧縮 |
+
+SEMANTIC と USER_PREFERENCE は `actorId`（ユーザー ID）単位で蓄積され、セッションを跨いで参照される。SUMMARIZATION は `sessionId` 単位で、同一セッション内の会話を要約する。
+
+## 生成されるエージェントコード
+
+`--memory` を指定すると、`memory/session.py` が自動生成され、`main.py` に統合される。Memory なしの場合との主な違いは以下の3点。
+
+1. `memory/session.py` — Memory セッションマネージャーの初期化
+2. `main.py` — `session_id` と `user_id` を `context` から取得し、エージェントごとにキャッシュ
+3. `main.py` — `Agent()` に `session_manager` を渡す
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">memory/session.py（自動生成されるメモリセッションマネージャー）</summary>
+
+```python title="app/AgentCoreMemTest/memory/session.py"
+import os
+from typing import Optional
+
+from bedrock_agentcore.memory.integrations.strands.config import AgentCoreMemoryConfig, RetrievalConfig
+from bedrock_agentcore.memory.integrations.strands.session_manager import AgentCoreMemorySessionManager
+
+MEMORY_ID = os.getenv("MEMORY_AGENTCOREMEMTESTMEMORY_ID")
+REGION = os.getenv("AWS_REGION")
+
+def get_memory_session_manager(session_id: str, actor_id: str) -> Optional[AgentCoreMemorySessionManager]:
+    if not MEMORY_ID:
+        return None
+
+    retrieval_config = {
+        f"/users/{actor_id}/facts": RetrievalConfig(top_k=3, relevance_score=0.5),
+        f"/users/{actor_id}/preferences": RetrievalConfig(top_k=3, relevance_score=0.5),
+        f"/summaries/{actor_id}/{session_id}": RetrievalConfig(top_k=3, relevance_score=0.5),
+    }
+
+    return AgentCoreMemorySessionManager(
+        AgentCoreMemoryConfig(
+            memory_id=MEMORY_ID,
+            session_id=session_id,
+            actor_id=actor_id,
+            retrieval_config=retrieval_config,
+        ),
+        REGION
+    )
+```
+
+</details>
+
+ポイントは `RetrievalConfig` だ。各 namespace に対して `top_k=3`（最大3件取得）と `relevance_score=0.5`（関連度スコアの閾値）が設定されている。これにより、invoke 時にエージェントは各 namespace から最も関連性の高い記憶を最大3件ずつ取得する。
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">main.py（Memory 統合済みのエージェントコード）</summary>
+
+```python title="app/AgentCoreMemTest/main.py"
+from strands import Agent, tool
+from bedrock_agentcore.runtime import BedrockAgentCoreApp
+from model.load import load_model
+from mcp_client.client import get_streamable_http_mcp_client
+from memory.session import get_memory_session_manager
+
+app = BedrockAgentCoreApp()
+log = app.logger
+
+# Define a Streamable HTTP MCP Client
+mcp_clients = [get_streamable_http_mcp_client()]
+
+# Define a collection of tools used by the model
+tools = []
+
+# Define a simple function tool
+@tool
+def add_numbers(a: int, b: int) -> int:
+    """Return the sum of two numbers"""
+    return a+b
+tools.append(add_numbers)
+
+# Add MCP client to tools if available
+for mcp_client in mcp_clients:
+    if mcp_client:
+        tools.append(mcp_client)
+
+
+def agent_factory():
+    cache = {}
+    def get_or_create_agent(session_id, user_id):
+        key = f"{session_id}/{user_id}"
+        if key not in cache:
+            # Create an agent for the given session_id and user_id
+            cache[key] = Agent(
+                model=load_model(),
+                session_manager=get_memory_session_manager(session_id, user_id),
+                system_prompt="""
+                    You are a helpful assistant. Use tools when appropriate.
+                """,
+                tools=tools
+            )
+        return cache[key]
+    return get_or_create_agent
+get_or_create_agent = agent_factory()
+
+
+@app.entrypoint
+async def invoke(payload, context):
+    log.info("Invoking Agent.....")
+
+    session_id = getattr(context, 'session_id', 'default-session')
+    user_id = getattr(context, 'user_id', 'default-user')
+    agent = get_or_create_agent(session_id, user_id)
+
+    # Execute and format response
+    stream = agent.stream_async(payload.get("prompt"))
+
+    async for event in stream:
+        # Handle Text parts of the response
+        if "data" in event and isinstance(event["data"], str):
+            yield event["data"]
+
+
+if __name__ == "__main__":
+    app.run()
+```
+
+</details>
+
+Memory なしの `main.py`（[第1回](/ja/blog/2026/03/23/agentcore-cli-create-dev-deploy)参照）と比較すると、`agent_factory()` パターンでセッション ID とユーザー ID ごとにエージェントインスタンスをキャッシュしている点が異なる。これにより、同一セッション内では同じエージェント（同じ会話履歴）が再利用される。
+
+## AWS へのデプロイ
+
+[第1回](/ja/blog/2026/03/23/agentcore-cli-create-dev-deploy)でも触れたが、Memory はローカル開発（`agentcore dev`）では利用できない。`MEMORY_<NAME>_ID` 環境変数がセットされないため、`get_memory_session_manager()` は `None` を返し、エージェントは Memory なしで動作する。Memory の動作を検証するにはデプロイが必要だ。
+
+### デプロイターゲットの設定
+
+```bash title="Terminal"
+ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+
+cat > agentcore/aws-targets.json << EOF
+[
+  {
+    "name": "default",
+    "description": "Tokyo (ap-northeast-1)",
+    "account": "${ACCOUNT_ID}",
+    "region": "ap-northeast-1"
+  }
+]
+EOF
+```
+
+### デプロイの実行
+
+```bash title="Terminal"
+agentcore deploy -y -v
+```
+
+Memory なしの場合と比較して、以下のリソースが追加で作成される。
+
+| リソース | 説明 |
+|---------|------|
+| `AWS::IAM::Role` (Memory 用) | Memory リソースの実行ロール |
+| `AWS::BedrockAgentCore::Memory` | AgentCore Memory リソース本体 |
+| `AWS::IAM::Policy` (Runtime 用に追加) | Runtime から Memory への読み書き権限 |
+
+CloudFormation のリソース数は Memory なしの5個から7個に増える。デプロイ時間は約4分だった（Memory リソースの作成に約3分かかる）。
+
+### デプロイ状態の確認
+
+```bash title="Terminal"
+agentcore status --json
+```
+
+```json title="Output"
+{
+  "success": true,
+  "projectName": "AgentCoreMemTest",
+  "targetName": "default",
+  "targetRegion": "ap-northeast-1",
+  "resources": [
+    {
+      "resourceType": "agent",
+      "name": "AgentCoreMemTest",
+      "deploymentState": "deployed",
+      "detail": "READY"
+    },
+    {
+      "resourceType": "memory",
+      "name": "AgentCoreMemTestMemory",
+      "deploymentState": "deployed",
+      "detail": "SEMANTIC, USER_PREFERENCE, SUMMARIZATION"
+    }
+  ]
+}
+```
+
+`agent` が `READY`、`memory` に3つの戦略が表示されていればデプロイ完了だ。
+
+## セッション横断の記憶を検証する
+
+Memory の動作を確認するため、以下のシナリオで検証する。
+
+1. セッション1で個人情報を伝える
+2. 2分待つ（長期メモリの抽出を待つ）
+3. 別のセッションで記憶を確認する
+
+### セッション1: 個人情報を伝える
+
+```bash title="Terminal"
+agentcore invoke \
+  "Hi! My name is Taro and I'm a software engineer working on Kubernetes. I prefer dark mode and use Vim as my editor." \
+  --stream \
+  --session-id session-memory-test-001-first-conv \
+  --user-id user-taro
+```
+
+```text title="Output"
+Hi Taro! Nice to meet you! It's great to connect with a software engineer
+working on Kubernetes. That's a powerful and complex system to be working with.
+
+I've noted your preferences:
+- **Dark mode** - always easier on the eyes!
+- **Vim** - a classic choice among developers who value efficiency and
+  keyboard-driven workflows
+
+Are you working on Kubernetes core, building applications that run on
+Kubernetes, or developing tooling around the Kubernetes ecosystem?
+```
+
+なお、`--session-id` には33文字以上の文字列が必要だ。短い文字列を指定すると `Value at 'runtimeSessionId' failed to satisfy constraint: Member must have length greater than or equal to 33` というバリデーションエラーになる。
+
+### 長期メモリの抽出を待つ
+
+AgentCore Memory の長期メモリ抽出は非同期で行われる。会話データ（イベント）が保存された後、バックグラウンドで SEMANTIC・USER_PREFERENCE・SUMMARIZATION の各戦略が情報を抽出する。この処理には1〜2分程度かかる。
+
+```bash title="Terminal"
+# 抽出処理の完了を待つ
+sleep 120
+```
+
+### 別のセッションで記憶を確認する
+
+新しいセッション ID で invoke し、セッション1の情報を覚えているか確認する。
+
+```bash title="Terminal"
+agentcore invoke \
+  "What do you know about me? What's my name, what do I work on, and what are my preferences?" \
+  --stream \
+  --session-id session-memory-test-002-second-conv \
+  --user-id user-taro
+```
+
+```text title="Output"
+Based on what I know about you:
+
+## Work
+- **Role**: You're a software engineer
+- **Focus**: You work on Kubernetes
+
+## Preferences & Setup
+- **Editor**: You use Vim as your text editor
+- **UI Preference**: You prefer dark mode
+```
+
+セッション1で伝えた情報が、別のセッションから正しく取得できた。
+
+- SEMANTIC 戦略 → 「ソフトウェアエンジニア」「Kubernetes」という事実を抽出
+- USER_PREFERENCE 戦略 → 「Vim」「ダークモード」という設定を抽出
+
+`--user-id user-taro` を指定しているため、namespace `/users/user-taro/facts` と `/users/user-taro/preferences` に保存された記憶が取得されている。異なる `--user-id` を指定すれば、ユーザーごとに独立した記憶空間になる。
+
+なお、SUMMARIZATION 戦略は同一セッション内の会話を要約するもので、セッション横断の記憶とは性質が異なる。長い会話の途中で文脈を圧縮する用途で、今回のような短い検証では効果が見えにくい。複数ターンの長い会話で真価を発揮する戦略だ。
+
+## 既存プロジェクトに Memory を後から追加する
+
+第1回で作成したような Memory なしのプロジェクトに、後から Memory を追加することもできる。
+
+```bash title="Terminal"
+agentcore add memory \
+  --name SharedMemory \
+  --strategies SEMANTIC,SUMMARIZATION \
+  --expiry 30
+```
+
+ただし、`agentcore add memory` は `agentcore.json` に Memory リソースを追加するだけで、エージェントコードの修正は行わない。`memory/session.py` の作成と `main.py` への統合は手動で行う必要がある。[CLI ドキュメント](https://github.com/aws/agentcore-cli/blob/main/docs/memory.md)に手順が記載されている。
+
+新規プロジェクトの場合は `agentcore create --memory longAndShortTerm` で最初から Memory 付きで作成する方が簡単だ。
+
+## まとめ
+
+AgentCore CLI の Memory 機能を使って、セッション横断の記憶永続化を検証した。
+
+- **`--memory longAndShortTerm` で3戦略が自動構成される** — SEMANTIC（事実）、USER_PREFERENCE（設定）、SUMMARIZATION（要約）の3つの長期メモリ戦略が `agentcore.json` に自動設定され、`memory/session.py` と `main.py` への統合コードも生成される。手動でのコード記述は不要だ。
+- **長期メモリの抽出は非同期** — 会話データの保存後、バックグラウンドで抽出処理が走る。即座には反映されず、1〜2分のラグがある。リアルタイム性が求められるユースケースでは、短期メモリ（セッション内の会話履歴）と組み合わせて使う設計が必要だ。
+- **Memory はデプロイ必須** — ローカル開発（`agentcore dev`）では Memory は利用できない。Memory の動作検証にはデプロイが必要で、開発サイクルが長くなる点は注意が必要だ。
+- **セッション ID に33文字以上の制約がある** — `--session-id` に短い文字列を指定するとバリデーションエラーになる。UUID 形式や十分な長さの識別子を使う必要がある。
+
+次回は Gateway 機能を使って、外部 MCP サーバーをエージェントに接続する方法を検証する。
+
+## クリーンアップ
+
+```bash title="Terminal"
+# プロジェクト内のリソース定義をすべて削除
+agentcore remove all --force
+
+# AWS リソースを削除
+agentcore deploy -y
+
+# CLI のアンインストール（不要な場合）
+npm uninstall -g @aws/agentcore
+```

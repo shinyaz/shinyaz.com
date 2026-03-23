@@ -1,7 +1,7 @@
 ---
 title: "Strands Agents SDK Guide — Connecting External Tools with MCP"
 description: "Connect MCP (Model Context Protocol) servers to Strands Agents SDK and extend your agent with external tools. Walk through the AWS documentation search MCP server hands-on, and combine MCP tools with custom @tool functions."
-date: 2026-03-24
+date: 2026-03-03
 published: true
 featured: false
 categories: [ai-agents]
@@ -12,7 +12,7 @@ seriesOrder: 3
 
 ## Introduction
 
-In the [previous article](/en/blog/2026/03/24/strands-agents-custom-tools), we learned custom tool design patterns. While the `@tool` decorator makes it easy to create tools, implementing everything yourself isn't practical.
+In the [previous article](/en/blog/2026/03/03/strands-agents-custom-tools), we learned custom tool design patterns. While the `@tool` decorator makes it easy to create tools, implementing everything yourself isn't practical.
 
 This is where [MCP (Model Context Protocol)](https://modelcontextprotocol.io) comes in. MCP is an open protocol for connecting external tool servers to agents. Strands Agents SDK has native MCP support, letting you add external MCP server tools to your agent with just a few lines of code.
 
@@ -39,7 +39,7 @@ Various communities and vendors publish MCP servers for AWS documentation search
 
 ## Setup
 
-Use the same environment from the [previous article](/en/blog/2026/03/24/strands-agents-custom-tools). You'll additionally need [uv](https://github.com/astral-sh/uv) (the `uvx` command runs MCP servers).
+Use the same environment from the [previous article](/en/blog/2026/03/03/strands-agents-custom-tools). You'll additionally need [uv](https://github.com/astral-sh/uv) (the `uvx` command runs MCP servers).
 
 ```bash title="Terminal"
 # If uv is not installed

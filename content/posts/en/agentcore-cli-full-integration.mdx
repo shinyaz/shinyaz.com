@@ -1,0 +1,346 @@
+---
+title: "AgentCore CLI in Practice — Build a Tech Trend Advisor with Key Features Combined"
+description: "Combine Runtime, Memory, Gateway, and Evaluations into a single AgentCore CLI project to build a personalized tech trend advisor that remembers user expertise, searches the web for latest trends, and auto-measures response quality."
+date: "2026-03-23"
+published: true
+featured: false
+series: "agentcore-cli"
+seriesOrder: 5
+seriesExtra: true
+categories: [ai-agents]
+tags: ["bedrock", "agentcore", "agentcore-cli", "agentcore-memory", "agentcore-gateway", "agentcore-evaluations", "strands-agents", "ai-agents"]
+---
+
+## Introduction
+
+This series has covered the four main AgentCore CLI features individually:
+
+- [Part 1](/en/blog/2026/03/23/agentcore-cli-create-dev-deploy) — Runtime (basic lifecycle)
+- [Part 2](/en/blog/2026/03/23/agentcore-cli-memory-persistence) — Memory (conversation persistence)
+- [Part 3](/en/blog/2026/03/23/agentcore-cli-gateway-mcp-server) — Gateway (external MCP server)
+- [Part 4](/en/blog/2026/03/23/agentcore-cli-evaluations-quality) — Evaluations (quality measurement)
+
+In this bonus finale, we combine these four key features into a single project: a "tech trend advisor" that remembers the user's expertise (Memory), searches the web for latest trends (Gateway), and auto-measures response quality (Evaluations).
+
+**AgentCore CLI is in Public Preview (v0.3.0-preview). Commands, options, and generated templates may change before GA. This article reflects behavior as of March 2026.**
+
+## Prerequisites
+
+- Environment from [Part 1](/en/blog/2026/03/23/agentcore-cli-create-dev-deploy) (Node.js 20+, uv, AWS CLI, AgentCore CLI v0.3.0-preview)
+- **us-east-1 region** — Evaluator CloudFormation resource is not supported in ap-northeast-1 (see [Part 4](/en/blog/2026/03/23/agentcore-cli-evaluations-quality))
+
+If `AWS_REGION` is set in your environment, it may override the region in `aws-targets.json`. If it's set to something other than us-east-1, run `export AWS_REGION=us-east-1` or `unset AWS_REGION` before proceeding.
+
+## What We're Building
+
+| Feature | Role |
+|---------|------|
+| Runtime | Custom system_prompt for tech trend advisor persona |
+| Memory | Remember user's expertise, tech stack, and interests |
+| Gateway | Search latest tech trends via Exa AI web search |
+| Evaluations | Auto-measure accuracy, helpfulness, and personalization |
+
+## Project Setup
+
+As learned in [Part 3](/en/blog/2026/03/23/agentcore-cli-gateway-mcp-server), Gateway requires `--no-agent` first, then adding the Gateway before the agent.
+
+### Steps 1–3: Project Creation and Gateway Setup
+
+```bash title="Terminal"
+agentcore create --name AgentCoreFull --no-agent --skip-git
+cd AgentCoreFull
+
+# Add Gateway
+agentcore add gateway --name my-gateway
+
+# Add Exa AI MCP server as target
+agentcore add gateway-target \
+  --type mcp-server \
+  --name exa-search \
+  --endpoint https://mcp.exa.ai/mcp \
+  --gateway my-gateway
+```
+
+### Step 4: Add Agent (Memory + Gateway Integration)
+
+With `--memory longAndShortTerm`, both the Gateway client and Memory session manager are auto-generated.
+
+```bash title="Terminal"
+agentcore add agent \
+  --name TechAdvisor \
+  --framework Strands \
+  --model-provider Bedrock \
+  --language Python \
+  --memory longAndShortTerm
+```
+
+### Step 5: Add Evaluator
+
+```bash title="Terminal"
+agentcore add evaluator \
+  --name ResponseQuality \
+  --level SESSION \
+  --model us.anthropic.claude-sonnet-4-5-20250929-v1:0 \
+  --instructions "Evaluate the overall quality of the agent's response. Consider accuracy, helpfulness, personalization based on user context, and clarity. Context: {context}" \
+  --rating-scale 1-5-quality
+```
+
+### Customize the System Prompt
+
+Edit the auto-generated `main.py` to set the tech trend advisor persona.
+
+```python title="app/TechAdvisor/main.py (system_prompt section)"
+system_prompt="""
+    You are a personalized tech trend advisor. You remember the user's
+    technical background, skills, and interests from previous conversations.
+    When asked about trends or recommendations, search the web for the
+    latest information and tailor your advice based on what you know about
+    the user. Always be specific and actionable.
+""",
+```
+
+The full `main.py` combines the Memory integration from [Part 2](/en/blog/2026/03/23/agentcore-cli-memory-persistence) and the Gateway client from [Part 3](/en/blog/2026/03/23/agentcore-cli-gateway-mcp-server). It uses `get_all_gateway_mcp_clients()` for Gateway tools and `get_memory_session_manager()` for session management.
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">main.py (full Memory + Gateway integration)</summary>
+
+```python title="app/TechAdvisor/main.py"
+from strands import Agent, tool
+from bedrock_agentcore.runtime import BedrockAgentCoreApp
+from model.load import load_model
+from mcp_client.client import get_all_gateway_mcp_clients
+from memory.session import get_memory_session_manager
+
+app = BedrockAgentCoreApp()
+log = app.logger
+
+mcp_clients = get_all_gateway_mcp_clients()
+
+tools = []
+
+@tool
+def add_numbers(a: int, b: int) -> int:
+    """Return the sum of two numbers"""
+    return a+b
+tools.append(add_numbers)
+
+for mcp_client in mcp_clients:
+    if mcp_client:
+        tools.append(mcp_client)
+
+
+def agent_factory():
+    cache = {}
+    def get_or_create_agent(session_id, user_id):
+        key = f"{session_id}/{user_id}"
+        if key not in cache:
+            cache[key] = Agent(
+                model=load_model(),
+                session_manager=get_memory_session_manager(session_id, user_id),
+                system_prompt="""
+                    You are a personalized tech trend advisor. You remember
+                    the user's technical background, skills, and interests
+                    from previous conversations. When asked about trends or
+                    recommendations, search the web for the latest information
+                    and tailor your advice based on what you know about the
+                    user. Always be specific and actionable.
+                """,
+                tools=tools
+            )
+        return cache[key]
+    return get_or_create_agent
+get_or_create_agent = agent_factory()
+
+
+@app.entrypoint
+async def invoke(payload, context):
+    log.info("Invoking Agent.....")
+
+    session_id = getattr(context, 'session_id', 'default-session')
+    user_id = getattr(context, 'user_id', 'default-user')
+    agent = get_or_create_agent(session_id, user_id)
+
+    stream = agent.stream_async(payload.get("prompt"))
+
+    async for event in stream:
+        if "data" in event and isinstance(event["data"], str):
+            yield event["data"]
+
+
+if __name__ == "__main__":
+    app.run()
+```
+
+</details>
+
+### Deploy
+
+```bash title="Terminal"
+ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+cat > agentcore/aws-targets.json << EOF
+[{"name":"default","account":"${ACCOUNT_ID}","region":"us-east-1"}]
+EOF
+
+agentcore deploy -y
+```
+
+### Verify Deployment
+
+```bash title="Terminal"
+agentcore status --json
+```
+
+```json title="Output"
+{
+  "success": true,
+  "projectName": "AgentCoreFull",
+  "targetName": "default",
+  "targetRegion": "us-east-1",
+  "resources": [
+    {
+      "resourceType": "agent",
+      "name": "TechAdvisor",
+      "deploymentState": "deployed",
+      "detail": "READY"
+    },
+    {
+      "resourceType": "memory",
+      "name": "TechAdvisorMemory",
+      "deploymentState": "deployed",
+      "detail": "SEMANTIC, USER_PREFERENCE, SUMMARIZATION"
+    },
+    {
+      "resourceType": "gateway",
+      "name": "my-gateway",
+      "deploymentState": "local-only",
+      "detail": "1 target"
+    },
+    {
+      "resourceType": "evaluator",
+      "name": "ResponseQuality",
+      "deploymentState": "deployed",
+      "detail": "SESSION — LLM-as-a-Judge — ACTIVE"
+    }
+  ]
+}
+```
+
+All four resources deployed successfully.
+
+## Verification: Memory + Gateway Integration
+
+### Session 1: Self-Introduction
+
+```bash title="Terminal"
+agentcore invoke \
+  "Hi! I'm a platform engineer specializing in Kubernetes and Go. I work on building internal developer platforms. I'm particularly interested in GitOps, service mesh, and observability." \
+  --stream \
+  --session-id session-full-test-001-self-introduction \
+  --user-id user-engineer \
+  --agent TechAdvisor
+```
+
+```text title="Output"
+Hello! It's great to meet you! I'll remember that you're a platform engineer
+with expertise in:
+
+- **Core Skills**: Kubernetes and Go
+- **Focus Area**: Building internal developer platforms
+- **Key Interests**: GitOps, service mesh, and observability
+```
+
+### Session 2: Personalized Trend Search
+
+Wait for Memory's long-term extraction (1–2 minutes, as confirmed in [Part 2](/en/blog/2026/03/23/agentcore-cli-memory-persistence)).
+
+```bash title="Terminal"
+sleep 120
+```
+
+Ask for trends in a new session.
+
+```bash title="Terminal"
+agentcore invoke \
+  "What are the latest tech trends that would be relevant to my work? Search the web for recent developments." \
+  --stream \
+  --session-id session-full-test-002-trend-search-conv \
+  --user-id user-engineer \
+  --agent TechAdvisor
+```
+
+```text title="Output (excerpt)"
+I'll search for the latest developments in areas most relevant to your
+platform engineering work, focusing on GitOps, service mesh, observability,
+Kubernetes, and internal developer platforms.
+```
+
+The agent retrieved the user's expertise from Memory and searched the web via Gateway. Here's an excerpt of the personalized response.
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">Full response (excerpt)</summary>
+
+```text title="Output (continued)"
+## 🕸️ Service Mesh: eBPF Revolution & Sidecarless Architecture
+
+**Cilium has won the service mesh performance battle** - adopted as default
+CNI by GKE, EKS, and AKS. 40-60% lower latency, 50-70% less memory vs
+traditional sidecars.
+
+## 📊 Observability: OpenTelemetry Dominance & AI-Powered Insights
+
+**71% of orgs use both Prometheus + OTel** (up 50% YoY). New: OTel profiling
+(continuous profiling now in OTel spec).
+
+## 🎯 Top Actionable Recommendations for You:
+
+1. **Pilot Cilium** on a dev cluster - gain eBPF expertise (rare skill)
+2. **Build your first golden path** in Backstage with auto-OTel instrumentation
+3. **Evaluate Istio Ambient** for service mesh without sidecar overhead
+```
+
+</details>
+
+The agent remembered the user's expertise from Session 1 (Kubernetes, Go, GitOps, service mesh, observability), searched the web via Gateway, and returned personalized trend information. Memory and Gateway working together.
+
+## Verification: Quality Measurement with Evaluations
+
+After waiting ~10 minutes for trace indexing:
+
+```bash title="Terminal"
+agentcore run evals \
+  --agent TechAdvisor \
+  --evaluator ResponseQuality \
+  --days 1
+```
+
+```text title="Output"
+Agent: TechAdvisor | Mar 23, 2026, 11:35 AM | Sessions: 2 | Lookback: 1d
+
+  ResponseQuality: 5.00
+
+Results saved to: agentcore/.cli/eval-results/eval_2026-03-23_11-35-41.json
+```
+
+Both sessions scored 5.00 (Excellent). The evaluation prompt includes "personalization based on user context", so Memory-driven personalization is part of the quality assessment.
+
+## Summary
+
+- **Full integration follows the standard CLI workflow** — `--no-agent` → Gateway → target → agent (`--memory longAndShortTerm`) → evaluator, then `deploy`. The CLI auto-generates all integration code. The only manual step was customizing the system_prompt.
+- **Memory + Gateway is a powerful combination** — Remembering user expertise and searching the web for real-time information creates a "knows me and stays current" assistant, built entirely with CLI commands.
+- **Evaluations can measure integrated agent quality** — Including personalization criteria in the evaluation prompt lets you assess how well the agent uses Memory context.
+- **Region constraints apply** — Evaluator CloudFormation support is limited to certain regions. Use us-east-1 or check availability when combining these features.
+
+This series demonstrated that AgentCore CLI's declarative design — centered on `agentcore.json` and `mcp.json` — enables consistent agent development from basic deployment through quality management. Understanding each feature individually makes the integration straightforward.
+
+## Cleanup
+
+```bash title="Terminal"
+# Remove all resource definitions
+agentcore remove all --force
+
+# Delete AWS resources
+agentcore deploy -y
+
+# Uninstall CLI (if no longer needed)
+npm uninstall -g @aws/agentcore
+```

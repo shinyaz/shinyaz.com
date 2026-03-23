@@ -1,0 +1,286 @@
+---
+title: "AgentCore CLI in Practice — Measure Agent Quality with Evaluations"
+description: "Hands-on verification of AgentCore CLI Evaluations with a custom LLM-as-a-Judge evaluator. Covers on-demand evaluation of agent traces, region constraints for the Evaluator CloudFormation resource, and trace indexing timing."
+date: "2026-03-23"
+published: true
+featured: false
+series: "agentcore-cli"
+seriesOrder: 4
+categories: [ai-agents]
+tags: ["bedrock", "agentcore", "agentcore-cli", "agentcore-evaluations", "strands-agents", "ai-agents"]
+---
+
+## Introduction
+
+[Part 1](/en/blog/2026/03/23/agentcore-cli-create-dev-deploy) covered the basic lifecycle, [Part 2](/en/blog/2026/03/23/agentcore-cli-memory-persistence) covered Memory, [Part 3](/en/blog/2026/03/23/agentcore-cli-gateway-mcp-server) covered Gateway. In this final installment, we measure agent response quality using Evaluations.
+
+AgentCore Evaluations uses the LLM-as-a-Judge pattern to assess agent quality. You define custom evaluators, run them on-demand against historical traces, or deploy online eval configs that automatically sample and score live traffic.
+
+This article defines a custom evaluator, runs an on-demand evaluation, and examines the quality scores. See the [CLI Evaluations docs](https://github.com/aws/agentcore-cli/blob/main/docs/evals.md) for the full spec.
+
+**AgentCore CLI is in Public Preview (v0.3.0-preview). Commands, options, and generated templates may change before GA. This article reflects behavior as of March 2026.**
+
+## Prerequisites
+
+- Environment from [Part 1](/en/blog/2026/03/23/agentcore-cli-create-dev-deploy) (Node.js 20+, uv, AWS CLI, AgentCore CLI v0.3.0-preview)
+- **us-east-1 region** — The Evaluator CloudFormation resource (`AWS::BedrockAgentCore::Evaluator`) is only supported in certain regions. As of this writing, ap-northeast-1 is not supported, so we use us-east-1
+
+If `AWS_REGION` is set in your environment, it may override the region in `aws-targets.json`. If it's set to something other than us-east-1, run `export AWS_REGION=us-east-1` or `unset AWS_REGION` before proceeding.
+
+## Evaluations Overview
+
+| Concept | Description |
+|---------|-------------|
+| Evaluator | LLM-as-a-Judge definition with evaluation prompt, model, and scoring criteria |
+| On-demand eval | One-off evaluation run against historical traces |
+| Online eval | Automatic sampling evaluation of live traffic |
+| Builtin evaluator | Pre-built evaluators provided by AgentCore (e.g., `Builtin.Faithfulness`) |
+
+### Evaluation Levels
+
+| Level | Evaluates |
+|-------|-----------|
+| `SESSION` | Overall conversation quality |
+| `TRACE` | Per-turn response accuracy |
+| `TOOL_CALL` | Tool selection correctness |
+
+This article uses a `SESSION`-level custom evaluator.
+
+## Project Setup and Deployment
+
+```bash title="Terminal"
+agentcore create --name AgentCoreEvalTest --defaults --skip-git
+cd AgentCoreEvalTest
+
+ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+cat > agentcore/aws-targets.json << EOF
+[{"name":"default","account":"${ACCOUNT_ID}","region":"us-east-1"}]
+EOF
+
+agentcore deploy -y
+```
+
+## Generating Trace Data
+
+Evaluations require agent trace data. Invoke the agent a few times to generate traces.
+
+```bash title="Terminal"
+agentcore invoke "What is 100 + 200? Use the add_numbers tool." --stream
+agentcore invoke "Explain what Kubernetes is in one sentence." --stream
+```
+
+```text title="Output"
+The sum of 100 + 200 is **300**.
+```
+
+```text title="Output"
+Kubernetes is an open-source container orchestration platform that automates
+the deployment, scaling, and management of containerized applications across
+clusters of machines.
+```
+
+Traces take about 10 minutes to be indexed. After the first deployment, Transaction Search activation also takes time, so allow extra buffer.
+
+## Adding a Custom Evaluator
+
+Define an LLM-as-a-Judge evaluator with `agentcore add evaluator`.
+
+```bash title="Terminal"
+agentcore add evaluator \
+  --name ResponseQuality \
+  --level SESSION \
+  --model us.anthropic.claude-sonnet-4-5-20250929-v1:0 \
+  --instructions "Evaluate the overall quality of the agent's response. Consider accuracy, helpfulness, and clarity. Context: {context}" \
+  --rating-scale 1-5-quality \
+  --json
+```
+
+```json title="Output"
+{"success": true, "evaluatorName": "ResponseQuality"}
+```
+
+### Configuration in agentcore.json
+
+```json title="agentcore/agentcore.json (evaluators section)"
+{
+  "evaluators": [
+    {
+      "type": "CustomEvaluator",
+      "name": "ResponseQuality",
+      "level": "SESSION",
+      "config": {
+        "llmAsAJudge": {
+          "model": "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+          "instructions": "Evaluate the overall quality of the agent's response. Consider accuracy, helpfulness, and clarity. Context: {context}",
+          "ratingScale": {
+            "numerical": [
+              {"value": 1, "label": "Poor", "definition": "Fails to meet expectations"},
+              {"value": 2, "label": "Fair", "definition": "Partially meets expectations"},
+              {"value": 3, "label": "Good", "definition": "Meets expectations"},
+              {"value": 4, "label": "Very Good", "definition": "Exceeds expectations"},
+              {"value": 5, "label": "Excellent", "definition": "Far exceeds expectations"}
+            ]
+          }
+        }
+      }
+    }
+  ]
+}
+```
+
+Key points:
+
+- `--instructions` must include the `{context}` placeholder. For SESSION level, the full conversation is expanded into `{context}`
+- `--rating-scale 1-5-quality` is a preset that auto-generates a 1–5 numerical scale. Other presets include `1-3-simple`, `pass-fail`, and `good-neutral-bad`. Custom scales are also supported
+- `--model` specifies the judge LLM, which can differ from the agent's model
+
+### Deploy the Evaluator
+
+```bash title="Terminal"
+agentcore deploy -y
+```
+
+```bash title="Terminal"
+agentcore status --json
+```
+
+```json title="Output"
+{
+  "success": true,
+  "resources": [
+    {
+      "resourceType": "agent",
+      "name": "AgentCoreEvalTest",
+      "deploymentState": "deployed",
+      "detail": "READY"
+    },
+    {
+      "resourceType": "evaluator",
+      "name": "ResponseQuality",
+      "deploymentState": "deployed",
+      "detail": "SESSION — LLM-as-a-Judge — ACTIVE"
+    }
+  ]
+}
+```
+
+## Running On-Demand Evaluation
+
+After traces are indexed (~10 minutes after invoke), run the evaluation.
+
+```bash title="Terminal"
+agentcore run evals \
+  --agent AgentCoreEvalTest \
+  --evaluator ResponseQuality \
+  --days 1
+```
+
+```text title="Output"
+Agent: AgentCoreEvalTest | Mar 23, 2026, 10:58 AM | Sessions: 2 | Lookback: 1d
+
+  ResponseQuality: 5.00
+
+Results saved to: agentcore/.cli/eval-results/eval_2026-03-23_10-58-52.json
+```
+
+Two sessions were evaluated with an average ResponseQuality score of 5.00 (Excellent).
+
+### Evaluation Result Details
+
+The saved JSON file contains per-session scores, labels, LLM explanations, and token usage.
+
+```json title="eval_2026-03-23_10-58-52.json (excerpt)"
+{
+  "results": [
+    {
+      "evaluator": "ResponseQuality",
+      "aggregateScore": 5,
+      "sessionScores": [
+        {
+          "sessionId": "3032aad5-...",
+          "value": 5,
+          "label": "Excellent",
+          "explanation": "The agent's response demonstrates excellent performance... The mathematical calculation is correct (100 + 200 = 300). The agent properly used the add_numbers tool as instructed..."
+        },
+        {
+          "sessionId": "6a79a90e-...",
+          "value": 5,
+          "label": "Excellent",
+          "explanation": "The agent's response successfully meets the user's request... The user asked for a one-sentence explanation of Kubernetes, and the agent delivered exactly that..."
+        }
+      ],
+      "tokenUsage": {
+        "inputTokens": 1058,
+        "outputTokens": 526,
+        "totalTokens": 1584
+      }
+    }
+  ]
+}
+```
+
+Each session gets a score with a detailed rationale from the judge LLM analyzing accuracy, helpfulness, and clarity. `tokenUsage` shows the LLM cost of the evaluation itself.
+
+### Viewing Evaluation History
+
+```bash title="Terminal"
+agentcore evals history --agent AgentCoreEvalTest
+```
+
+```text title="Output"
+Date                   Agent                Evaluators                     Sessions
+──────────────────────────────────────────────────────────────────────────────────────────
+Mar 23, 2026, 10:58 AM AgentCoreEvalTest    ResponseQuality=5.00           2
+```
+
+## Online Eval and Builtin Evaluators
+
+This article only verified on-demand evaluation. The CLI also supports:
+
+### Online Eval (Continuous Monitoring)
+
+Automatically sample and evaluate a percentage of live traffic.
+
+```bash title="Terminal"
+agentcore add online-eval \
+  --name QualityMonitor \
+  --agent AgentCoreEvalTest \
+  --evaluator ResponseQuality \
+  --sampling-rate 10
+agentcore deploy -y
+```
+
+`--sampling-rate 10` evaluates 10% of requests. Use `pause online-eval` / `resume online-eval` for operational control.
+
+### Builtin Evaluators
+
+Pre-built evaluators can be used alongside custom ones.
+
+```bash title="Terminal"
+agentcore run evals \
+  --agent AgentCoreEvalTest \
+  --evaluator ResponseQuality Builtin.Faithfulness \
+  --days 7
+```
+
+## Summary
+
+- **Custom evaluators are declaratively defined in `agentcore.json`** — Evaluation prompt, model, and scoring criteria are configured with `add evaluator` and deployed with `deploy`. No code needed — the evaluation pipeline is built entirely from configuration.
+- **Trace indexing takes time** — About 10 minutes after invoke for traces to appear in `run evals`. First-time deployments also need Transaction Search activation time. Plan accordingly.
+- **Evaluation results include detailed rationale** — Beyond scores, the judge LLM provides per-session analysis of accuracy, helpfulness, and clarity. Useful as feedback for quality improvement.
+- **Evaluator CloudFormation support is region-limited** — `AWS::BedrockAgentCore::Evaluator` is not supported in all regions (e.g., not in ap-northeast-1 as of this writing). Use us-east-1 or check regional availability.
+
+This series covered the four main AgentCore CLI features: Runtime, Memory, Gateway, and Evaluations. While the CLI is still in preview, its declarative design centered on `agentcore.json` and the unified `create → add → deploy → invoke` workflow enable consistent agent development through quality management. In the next bonus article, we combine all four features into a single project to build a practical agent.
+
+## Cleanup
+
+```bash title="Terminal"
+# Remove all resource definitions
+agentcore remove all --force
+
+# Delete AWS resources
+agentcore deploy -y
+
+# Uninstall CLI (if no longer needed)
+npm uninstall -g @aws/agentcore
+```

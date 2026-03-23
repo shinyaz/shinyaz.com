@@ -1,9 +1,11 @@
 ---
-title: "Deploy an AI agent to AWS in four commands with AgentCore CLI"
+title: "AgentCore CLI in Practice — Deploy an AI Agent to AWS in Four Commands"
 description: "Hands-on verification of the AgentCore CLI — from creating a Strands Agents project to local development, AWS deployment, and observability. CDK knowledge not required; initial deployment completes in about 90 seconds."
 date: "2026-03-23"
 published: true
 featured: false
+series: "agentcore-cli"
+seriesOrder: 1
 categories: [ai-agents]
 tags: ["bedrock", "agentcore", "agentcore-cli", "strands-agents", "ai-agents"]
 ---
@@ -15,6 +17,8 @@ Amazon Bedrock AgentCore lets you deploy and operate AI agents securely at scale
 Two CLI tools exist for creating and deploying AgentCore projects: the Python-based [Bedrock AgentCore Starter Toolkit](https://github.com/aws/bedrock-agentcore-starter-toolkit) and the Node.js-based [AgentCore CLI](https://github.com/aws/agentcore-cli). According to the maintainers, [the AgentCore CLI is the successor to the Starter Toolkit, which is being deprecated](https://github.com/aws/agentcore-cli/issues/317#issuecomment-3936726654). New projects are recommended to use the AgentCore CLI. Both provide an `agentcore` command, so the [AgentCore CLI README](https://github.com/aws/agentcore-cli#installation) instructs users to uninstall the Starter Toolkit first. The AgentCore CLI is still in preview (v0.3.0-preview), with GA in progress.
 
 This article tests the AgentCore CLI.
+
+**AgentCore CLI is in Public Preview (v0.3.0-preview). Commands, options, and generated templates may change before GA. This article reflects behavior as of March 2026. Using it for production workloads is not recommended until GA.**
 
 This article walks through the full `create → dev → deploy → invoke` lifecycle using the AgentCore CLI. I wanted to find out whether you can really deploy an agent without touching CDK, how the local development experience feels, and what observability looks like out of the box. See the [official docs](https://github.com/aws/agentcore-cli/tree/main/docs) for the full reference.
 
@@ -420,7 +424,9 @@ One issue: `Failed to export span batch code: 400, reason: Bad Request` errors a
 - **Structured logging out of the box** — Deployed agents automatically get OpenTelemetry-based structured logging with trace IDs, recording the full flow of model calls and tool executions. `agentcore logs` makes it easy to inspect.
 - **Declarative, config-driven design** — Everything is declared in `agentcore.json` — agents, memories, credentials, evaluators — and applied with `agentcore deploy`. Adding and removing resources follows a consistent `agentcore add` / `agentcore remove` → `agentcore deploy` pattern.
 
-This test covered a simple configuration. The CLI also supports Memory (SEMANTIC / SUMMARIZATION / USER_PREFERENCE), Gateway (MCP server integration), and Evaluations (LLM-as-a-Judge quality scoring). Evaluations in particular look promising for agent quality management and deserve a separate deep dive.
+This test covered a simple configuration. The CLI also supports Memory (SEMANTIC / SUMMARIZATION / USER_PREFERENCE), Gateway (MCP server integration), and Evaluations (LLM-as-a-Judge quality scoring). The rest of this series explores these features one by one.
+
+**As a reminder, the AgentCore CLI is still in preview.** The developer experience is solid, but CLI commands, options, and generated code templates may change. Check the [GitHub repository](https://github.com/aws/agentcore-cli) for the latest.
 
 ## Cleanup
 

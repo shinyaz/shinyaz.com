@@ -1,0 +1,389 @@
+---
+title: "AgentCore CLI in Practice — Persist Conversation Memory Across Sessions"
+description: "Hands-on verification of AgentCore CLI Memory with SEMANTIC, USER_PREFERENCE, and SUMMARIZATION strategies. Covers async extraction timing, session ID constraints, and the gap between local dev and deployed behavior."
+date: "2026-03-23"
+published: true
+featured: false
+series: "agentcore-cli"
+seriesOrder: 2
+categories: [ai-agents]
+tags: ["bedrock", "agentcore", "agentcore-cli", "agentcore-memory", "strands-agents", "ai-agents"]
+---
+
+## Introduction
+
+In the [previous article](/en/blog/2026/03/23/agentcore-cli-create-dev-deploy), we verified the basic AgentCore CLI lifecycle (`create → dev → deploy → invoke`). The default configuration creates a stateless agent — switch sessions and all context is lost.
+
+AgentCore Memory solves this by automatically extracting and persisting information from conversations across sessions. It has a two-layer architecture: short-term memory (conversation history within a session) and long-term memory (knowledge extraction across sessions). Long-term memory offers three [built-in strategies](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/built-in-strategies.html): SEMANTIC (factual information), USER_PREFERENCE (user settings), and SUMMARIZATION (conversation summaries).
+
+This article walks through creating a Memory-enabled agent with the AgentCore CLI, deploying it, and verifying that memories persist across sessions. See the [CLI Memory docs](https://github.com/aws/agentcore-cli/blob/main/docs/memory.md) and [configuration reference](https://github.com/aws/agentcore-cli/blob/main/docs/configuration.md) for the full spec.
+
+**AgentCore CLI is in Public Preview (v0.3.0-preview). Commands, options, and generated templates may change before GA. This article reflects behavior as of March 2026.**
+
+## Prerequisites
+
+- Environment from [Part 1](/en/blog/2026/03/23/agentcore-cli-create-dev-deploy) (Node.js 20+, uv, AWS CLI, AgentCore CLI v0.3.0-preview)
+- An AWS account in a supported AgentCore region
+
+## The Three Memory Options
+
+The `--memory` flag in `agentcore create` accepts three values:
+
+| Option | Short-term | Long-term Strategies |
+|--------|-----------|---------------------|
+| `none` | No | None |
+| `shortTerm` | Yes | None |
+| `longAndShortTerm` | Yes | SEMANTIC + USER_PREFERENCE + SUMMARIZATION |
+
+`shortTerm` keeps conversation history within a session only. `longAndShortTerm` adds automatic extraction of facts, preferences, and summaries that persist across sessions.
+
+This article uses `longAndShortTerm` to test all three long-term strategies.
+
+## Project Creation
+
+Create a project with `--memory longAndShortTerm`:
+
+```bash title="Terminal"
+agentcore create \
+  --name AgentCoreMemTest \
+  --framework Strands \
+  --model-provider Bedrock \
+  --memory longAndShortTerm \
+  --skip-git
+cd AgentCoreMemTest
+```
+
+### Generated agentcore.json
+
+The `memories` array is populated with three strategies. Each strategy has `namespaces` with `{actorId}` and `{sessionId}` placeholders that are resolved at runtime.
+
+```json title="agentcore/agentcore.json (memories section)"
+{
+  "memories": [
+    {
+      "type": "AgentCoreMemory",
+      "name": "AgentCoreMemTestMemory",
+      "eventExpiryDuration": 30,
+      "strategies": [
+        {
+          "type": "SEMANTIC",
+          "namespaces": ["/users/{actorId}/facts"]
+        },
+        {
+          "type": "USER_PREFERENCE",
+          "namespaces": ["/users/{actorId}/preferences"]
+        },
+        {
+          "type": "SUMMARIZATION",
+          "namespaces": ["/summaries/{actorId}/{sessionId}"]
+        }
+      ]
+    }
+  ]
+}
+```
+
+`eventExpiryDuration: 30` sets the retention period for conversation events (7–365 days).
+
+### What Each Strategy Does
+
+| Strategy | Extracts | Namespace | Purpose |
+|----------|----------|-----------|---------|
+| SEMANTIC | Facts (name, job, project names) | `/users/{actorId}/facts` | Build a knowledge base about the user |
+| USER_PREFERENCE | Settings (editor, theme, language) | `/users/{actorId}/preferences` | Personalized responses |
+| SUMMARIZATION | Conversation summaries | `/summaries/{actorId}/{sessionId}` | Compress long conversation context |
+
+SEMANTIC and USER_PREFERENCE accumulate per `actorId` (user ID) and are referenced across sessions. SUMMARIZATION is per `sessionId`, summarizing conversations within a single session.
+
+## Generated Agent Code
+
+With `--memory`, the CLI generates `memory/session.py` and integrates it into `main.py`. The key differences from a Memory-less agent:
+
+1. `memory/session.py` — Initializes the Memory session manager
+2. `main.py` — Extracts `session_id` and `user_id` from `context`, caches agents per session/user pair
+3. `main.py` — Passes `session_manager` to `Agent()`
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">memory/session.py (auto-generated memory session manager)</summary>
+
+```python title="app/AgentCoreMemTest/memory/session.py"
+import os
+from typing import Optional
+
+from bedrock_agentcore.memory.integrations.strands.config import AgentCoreMemoryConfig, RetrievalConfig
+from bedrock_agentcore.memory.integrations.strands.session_manager import AgentCoreMemorySessionManager
+
+MEMORY_ID = os.getenv("MEMORY_AGENTCOREMEMTESTMEMORY_ID")
+REGION = os.getenv("AWS_REGION")
+
+def get_memory_session_manager(session_id: str, actor_id: str) -> Optional[AgentCoreMemorySessionManager]:
+    if not MEMORY_ID:
+        return None
+
+    retrieval_config = {
+        f"/users/{actor_id}/facts": RetrievalConfig(top_k=3, relevance_score=0.5),
+        f"/users/{actor_id}/preferences": RetrievalConfig(top_k=3, relevance_score=0.5),
+        f"/summaries/{actor_id}/{session_id}": RetrievalConfig(top_k=3, relevance_score=0.5),
+    }
+
+    return AgentCoreMemorySessionManager(
+        AgentCoreMemoryConfig(
+            memory_id=MEMORY_ID,
+            session_id=session_id,
+            actor_id=actor_id,
+            retrieval_config=retrieval_config,
+        ),
+        REGION
+    )
+```
+
+</details>
+
+The key detail is `RetrievalConfig`: `top_k=3` (retrieve up to 3 records) and `relevance_score=0.5` (minimum relevance threshold) per namespace. At invoke time, the agent fetches the most relevant memories from each namespace.
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">main.py (Memory-integrated agent code)</summary>
+
+```python title="app/AgentCoreMemTest/main.py"
+from strands import Agent, tool
+from bedrock_agentcore.runtime import BedrockAgentCoreApp
+from model.load import load_model
+from mcp_client.client import get_streamable_http_mcp_client
+from memory.session import get_memory_session_manager
+
+app = BedrockAgentCoreApp()
+log = app.logger
+
+# Define a Streamable HTTP MCP Client
+mcp_clients = [get_streamable_http_mcp_client()]
+
+# Define a collection of tools used by the model
+tools = []
+
+# Define a simple function tool
+@tool
+def add_numbers(a: int, b: int) -> int:
+    """Return the sum of two numbers"""
+    return a+b
+tools.append(add_numbers)
+
+# Add MCP client to tools if available
+for mcp_client in mcp_clients:
+    if mcp_client:
+        tools.append(mcp_client)
+
+
+def agent_factory():
+    cache = {}
+    def get_or_create_agent(session_id, user_id):
+        key = f"{session_id}/{user_id}"
+        if key not in cache:
+            cache[key] = Agent(
+                model=load_model(),
+                session_manager=get_memory_session_manager(session_id, user_id),
+                system_prompt="""
+                    You are a helpful assistant. Use tools when appropriate.
+                """,
+                tools=tools
+            )
+        return cache[key]
+    return get_or_create_agent
+get_or_create_agent = agent_factory()
+
+
+@app.entrypoint
+async def invoke(payload, context):
+    log.info("Invoking Agent.....")
+
+    session_id = getattr(context, 'session_id', 'default-session')
+    user_id = getattr(context, 'user_id', 'default-user')
+    agent = get_or_create_agent(session_id, user_id)
+
+    stream = agent.stream_async(payload.get("prompt"))
+
+    async for event in stream:
+        if "data" in event and isinstance(event["data"], str):
+            yield event["data"]
+
+
+if __name__ == "__main__":
+    app.run()
+```
+
+</details>
+
+Compared to the Memory-less `main.py` from [Part 1](/en/blog/2026/03/23/agentcore-cli-create-dev-deploy), the `agent_factory()` pattern caches agent instances per session/user pair, ensuring the same conversation history is reused within a session.
+
+## Deploying to AWS
+
+As noted in [Part 1](/en/blog/2026/03/23/agentcore-cli-create-dev-deploy), Memory is not available during local development (`agentcore dev`). The `MEMORY_<NAME>_ID` environment variable is not set, so `get_memory_session_manager()` returns `None` and the agent runs without Memory. Deployment is required to test Memory behavior.
+
+### Configure Deployment Target
+
+```bash title="Terminal"
+ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+
+cat > agentcore/aws-targets.json << EOF
+[
+  {
+    "name": "default",
+    "description": "Tokyo (ap-northeast-1)",
+    "account": "${ACCOUNT_ID}",
+    "region": "ap-northeast-1"
+  }
+]
+EOF
+```
+
+### Deploy
+
+```bash title="Terminal"
+agentcore deploy -y -v
+```
+
+Compared to a Memory-less deployment, these additional resources are created:
+
+| Resource | Description |
+|----------|-------------|
+| `AWS::IAM::Role` (Memory) | Execution role for the Memory resource |
+| `AWS::BedrockAgentCore::Memory` | The AgentCore Memory resource |
+| `AWS::IAM::Policy` (Runtime addition) | Read/write permissions from Runtime to Memory |
+
+CloudFormation resource count increases from 5 to 7. Deployment took about 4 minutes (Memory resource creation takes ~3 minutes).
+
+### Verify Deployment
+
+```bash title="Terminal"
+agentcore status --json
+```
+
+```json title="Output"
+{
+  "success": true,
+  "projectName": "AgentCoreMemTest",
+  "targetName": "default",
+  "targetRegion": "ap-northeast-1",
+  "resources": [
+    {
+      "resourceType": "agent",
+      "name": "AgentCoreMemTest",
+      "deploymentState": "deployed",
+      "detail": "READY"
+    },
+    {
+      "resourceType": "memory",
+      "name": "AgentCoreMemTestMemory",
+      "deploymentState": "deployed",
+      "detail": "SEMANTIC, USER_PREFERENCE, SUMMARIZATION"
+    }
+  ]
+}
+```
+
+## Verifying Cross-Session Memory
+
+The test scenario:
+
+1. Session 1: Share personal information
+2. Wait 2 minutes (for long-term memory extraction)
+3. New session: Check if the agent remembers
+
+### Session 1: Share Personal Information
+
+```bash title="Terminal"
+agentcore invoke \
+  "Hi! My name is Taro and I'm a software engineer working on Kubernetes. I prefer dark mode and use Vim as my editor." \
+  --stream \
+  --session-id session-memory-test-001-first-conv \
+  --user-id user-taro
+```
+
+```text title="Output"
+Hi Taro! Nice to meet you! It's great to connect with a software engineer
+working on Kubernetes.
+
+I've noted your preferences:
+- **Dark mode** - always easier on the eyes!
+- **Vim** - a classic choice among developers who value efficiency and
+  keyboard-driven workflows
+```
+
+Note: `--session-id` requires a string of 33 characters or more. Shorter strings produce a validation error: `Value at 'runtimeSessionId' failed to satisfy constraint: Member must have length greater than or equal to 33`.
+
+### Wait for Long-Term Memory Extraction
+
+AgentCore Memory extraction is asynchronous. After conversation events are saved, background processes run the SEMANTIC, USER_PREFERENCE, and SUMMARIZATION strategies. This takes 1–2 minutes.
+
+```bash title="Terminal"
+sleep 120
+```
+
+### New Session: Verify Memory
+
+Invoke with a different session ID to check if the agent remembers information from Session 1.
+
+```bash title="Terminal"
+agentcore invoke \
+  "What do you know about me? What's my name, what do I work on, and what are my preferences?" \
+  --stream \
+  --session-id session-memory-test-002-second-conv \
+  --user-id user-taro
+```
+
+```text title="Output"
+Based on what I know about you:
+
+## Work
+- **Role**: You're a software engineer
+- **Focus**: You work on Kubernetes
+
+## Preferences & Setup
+- **Editor**: You use Vim as your text editor
+- **UI Preference**: You prefer dark mode
+```
+
+Information from Session 1 was correctly retrieved in a completely different session:
+
+- SEMANTIC strategy → extracted "software engineer" and "Kubernetes" as facts
+- USER_PREFERENCE strategy → extracted "Vim" and "dark mode" as preferences
+
+The `--user-id user-taro` flag scopes the memory to namespace `/users/user-taro/facts` and `/users/user-taro/preferences`. Using a different `--user-id` creates an independent memory space per user.
+
+Note that the SUMMARIZATION strategy works differently — it summarizes conversations within a single session rather than extracting cross-session knowledge. It shines in long, multi-turn conversations where context compression is needed, so its effect is not visible in this short test.
+
+## Adding Memory to an Existing Project
+
+You can add Memory to a project created without it:
+
+```bash title="Terminal"
+agentcore add memory \
+  --name SharedMemory \
+  --strategies SEMANTIC,SUMMARIZATION \
+  --expiry 30
+```
+
+However, `agentcore add memory` only updates `agentcore.json`. It does not generate `memory/session.py` or modify `main.py`. Code integration must be done manually. The [CLI docs](https://github.com/aws/agentcore-cli/blob/main/docs/memory.md) provide step-by-step instructions.
+
+For new projects, `agentcore create --memory longAndShortTerm` is the simpler path.
+
+## Summary
+
+- **`--memory longAndShortTerm` auto-configures three strategies** — SEMANTIC (facts), USER_PREFERENCE (settings), and SUMMARIZATION (summaries) are set up in `agentcore.json`, and integration code is generated in `memory/session.py` and `main.py`. No manual wiring needed.
+- **Long-term memory extraction is asynchronous** — After conversation data is saved, background extraction takes 1–2 minutes. For use cases requiring immediate context, combine short-term memory (in-session history) with long-term memory.
+- **Memory requires deployment** — `agentcore dev` does not support Memory. Testing Memory behavior requires a full deploy, which lengthens the development cycle.
+- **Session IDs must be 33+ characters** — Short session IDs cause a validation error. Use UUIDs or sufficiently long identifiers.
+
+Next up: connecting external MCP servers to agents using the Gateway feature.
+
+## Cleanup
+
+```bash title="Terminal"
+# Remove all resource definitions
+agentcore remove all --force
+
+# Delete AWS resources
+agentcore deploy -y
+
+# Uninstall CLI (if no longer needed)
+npm uninstall -g @aws/agentcore
+```

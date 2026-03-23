@@ -1,7 +1,7 @@
 ---
 title: "Strands Agents SDK 入門 — カスタムツールの設計パターン"
 description: "Strands Agents SDK のカスタムツールを深掘りする。ツールの連鎖でマルチステップ動作を実現し、エラー時の LLM の挙動やシステムプロンプトによる出力制御を実際のコードとメトリクスで確認する。"
-date: 2026-03-24
+date: 2026-03-03
 published: true
 featured: false
 categories: [ai-agents]
@@ -12,7 +12,7 @@ seriesOrder: 2
 
 ## はじめに
 
-[前回の記事](/ja/blog/2026/03/24/strands-agents-quickstart)では Strands Agents SDK の Quickstart を試し、エージェントループの基本を確認した。`@tool` デコレータで関数をツールにできることは分かったが、実用的なエージェントを作るには「ツールをどう設計するか」の理解が欠かせない。
+[前回の記事](/ja/blog/2026/03/03/strands-agents-quickstart)では Strands Agents SDK の Quickstart を試し、エージェントループの基本を確認した。`@tool` デコレータで関数をツールにできることは分かったが、実用的なエージェントを作るには「ツールをどう設計するか」の理解が欠かせない。
 
 この記事では、カスタムツールの設計パターンを 3 つの観点から掘り下げる。
 
@@ -24,7 +24,7 @@ seriesOrder: 2
 
 ## セットアップ
 
-[前回の記事](/ja/blog/2026/03/24/strands-agents-quickstart)の環境をそのまま使う。新規の場合は以下を実行する。
+[前回の記事](/ja/blog/2026/03/03/strands-agents-quickstart)の環境をそのまま使う。新規の場合は以下を実行する。
 
 ```bash title="Terminal"
 mkdir my_agent && cd my_agent

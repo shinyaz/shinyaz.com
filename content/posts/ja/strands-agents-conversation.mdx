@@ -1,7 +1,7 @@
 ---
 title: "Strands Agents SDK 入門 — 会話の記憶とコンテキスト管理"
 description: "Strands Agents SDK のマルチターン会話と SlidingWindowConversationManager を実際に動かし、エージェントが会話を記憶する仕組みとコンテキストウィンドウの管理方法をコードで確認する。"
-date: 2026-03-24
+date: 2026-03-03
 published: true
 featured: false
 categories: [ai-agents]
@@ -12,7 +12,7 @@ seriesOrder: 4
 
 ## はじめに
 
-[前回までの記事](/ja/blog/2026/03/24/strands-agents-mcp-tools)では、カスタムツールや MCP でエージェントの「できること」を拡張してきた。しかし、これまでの例はすべて 1 回きりの呼び出しだった。実用的なエージェントには「会話を続ける」能力が必要だ。
+[前回までの記事](/ja/blog/2026/03/03/strands-agents-mcp-tools)では、カスタムツールや MCP でエージェントの「できること」を拡張してきた。しかし、これまでの例はすべて 1 回きりの呼び出しだった。実用的なエージェントには「会話を続ける」能力が必要だ。
 
 この記事では以下を試す。
 
@@ -33,7 +33,7 @@ agent("私の名前は？")    → messages: [user, assistant, user, assistant] 
 
 ## セットアップ
 
-[前回の記事](/ja/blog/2026/03/24/strands-agents-mcp-tools)の環境をそのまま使う。
+[前回の記事](/ja/blog/2026/03/03/strands-agents-mcp-tools)の環境をそのまま使う。
 
 ```python title="Python (共通設定)"
 from strands import Agent
