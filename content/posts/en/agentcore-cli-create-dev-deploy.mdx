@@ -12,7 +12,9 @@ tags: ["bedrock", "agentcore", "agentcore-cli", "strands-agents", "ai-agents"]
 
 Amazon Bedrock AgentCore lets you deploy and operate AI agents securely at scale using any framework and model. It was [announced as a preview in July 2025](https://aws.amazon.com/about-aws/whats-new/2025/07/amazon-bedrock-agentcore-preview/) and became [generally available in October 2025](https://aws.amazon.com/about-aws/whats-new/2025/10/amazon-bedrock-agentcore-available/). It provides components such as Runtime, Memory, Gateway, and Identity, and is currently available in nine AWS regions.
 
-The [AgentCore CLI](https://github.com/aws/agentcore-cli) is a Node.js-based tool for managing AgentCore projects. It replaces the older Python-based [Bedrock AgentCore Starter Toolkit](https://github.com/aws/bedrock-agentcore-starter-toolkit). The CLI itself is still in preview (v0.3.0-preview).
+Two CLI tools exist for creating and deploying AgentCore projects: the Python-based [Bedrock AgentCore Starter Toolkit](https://github.com/aws/bedrock-agentcore-starter-toolkit) and the Node.js-based [AgentCore CLI](https://github.com/aws/agentcore-cli). Both provide commands like `agentcore create` / `agentcore dev` / `agentcore invoke`, and the [AgentCore CLI README](https://github.com/aws/agentcore-cli#installation) instructs users to uninstall the Starter Toolkit before installing. The Starter Toolkit supports both CDK and Terraform and covers more services (Code Interpreter, Browser, Policy, etc.), while the AgentCore CLI offers a TUI (terminal UI) and a unified `agentcore deploy` experience. The AgentCore CLI is still in preview (v0.3.0-preview).
+
+This article tests the AgentCore CLI.
 
 This article walks through the full `create → dev → deploy → invoke` lifecycle using the AgentCore CLI. I wanted to find out whether you can really deploy an agent without touching CDK, how the local development experience feels, and what observability looks like out of the box. See the [official docs](https://github.com/aws/agentcore-cli/tree/main/docs) for the full reference.
 
@@ -44,7 +46,7 @@ agentcore --version
 0.3.0-preview.6.1
 ```
 
-If you have the old Starter Toolkit installed, uninstall it first with `pip uninstall bedrock-agentcore-starter-toolkit`.
+If you have the Starter Toolkit installed, uninstall it first with `pip uninstall bedrock-agentcore-starter-toolkit` to avoid command name conflicts.
 
 ### Creating a project
 

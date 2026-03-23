@@ -12,7 +12,9 @@ tags: ["bedrock", "agentcore", "agentcore-cli", "strands-agents", "ai-agents"]
 
 Amazon Bedrock AgentCore は、任意のフレームワークとモデルを使って AI エージェントをセキュアにデプロイ・運用するためのサービスだ。2025年7月に[プレビューとして発表](https://aws.amazon.com/about-aws/whats-new/2025/07/amazon-bedrock-agentcore-preview/)され、2025年10月に[一般提供が開始](https://aws.amazon.com/about-aws/whats-new/2025/10/amazon-bedrock-agentcore-available/)された。Runtime、Memory、Gateway、Identity などのコンポーネントが提供されており、現在は9リージョンで利用可能だ。
 
-その AgentCore を操作するための CLI ツール「[AgentCore CLI](https://github.com/aws/agentcore-cli)」が公開されている。以前は [Bedrock AgentCore Starter Toolkit](https://github.com/aws/bedrock-agentcore-starter-toolkit) という Python ベースのツールがあったが、AgentCore CLI はそれを置き換える Node.js ベースの新しいツールだ。CLI 自体はまだ Preview 段階（v0.3.0-preview）である。
+AgentCore のプロジェクト作成・デプロイを支援する CLI ツールとして、Python ベースの [Bedrock AgentCore Starter Toolkit](https://github.com/aws/bedrock-agentcore-starter-toolkit) と、Node.js ベースの [AgentCore CLI](https://github.com/aws/agentcore-cli) の2つが公開されている。両者は `agentcore create` / `agentcore dev` / `agentcore invoke` など同名のコマンドを提供しており、[AgentCore CLI の README](https://github.com/aws/agentcore-cli#installation) では Starter Toolkit を先にアンインストールするよう案内されている。Starter Toolkit は CDK と Terraform の両方に対応し Code Interpreter や Browser などより多くのサービスをカバーする一方、AgentCore CLI は TUI（ターミナル UI）と `agentcore deploy` による統合デプロイ体験が特徴だ。AgentCore CLI 自体はまだ Preview 段階（v0.3.0-preview）である。
+
+本記事では AgentCore CLI を使って検証した。
 
 本記事では、AgentCore CLI を使って `create → dev → deploy → invoke` の一連のライフサイクルを実際に検証した。CDK を意識せずにエージェントをデプロイできるか、ローカル開発の体験はどうか、デプロイ後のオブザーバビリティはどうなっているか、といった点を確認した結果を共有する。公式ドキュメントは [GitHub リポジトリの docs/](https://github.com/aws/agentcore-cli/tree/main/docs) を参照。
 
@@ -44,7 +46,7 @@ agentcore --version
 0.3.0-preview.6.1
 ```
 
-旧 Starter Toolkit がインストールされている場合は、先に `pip uninstall bedrock-agentcore-starter-toolkit` でアンインストールが必要だ。
+Starter Toolkit がインストールされている場合は、コマンド名が競合するため先に `pip uninstall bedrock-agentcore-starter-toolkit` でアンインストールが必要だ。
 
 ### プロジェクト作成
 
