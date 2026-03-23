@@ -1,7 +1,7 @@
 ---
 title: "AgentCore CLI 実践 — Memory で会話の記憶を永続化する"
 description: "AgentCore CLI の Memory 機能を検証。SEMANTIC・USER_PREFERENCE・SUMMARIZATION の3戦略で会話の記憶をセッション横断で永続化する手順と、抽出の非同期性やセッション ID の制約など実運用で知っておくべきポイントを共有する。"
-date: "2026-03-23"
+date: "2026-03-24"
 published: true
 featured: false
 series: "agentcore-cli"
@@ -12,7 +12,7 @@ tags: ["bedrock", "agentcore", "agentcore-cli", "agentcore-memory", "strands-age
 
 ## はじめに
 
-[前回の記事](/ja/blog/2026/03/23/agentcore-cli-create-dev-deploy)では、AgentCore CLI の基本ライフサイクル（`create → dev → deploy → invoke`）を検証した。デフォルト構成ではエージェントに記憶がなく、セッションが変わると会話の文脈が失われる。
+[前回の記事](/ja/blog/2026/03/24/agentcore-cli-create-dev-deploy)では、AgentCore CLI の基本ライフサイクル（`create → dev → deploy → invoke`）を検証した。デフォルト構成ではエージェントに記憶がなく、セッションが変わると会話の文脈が失われる。
 
 AgentCore Memory は、会話から得られた情報を自動的に抽出・永続化し、セッションを跨いでエージェントが「覚えている」状態を実現するサービスだ。短期メモリ（セッション内の会話履歴）と長期メモリ（セッション横断の知識抽出）の2層構造で、長期メモリには SEMANTIC（事実情報）、USER_PREFERENCE（ユーザー設定）、SUMMARIZATION（会話要約）の3つの[ビルトイン戦略](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/built-in-strategies.html)が用意されている。
 
@@ -22,7 +22,7 @@ AgentCore Memory は、会話から得られた情報を自動的に抽出・永
 
 ## 前提条件
 
-- [第1回](/ja/blog/2026/03/23/agentcore-cli-create-dev-deploy)の環境が構築済み（Node.js 20+、uv、AWS CLI、AgentCore CLI v0.3.0-preview）
+- [第1回](/ja/blog/2026/03/24/agentcore-cli-create-dev-deploy)の環境が構築済み（Node.js 20+、uv、AWS CLI、AgentCore CLI v0.3.0-preview）
 - AgentCore が利用可能なリージョンの AWS アカウント
 
 ## Memory の3つのオプション
@@ -215,11 +215,11 @@ if __name__ == "__main__":
 
 </details>
 
-Memory なしの `main.py`（[第1回](/ja/blog/2026/03/23/agentcore-cli-create-dev-deploy)参照）と比較すると、`agent_factory()` パターンでセッション ID とユーザー ID ごとにエージェントインスタンスをキャッシュしている点が異なる。これにより、同一セッション内では同じエージェント（同じ会話履歴）が再利用される。
+Memory なしの `main.py`（[第1回](/ja/blog/2026/03/24/agentcore-cli-create-dev-deploy)参照）と比較すると、`agent_factory()` パターンでセッション ID とユーザー ID ごとにエージェントインスタンスをキャッシュしている点が異なる。これにより、同一セッション内では同じエージェント（同じ会話履歴）が再利用される。
 
 ## AWS へのデプロイ
 
-[第1回](/ja/blog/2026/03/23/agentcore-cli-create-dev-deploy)でも触れたが、Memory はローカル開発（`agentcore dev`）では利用できない。`MEMORY_<NAME>_ID` 環境変数がセットされないため、`get_memory_session_manager()` は `None` を返し、エージェントは Memory なしで動作する。Memory の動作を検証するにはデプロイが必要だ。
+[第1回](/ja/blog/2026/03/24/agentcore-cli-create-dev-deploy)でも触れたが、Memory はローカル開発（`agentcore dev`）では利用できない。`MEMORY_<NAME>_ID` 環境変数がセットされないため、`get_memory_session_manager()` は `None` を返し、エージェントは Memory なしで動作する。Memory の動作を検証するにはデプロイが必要だ。
 
 ### デプロイターゲットの設定
 

@@ -1,7 +1,7 @@
 ---
 title: "AgentCore CLI in Practice — Persist Conversation Memory Across Sessions"
 description: "Hands-on verification of AgentCore CLI Memory with SEMANTIC, USER_PREFERENCE, and SUMMARIZATION strategies. Covers async extraction timing, session ID constraints, and the gap between local dev and deployed behavior."
-date: "2026-03-23"
+date: "2026-03-24"
 published: true
 featured: false
 series: "agentcore-cli"
@@ -12,7 +12,7 @@ tags: ["bedrock", "agentcore", "agentcore-cli", "agentcore-memory", "strands-age
 
 ## Introduction
 
-In the [previous article](/en/blog/2026/03/23/agentcore-cli-create-dev-deploy), we verified the basic AgentCore CLI lifecycle (`create → dev → deploy → invoke`). The default configuration creates a stateless agent — switch sessions and all context is lost.
+In the [previous article](/en/blog/2026/03/24/agentcore-cli-create-dev-deploy), we verified the basic AgentCore CLI lifecycle (`create → dev → deploy → invoke`). The default configuration creates a stateless agent — switch sessions and all context is lost.
 
 AgentCore Memory solves this by automatically extracting and persisting information from conversations across sessions. It has a two-layer architecture: short-term memory (conversation history within a session) and long-term memory (knowledge extraction across sessions). Long-term memory offers three [built-in strategies](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/built-in-strategies.html): SEMANTIC (factual information), USER_PREFERENCE (user settings), and SUMMARIZATION (conversation summaries).
 
@@ -22,7 +22,7 @@ This article walks through creating a Memory-enabled agent with the AgentCore CL
 
 ## Prerequisites
 
-- Environment from [Part 1](/en/blog/2026/03/23/agentcore-cli-create-dev-deploy) (Node.js 20+, uv, AWS CLI, AgentCore CLI v0.3.0-preview)
+- Environment from [Part 1](/en/blog/2026/03/24/agentcore-cli-create-dev-deploy) (Node.js 20+, uv, AWS CLI, AgentCore CLI v0.3.0-preview)
 - An AWS account in a supported AgentCore region
 
 ## The Three Memory Options
@@ -212,11 +212,11 @@ if __name__ == "__main__":
 
 </details>
 
-Compared to the Memory-less `main.py` from [Part 1](/en/blog/2026/03/23/agentcore-cli-create-dev-deploy), the `agent_factory()` pattern caches agent instances per session/user pair, ensuring the same conversation history is reused within a session.
+Compared to the Memory-less `main.py` from [Part 1](/en/blog/2026/03/24/agentcore-cli-create-dev-deploy), the `agent_factory()` pattern caches agent instances per session/user pair, ensuring the same conversation history is reused within a session.
 
 ## Deploying to AWS
 
-As noted in [Part 1](/en/blog/2026/03/23/agentcore-cli-create-dev-deploy), Memory is not available during local development (`agentcore dev`). The `MEMORY_<NAME>_ID` environment variable is not set, so `get_memory_session_manager()` returns `None` and the agent runs without Memory. Deployment is required to test Memory behavior.
+As noted in [Part 1](/en/blog/2026/03/24/agentcore-cli-create-dev-deploy), Memory is not available during local development (`agentcore dev`). The `MEMORY_<NAME>_ID` environment variable is not set, so `get_memory_session_manager()` returns `None` and the agent runs without Memory. Deployment is required to test Memory behavior.
 
 ### Configure Deployment Target
 

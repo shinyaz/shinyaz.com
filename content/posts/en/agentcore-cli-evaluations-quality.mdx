@@ -1,7 +1,7 @@
 ---
 title: "AgentCore CLI in Practice — Measure Agent Quality with Evaluations"
 description: "Hands-on verification of AgentCore CLI Evaluations with a custom LLM-as-a-Judge evaluator. Covers on-demand evaluation of agent traces, region constraints for the Evaluator CloudFormation resource, and trace indexing timing."
-date: "2026-03-23"
+date: "2026-03-24"
 published: true
 featured: false
 series: "agentcore-cli"
@@ -12,7 +12,7 @@ tags: ["bedrock", "agentcore", "agentcore-cli", "agentcore-evaluations", "strand
 
 ## Introduction
 
-[Part 1](/en/blog/2026/03/23/agentcore-cli-create-dev-deploy) covered the basic lifecycle, [Part 2](/en/blog/2026/03/23/agentcore-cli-memory-persistence) covered Memory, [Part 3](/en/blog/2026/03/23/agentcore-cli-gateway-mcp-server) covered Gateway. In this final installment, we measure agent response quality using Evaluations.
+[Part 1](/en/blog/2026/03/24/agentcore-cli-create-dev-deploy) covered the basic lifecycle, [Part 2](/en/blog/2026/03/24/agentcore-cli-memory-persistence) covered Memory, [Part 3](/en/blog/2026/03/24/agentcore-cli-gateway-mcp-server) covered Gateway. In this final installment, we measure agent response quality using Evaluations.
 
 AgentCore Evaluations uses the LLM-as-a-Judge pattern to assess agent quality. You define custom evaluators, run them on-demand against historical traces, or deploy online eval configs that automatically sample and score live traffic.
 
@@ -22,7 +22,7 @@ This article defines a custom evaluator, runs an on-demand evaluation, and exami
 
 ## Prerequisites
 
-- Environment from [Part 1](/en/blog/2026/03/23/agentcore-cli-create-dev-deploy) (Node.js 20+, uv, AWS CLI, AgentCore CLI v0.3.0-preview)
+- Environment from [Part 1](/en/blog/2026/03/24/agentcore-cli-create-dev-deploy) (Node.js 20+, uv, AWS CLI, AgentCore CLI v0.3.0-preview)
 - **us-east-1 region** — The Evaluator CloudFormation resource (`AWS::BedrockAgentCore::Evaluator`) is only supported in certain regions. As of this writing, ap-northeast-1 is not supported, so we use us-east-1
 
 If `AWS_REGION` is set in your environment, it may override the region in `aws-targets.json`. If it's set to something other than us-east-1, run `export AWS_REGION=us-east-1` or `unset AWS_REGION` before proceeding.

@@ -1,7 +1,7 @@
 ---
 title: "AgentCore CLI 実践 — 主要機能を統合して技術トレンドアドバイザーを構築する"
 description: "AgentCore CLI の Runtime・Memory・Gateway・Evaluations を1つのプロジェクトに統合し、ユーザーの専門分野を記憶して最新技術トレンドをパーソナライズ検索する技術トレンドアドバイザーを構築。シリーズの総集編として主要機能の統合手順と動作を検証する。"
-date: "2026-03-23"
+date: "2026-03-24"
 published: true
 featured: false
 series: "agentcore-cli"
@@ -15,10 +15,10 @@ tags: ["bedrock", "agentcore", "agentcore-cli", "agentcore-memory", "agentcore-g
 
 本シリーズでは、AgentCore CLI の4つの主要機能を個別に検証してきた。
 
-- [第1回](/ja/blog/2026/03/23/agentcore-cli-create-dev-deploy) — Runtime（基本ライフサイクル）
-- [第2回](/ja/blog/2026/03/23/agentcore-cli-memory-persistence) — Memory（会話の記憶）
-- [第3回](/ja/blog/2026/03/23/agentcore-cli-gateway-mcp-server) — Gateway（外部 MCP サーバー接続）
-- [第4回](/ja/blog/2026/03/23/agentcore-cli-evaluations-quality) — Evaluations（品質計測）
+- [第1回](/ja/blog/2026/03/24/agentcore-cli-create-dev-deploy) — Runtime（基本ライフサイクル）
+- [第2回](/ja/blog/2026/03/24/agentcore-cli-memory-persistence) — Memory（会話の記憶）
+- [第3回](/ja/blog/2026/03/24/agentcore-cli-gateway-mcp-server) — Gateway（外部 MCP サーバー接続）
+- [第4回](/ja/blog/2026/03/24/agentcore-cli-evaluations-quality) — Evaluations（品質計測）
 
 最終回の本記事では、これら4つの機能を1つのプロジェクトに統合し、「技術トレンドアドバイザー」を構築する。ユーザーの専門分野を記憶し（Memory）、Web 検索で最新情報を取得し（Gateway）、応答品質を自動計測する（Evaluations）エージェントだ。
 
@@ -26,8 +26,8 @@ tags: ["bedrock", "agentcore", "agentcore-cli", "agentcore-memory", "agentcore-g
 
 ## 前提条件
 
-- [第1回](/ja/blog/2026/03/23/agentcore-cli-create-dev-deploy)の環境が構築済み（Node.js 20+、uv、AWS CLI、AgentCore CLI v0.3.0-preview）
-- **us-east-1 リージョン**の AWS アカウント — Evaluator の CloudFormation リソースが ap-northeast-1 では未サポートのため（[第4回](/ja/blog/2026/03/23/agentcore-cli-evaluations-quality)参照）
+- [第1回](/ja/blog/2026/03/24/agentcore-cli-create-dev-deploy)の環境が構築済み（Node.js 20+、uv、AWS CLI、AgentCore CLI v0.3.0-preview）
+- **us-east-1 リージョン**の AWS アカウント — Evaluator の CloudFormation リソースが ap-northeast-1 では未サポートのため（[第4回](/ja/blog/2026/03/24/agentcore-cli-evaluations-quality)参照）
 
 `AWS_REGION` 環境変数が設定されている場合、`aws-targets.json` のリージョンより優先されることがある。us-east-1 以外に設定されている場合は、`export AWS_REGION=us-east-1` で上書きするか、`unset AWS_REGION` で解除してから実行する。
 
@@ -42,7 +42,7 @@ tags: ["bedrock", "agentcore", "agentcore-cli", "agentcore-memory", "agentcore-g
 
 ## プロジェクト構築
 
-[第3回](/ja/blog/2026/03/23/agentcore-cli-gateway-mcp-server)で学んだ通り、Gateway を使う場合は `--no-agent` でプロジェクトを作成し、Gateway 設定後にエージェントを追加する。
+[第3回](/ja/blog/2026/03/24/agentcore-cli-gateway-mcp-server)で学んだ通り、Gateway を使う場合は `--no-agent` でプロジェクトを作成し、Gateway 設定後にエージェントを追加する。
 
 ### Step 1〜3: プロジェクト作成と Gateway 設定
 
@@ -99,7 +99,7 @@ system_prompt="""
 """,
 ```
 
-`main.py` の全体は、[第2回](/ja/blog/2026/03/23/agentcore-cli-memory-persistence)の Memory 統合コードと[第3回](/ja/blog/2026/03/23/agentcore-cli-gateway-mcp-server)の Gateway クライアントコードが組み合わさった構成だ。`get_all_gateway_mcp_clients()` で Gateway ツールを取得し、`get_memory_session_manager()` でセッションマネージャーを初期化する。
+`main.py` の全体は、[第2回](/ja/blog/2026/03/24/agentcore-cli-memory-persistence)の Memory 統合コードと[第3回](/ja/blog/2026/03/24/agentcore-cli-gateway-mcp-server)の Gateway クライアントコードが組み合わさった構成だ。`get_all_gateway_mcp_clients()` で Gateway ツールを取得し、`get_memory_session_manager()` でセッションマネージャーを初期化する。
 
 <details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
 <summary className="cursor-pointer font-medium">main.py（Memory + Gateway 統合済みの全体）</summary>
@@ -251,7 +251,7 @@ with expertise in:
 
 ### セッション2: パーソナライズされたトレンド検索
 
-Memory の長期メモリ抽出を待つ（[第2回](/ja/blog/2026/03/23/agentcore-cli-memory-persistence)で確認した通り、1〜2分かかる）。
+Memory の長期メモリ抽出を待つ（[第2回](/ja/blog/2026/03/24/agentcore-cli-memory-persistence)で確認した通り、1〜2分かかる）。
 
 ```bash title="Terminal"
 sleep 120

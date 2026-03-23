@@ -1,7 +1,7 @@
 ---
 title: "AgentCore CLI in Practice — Connect External MCP Servers via Gateway"
 description: "Hands-on verification of AgentCore CLI Gateway with an external MCP server target. Covers the critical project setup order, deployment-time connectivity checks, and the split between Gateway API and CloudFormation deployment."
-date: "2026-03-23"
+date: "2026-03-24"
 published: true
 featured: false
 series: "agentcore-cli"
@@ -12,7 +12,7 @@ tags: ["bedrock", "agentcore", "agentcore-cli", "agentcore-gateway", "mcp", "str
 
 ## Introduction
 
-[Part 1](/en/blog/2026/03/23/agentcore-cli-create-dev-deploy) covered the basic lifecycle, [Part 2](/en/blog/2026/03/23/agentcore-cli-memory-persistence) covered Memory persistence. This time we connect an external MCP server to an agent using Gateway.
+[Part 1](/en/blog/2026/03/24/agentcore-cli-create-dev-deploy) covered the basic lifecycle, [Part 2](/en/blog/2026/03/24/agentcore-cli-memory-persistence) covered Memory persistence. This time we connect an external MCP server to an agent using Gateway.
 
 AgentCore Gateway acts as an MCP-compatible proxy that handles request routing, authentication, and tool discovery between agents and backend tools. The agent only needs to know the Gateway URL — it doesn't need to know the details of the MCP servers or APIs behind it.
 
@@ -22,7 +22,7 @@ This article registers an external MCP server ([Exa AI](https://exa.ai/) web sea
 
 ## Prerequisites
 
-- Environment from [Part 1](/en/blog/2026/03/23/agentcore-cli-create-dev-deploy) (Node.js 20+, uv, AWS CLI, AgentCore CLI v0.3.0-preview)
+- Environment from [Part 1](/en/blog/2026/03/24/agentcore-cli-create-dev-deploy) (Node.js 20+, uv, AWS CLI, AgentCore CLI v0.3.0-preview)
 - An AWS account in a supported AgentCore region
 
 ## Gateway Overview
@@ -148,7 +148,7 @@ Key points:
 - Returns `None` if the env var is not set (e.g., local dev before first deploy)
 - `get_all_gateway_mcp_clients()` aggregates clients for all configured Gateways
 
-In `main.py`, `get_all_gateway_mcp_clients()` replaces the default `get_streamable_http_mcp_client()` from [Part 1](/en/blog/2026/03/23/agentcore-cli-create-dev-deploy).
+In `main.py`, `get_all_gateway_mcp_clients()` replaces the default `get_streamable_http_mcp_client()` from [Part 1](/en/blog/2026/03/24/agentcore-cli-create-dev-deploy).
 
 ```python title="app/GwAgent/main.py (import section)"
 from mcp_client.client import get_all_gateway_mcp_clients

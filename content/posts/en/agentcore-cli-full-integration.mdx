@@ -1,7 +1,7 @@
 ---
 title: "AgentCore CLI in Practice — Build a Tech Trend Advisor with Key Features Combined"
 description: "Combine Runtime, Memory, Gateway, and Evaluations into a single AgentCore CLI project to build a personalized tech trend advisor that remembers user expertise, searches the web for latest trends, and auto-measures response quality."
-date: "2026-03-23"
+date: "2026-03-24"
 published: true
 featured: false
 series: "agentcore-cli"
@@ -15,10 +15,10 @@ tags: ["bedrock", "agentcore", "agentcore-cli", "agentcore-memory", "agentcore-g
 
 This series has covered the four main AgentCore CLI features individually:
 
-- [Part 1](/en/blog/2026/03/23/agentcore-cli-create-dev-deploy) — Runtime (basic lifecycle)
-- [Part 2](/en/blog/2026/03/23/agentcore-cli-memory-persistence) — Memory (conversation persistence)
-- [Part 3](/en/blog/2026/03/23/agentcore-cli-gateway-mcp-server) — Gateway (external MCP server)
-- [Part 4](/en/blog/2026/03/23/agentcore-cli-evaluations-quality) — Evaluations (quality measurement)
+- [Part 1](/en/blog/2026/03/24/agentcore-cli-create-dev-deploy) — Runtime (basic lifecycle)
+- [Part 2](/en/blog/2026/03/24/agentcore-cli-memory-persistence) — Memory (conversation persistence)
+- [Part 3](/en/blog/2026/03/24/agentcore-cli-gateway-mcp-server) — Gateway (external MCP server)
+- [Part 4](/en/blog/2026/03/24/agentcore-cli-evaluations-quality) — Evaluations (quality measurement)
 
 In this bonus finale, we combine these four key features into a single project: a "tech trend advisor" that remembers the user's expertise (Memory), searches the web for latest trends (Gateway), and auto-measures response quality (Evaluations).
 
@@ -26,8 +26,8 @@ In this bonus finale, we combine these four key features into a single project: 
 
 ## Prerequisites
 
-- Environment from [Part 1](/en/blog/2026/03/23/agentcore-cli-create-dev-deploy) (Node.js 20+, uv, AWS CLI, AgentCore CLI v0.3.0-preview)
-- **us-east-1 region** — Evaluator CloudFormation resource is not supported in ap-northeast-1 (see [Part 4](/en/blog/2026/03/23/agentcore-cli-evaluations-quality))
+- Environment from [Part 1](/en/blog/2026/03/24/agentcore-cli-create-dev-deploy) (Node.js 20+, uv, AWS CLI, AgentCore CLI v0.3.0-preview)
+- **us-east-1 region** — Evaluator CloudFormation resource is not supported in ap-northeast-1 (see [Part 4](/en/blog/2026/03/24/agentcore-cli-evaluations-quality))
 
 If `AWS_REGION` is set in your environment, it may override the region in `aws-targets.json`. If it's set to something other than us-east-1, run `export AWS_REGION=us-east-1` or `unset AWS_REGION` before proceeding.
 
@@ -42,7 +42,7 @@ If `AWS_REGION` is set in your environment, it may override the region in `aws-t
 
 ## Project Setup
 
-As learned in [Part 3](/en/blog/2026/03/23/agentcore-cli-gateway-mcp-server), Gateway requires `--no-agent` first, then adding the Gateway before the agent.
+As learned in [Part 3](/en/blog/2026/03/24/agentcore-cli-gateway-mcp-server), Gateway requires `--no-agent` first, then adding the Gateway before the agent.
 
 ### Steps 1–3: Project Creation and Gateway Setup
 
@@ -99,7 +99,7 @@ system_prompt="""
 """,
 ```
 
-The full `main.py` combines the Memory integration from [Part 2](/en/blog/2026/03/23/agentcore-cli-memory-persistence) and the Gateway client from [Part 3](/en/blog/2026/03/23/agentcore-cli-gateway-mcp-server). It uses `get_all_gateway_mcp_clients()` for Gateway tools and `get_memory_session_manager()` for session management.
+The full `main.py` combines the Memory integration from [Part 2](/en/blog/2026/03/24/agentcore-cli-memory-persistence) and the Gateway client from [Part 3](/en/blog/2026/03/24/agentcore-cli-gateway-mcp-server). It uses `get_all_gateway_mcp_clients()` for Gateway tools and `get_memory_session_manager()` for session management.
 
 <details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
 <summary className="cursor-pointer font-medium">main.py (full Memory + Gateway integration)</summary>
@@ -251,7 +251,7 @@ with expertise in:
 
 ### Session 2: Personalized Trend Search
 
-Wait for Memory's long-term extraction (1–2 minutes, as confirmed in [Part 2](/en/blog/2026/03/23/agentcore-cli-memory-persistence)).
+Wait for Memory's long-term extraction (1–2 minutes, as confirmed in [Part 2](/en/blog/2026/03/24/agentcore-cli-memory-persistence)).
 
 ```bash title="Terminal"
 sleep 120
