@@ -1,0 +1,30 @@
+---
+title: "AgentCore CLI AWS_REGION environment variable overrides aws-targets.json region"
+description: "Setting us-east-1 in aws-targets.json doesn't help if AWS_REGION is set to ap-northeast-1. CDK under the hood picks up the env var. Not documented in CLI docs."
+date: "2026-03-23"
+published: true
+tags: ["agentcore", "agentcore-cli", "aws"]
+---
+
+Set `"region": "us-east-1"` in `aws-targets.json`, ran `agentcore deploy`, and the stack ended up in `ap-northeast-1`. The culprit was `AWS_REGION=ap-northeast-1` in my shell environment.
+
+AgentCore CLI uses CDK internally, and CDK can pick up `AWS_REGION` over the region specified in `aws-targets.json`.
+
+```bash title="Terminal"
+# Stack was in the wrong region
+aws cloudformation describe-stacks \
+  --stack-name AgentCore-MyProject-default \
+  --region ap-northeast-1 \
+  --query 'Stacks[0].StackStatus' --output text
+# => CREATE_COMPLETE (expected us-east-1)
+```
+
+Fix by aligning the env var or unsetting it:
+
+```bash title="Terminal"
+export AWS_REGION=us-east-1
+# or
+unset AWS_REGION
+```
+
+This behavior isn't documented in the CLI docs. Especially important when using region-limited features like Evaluator.

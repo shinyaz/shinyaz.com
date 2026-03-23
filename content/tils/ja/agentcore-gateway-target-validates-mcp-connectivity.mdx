@@ -1,0 +1,30 @@
+---
+title: "AgentCore Gateway ターゲットのデプロイ時に MCP サーバーへの接続確認が行われる"
+description: "Gateway ターゲットの MCP サーバーが到達不能だと agentcore deploy が CloudFormation ROLLBACK で失敗する。エラーメッセージは Failed to connect and fetch tools from the provided MCP target server。"
+date: "2026-03-23"
+published: true
+tags: ["agentcore", "agentcore-cli", "agentcore-gateway", "mcp"]
+---
+
+Gateway ターゲットに到達不能な MCP サーバーの URL を指定して `agentcore deploy` したら、CloudFormation が ROLLBACK した。
+
+```text title="Output"
+CDK deploy failed: ❌ AgentCore-MyProject-default failed: ToolkitError:
+The stack named AgentCore-MyProject-default failed creation, it may need to
+be manually deleted from the AWS console: ROLLBACK_COMPLETE: Resource handler
+returned message: "GatewayTarget XXXXX failed to stabilize, status: FAILED,
+reason: Failed to connect and fetch tools from the provided MCP target server.
+Error - Apache transport request failed"
+```
+
+Gateway ターゲットの作成時に、AgentCore が MCP サーバーに実際に接続してツール一覧を取得しようとする。サーバーが落ちていたり、URL が間違っていると、CloudFormation スタック全体が ROLLBACK する。
+
+失敗したスタックは `ROLLBACK_COMPLETE` 状態で残るため、手動で削除が必要になる場合がある。
+
+```bash title="Terminal"
+aws cloudformation delete-stack \
+  --stack-name AgentCore-MyProject-default \
+  --region ap-northeast-1
+```
+
+外部 MCP サーバーの可用性がデプロイの成否に直結するので、信頼性の高いエンドポイントを選ぶ必要がある。

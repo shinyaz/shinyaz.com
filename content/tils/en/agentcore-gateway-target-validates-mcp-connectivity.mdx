@@ -1,0 +1,30 @@
+---
+title: "AgentCore Gateway target deployment validates MCP server connectivity"
+description: "agentcore deploy fails with CloudFormation ROLLBACK if the Gateway target MCP server is unreachable. Error: Failed to connect and fetch tools from the provided MCP target server."
+date: "2026-03-23"
+published: true
+tags: ["agentcore", "agentcore-cli", "agentcore-gateway", "mcp"]
+---
+
+Pointed a Gateway target at an unreachable MCP server URL and `agentcore deploy` failed with a CloudFormation ROLLBACK.
+
+```text title="Output"
+CDK deploy failed: ❌ AgentCore-MyProject-default failed: ToolkitError:
+The stack named AgentCore-MyProject-default failed creation, it may need to
+be manually deleted from the AWS console: ROLLBACK_COMPLETE: Resource handler
+returned message: "GatewayTarget XXXXX failed to stabilize, status: FAILED,
+reason: Failed to connect and fetch tools from the provided MCP target server.
+Error - Apache transport request failed"
+```
+
+During Gateway target creation, AgentCore actually connects to the MCP server and fetches the tool list. If the server is down or the URL is wrong, the entire CloudFormation stack rolls back.
+
+The failed stack stays in `ROLLBACK_COMPLETE` and may need manual deletion:
+
+```bash title="Terminal"
+aws cloudformation delete-stack \
+  --stack-name AgentCore-MyProject-default \
+  --region ap-northeast-1
+```
+
+External MCP server availability directly affects deployment success. Use reliable endpoints.

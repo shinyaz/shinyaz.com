@@ -1,0 +1,35 @@
+---
+title: "AgentCore Evaluator の CloudFormation リソースは ap-northeast-1 では未サポート"
+description: "agentcore deploy で Unrecognized resource types: [AWS::BedrockAgentCore::Evaluator] が出たら、リージョンが原因。us-east-1 では動く。"
+date: "2026-03-23"
+published: true
+tags: ["agentcore", "agentcore-cli", "agentcore-evaluations", "cloudformation"]
+---
+
+`agentcore add evaluator` → `agentcore deploy` で以下のエラーが出た。
+
+```text title="Output"
+CDK deploy failed: ❌ AgentCore-MyProject-default failed: ValidationError:
+Template format error: Unrecognized resource types: [AWS::BedrockAgentCore::Evaluator]
+```
+
+`AWS::BedrockAgentCore::Evaluator` が ap-northeast-1 の CloudFormation に登録されていないのが原因だった。
+
+```bash title="Terminal"
+# ap-northeast-1: 未登録
+aws cloudformation describe-type \
+  --type RESOURCE \
+  --type-name AWS::BedrockAgentCore::Evaluator \
+  --region ap-northeast-1
+# => TypeNotFoundException
+
+# us-east-1: 登録済み
+aws cloudformation describe-type \
+  --type RESOURCE \
+  --type-name AWS::BedrockAgentCore::Evaluator \
+  --region us-east-1 \
+  --query 'ProvisioningType' --output text
+# => FULLY_MUTABLE
+```
+
+Evaluator を使う場合は `aws-targets.json` のリージョンを us-east-1 に変更する。AgentCore Runtime や Memory は ap-northeast-1 でも動くので、Evaluator 固有の制約だ。

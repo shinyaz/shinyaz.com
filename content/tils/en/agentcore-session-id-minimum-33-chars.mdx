@@ -1,0 +1,26 @@
+---
+title: "AgentCore Runtime session-id requires 33+ characters"
+description: "agentcore invoke --session-id with a short string fails with Member must have length greater than or equal to 33. Use UUIDs or long identifiers."
+date: "2026-03-23"
+published: true
+tags: ["agentcore", "agentcore-cli", "agentcore-memory"]
+---
+
+Tried `--session-id session-1` with a Memory-enabled agent and got:
+
+```text title="Output"
+1 validation error detected: Value at 'runtimeSessionId' failed to satisfy
+constraint: Member must have length greater than or equal to 33
+```
+
+Session IDs must be 33 characters or longer. Not documented in the CLI docs or `--help` — it's an API-level validation.
+
+```bash title="Terminal"
+# NG: 9 chars
+agentcore invoke "Hello" --session-id session-1
+
+# OK: 34 chars
+agentcore invoke "Hello" --session-id session-memory-test-001-first-conv
+```
+
+UUIDs (36 chars) always work. Watch the length when manually specifying session IDs.

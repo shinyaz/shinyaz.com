@@ -1,0 +1,30 @@
+---
+title: "AgentCore CLI は AWS_REGION 環境変数が aws-targets.json より優先される"
+description: "aws-targets.json に us-east-1 を指定しても、AWS_REGION=ap-northeast-1 が設定されていると ap-northeast-1 にデプロイされる。CLI のドキュメントに明記されていない挙動。"
+date: "2026-03-23"
+published: true
+tags: ["agentcore", "agentcore-cli", "aws"]
+---
+
+`aws-targets.json` に `"region": "us-east-1"` を設定して `agentcore deploy` したのに、スタックが `ap-northeast-1` に作成されていた。原因は `AWS_REGION=ap-northeast-1` が環境変数に設定されていたこと。
+
+AgentCore CLI は内部で CDK を使っており、CDK は `AWS_REGION` 環境変数を `aws-targets.json` のリージョン指定より優先する場合がある。
+
+```bash title="Terminal"
+# 意図しないリージョンにデプロイされていた
+aws cloudformation describe-stacks \
+  --stack-name AgentCore-MyProject-default \
+  --region ap-northeast-1 \
+  --query 'Stacks[0].StackStatus' --output text
+# => CREATE_COMPLETE（us-east-1 にデプロイしたつもりだった）
+```
+
+対処法は `aws-targets.json` と環境変数を一致させるか、環境変数を解除する。
+
+```bash title="Terminal"
+export AWS_REGION=us-east-1
+# または
+unset AWS_REGION
+```
+
+CLI のドキュメントにはこの挙動の記載がない。Evaluator のように特定リージョンでしか使えない機能を使う場合は特に注意が必要だ。

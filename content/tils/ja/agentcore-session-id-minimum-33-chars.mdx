@@ -1,0 +1,26 @@
+---
+title: "AgentCore Runtime の session-id は33文字以上が必要"
+description: "agentcore invoke --session-id に短い文字列を指定すると Member must have length greater than or equal to 33 エラーになる。UUID 形式か十分な長さの識別子を使う。"
+date: "2026-03-23"
+published: true
+tags: ["agentcore", "agentcore-cli", "agentcore-memory"]
+---
+
+Memory 付きエージェントで `--session-id session-1` を指定したら以下のエラーが出た。
+
+```text title="Output"
+1 validation error detected: Value at 'runtimeSessionId' failed to satisfy
+constraint: Member must have length greater than or equal to 33
+```
+
+セッション ID に33文字以上の制約がある。CLI のドキュメントや `--help` には記載がなく、API のバリデーションで弾かれる。
+
+```bash title="Terminal"
+# NG: 9文字
+agentcore invoke "Hello" --session-id session-1
+
+# OK: 34文字
+agentcore invoke "Hello" --session-id session-memory-test-001-first-conv
+```
+
+UUID 形式（36文字）なら確実に通る。手動で指定する場合は文字数に注意が必要だ。
