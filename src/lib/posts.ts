@@ -9,6 +9,8 @@ export function getPublishedPosts(locale?: Locale) {
     .sort((a, b) => {
       const diff = new Date(b.date).getTime() - new Date(a.date).getTime();
       if (diff !== 0) return diff;
+      const seriesCmp = (a.series ?? "").localeCompare(b.series ?? "");
+      if (seriesCmp !== 0) return seriesCmp;
       return (b.seriesOrder ?? 0) - (a.seriesOrder ?? 0);
     });
 }
