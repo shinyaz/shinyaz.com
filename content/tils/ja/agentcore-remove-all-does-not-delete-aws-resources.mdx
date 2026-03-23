@@ -1,0 +1,26 @@
+---
+title: "agentcore remove allはAWSリソースを削除しない"
+description: "agentcore remove all --force はローカルの設定ファイルをリセットするだけで、AWS上のリソースは残る。実際の削除には追加で agentcore deploy が必要。"
+date: "2026-03-23"
+published: true
+tags: ["bedrock", "agentcore", "agentcore-cli"]
+---
+
+AgentCore CLI でデプロイ済みリソースを削除しようとして `agentcore remove all --force` を実行したら、こう返ってきた。
+
+```json title="Output"
+{
+  "success": true,
+  "message": "All schemas reset to empty state",
+  "note": "Your source code has not been modified. Run `agentcore deploy` to apply changes to AWS."
+}
+```
+
+`remove all` は `agentcore.json` の agents / memories / credentials 等の定義を空配列にリセットするだけで、**AWS 上の CloudFormation スタックや AgentCore Runtime リソースはそのまま残る**。実際に AWS リソースを削除するには、空の状態を反映するために `agentcore deploy -y` を追加で実行する必要がある。
+
+```bash title="Terminal"
+agentcore remove all --force
+agentcore deploy -y              # これで CloudFormation スタックが削除される
+```
+
+CLI の設計思想として、`agentcore.json` が宣言的な状態定義で、`deploy` がその状態を AWS に反映するという一貫したパターンになっている。`remove` はあくまでローカルの定義変更であり、AWS への反映は常に `deploy` を通す。直感的には `remove` で消えてほしいが、意図しない削除を防ぐ安全策とも言える。

@@ -1,0 +1,442 @@
+---
+title: "AgentCore CLIで4コマンドでAIエージェントをAWSにデプロイする"
+description: "AgentCore CLIを使ってStrands Agentsプロジェクトの作成からローカル開発、AWSデプロイ、動作確認までを検証。CDKの知識なしに約1分半でエージェントをデプロイできる開発者体験と、OpenTelemetryベースのログ基盤を共有する。"
+date: "2026-03-23"
+published: true
+featured: false
+categories: [ai-agents]
+tags: ["bedrock", "agentcore", "agentcore-cli", "strands-agents", "ai-agents"]
+---
+
+## はじめに
+
+Amazon Bedrock AgentCore は、任意のフレームワークとモデルを使って AI エージェントをセキュアにデプロイ・運用するためのサービスだ。2025年7月に[プレビューとして発表](https://aws.amazon.com/about-aws/whats-new/2025/07/amazon-bedrock-agentcore-preview/)され、2025年10月に[一般提供が開始](https://aws.amazon.com/about-aws/whats-new/2025/10/amazon-bedrock-agentcore-available/)された。Runtime、Memory、Gateway、Identity などのコンポーネントが提供されており、現在は9リージョンで利用可能だ。
+
+その AgentCore を操作するための CLI ツール「[AgentCore CLI](https://github.com/aws/agentcore-cli)」が公開されている。以前は [Bedrock AgentCore Starter Toolkit](https://github.com/aws/bedrock-agentcore-starter-toolkit) という Python ベースのツールがあったが、AgentCore CLI はそれを置き換える Node.js ベースの新しいツールだ。CLI 自体はまだ Preview 段階（v0.3.0-preview）である。
+
+本記事では、AgentCore CLI を使って `create → dev → deploy → invoke` の一連のライフサイクルを実際に検証した。CDK を意識せずにエージェントをデプロイできるか、ローカル開発の体験はどうか、デプロイ後のオブザーバビリティはどうなっているか、といった点を確認した結果を共有する。公式ドキュメントは [GitHub リポジトリの docs/](https://github.com/aws/agentcore-cli/tree/main/docs) を参照。
+
+## 前提条件
+
+- Node.js 20+
+- [uv](https://docs.astral.sh/uv/getting-started/installation/)（Python エージェント用）
+- AWS CLI（認証情報設定済み、Bedrock モデルアクセス権限あり）
+- AgentCore が利用可能なリージョンの AWS アカウント（us-east-1、us-west-2、ap-southeast-2、eu-central-1、ap-northeast-1）
+
+uv が未インストールの場合は以下でインストールできる。
+
+```bash title="Terminal"
+curl -LsSf https://astral.sh/uv/install.sh | sh
+```
+
+## インストールとプロジェクト作成
+
+### CLI のインストール
+
+npm でグローバルインストールする。
+
+```bash title="Terminal"
+npm install -g @aws/agentcore
+agentcore --version
+```
+
+```text title="Output"
+0.3.0-preview.6.1
+```
+
+旧 Starter Toolkit がインストールされている場合は、先に `pip uninstall bedrock-agentcore-starter-toolkit` でアンインストールが必要だ。
+
+### プロジェクト作成
+
+`agentcore create` でプロジェクトを作成する。`--defaults` を指定すると、Python + Strands Agents + Bedrock + メモリなしのデフォルト構成になる。
+
+```bash title="Terminal"
+agentcore create --name AgentCoreTest --defaults
+cd AgentCoreTest
+```
+
+対話的に作成したい場合は `agentcore create` だけで実行すればウィザードが起動する。フレームワーク（Strands / LangChain / GoogleADK / OpenAI Agents）、モデルプロバイダー（Bedrock / Anthropic / OpenAI / Gemini）、メモリの有無などを選択できる。
+
+### 生成されるプロジェクト構成
+
+`node_modules` と `.venv` を除いた構成は以下の通り。
+
+```text title="Output"
+AgentCoreTest/
+├── agentcore/
+│   ├── agentcore.json             # プロジェクト設定（中心的な設定ファイル）
+│   ├── aws-targets.json           # デプロイターゲット（初期状態は空配列）
+│   ├── .env.local                 # API キー（gitignore 対象）
+│   ├── .cli/deployed-state.json   # デプロイ状態（自動管理）
+│   └── cdk/                       # CDK インフラコード（自動生成、編集不要）
+└── app/
+    └── AgentCoreTest/
+        ├── main.py                # エージェントのエントリポイント
+        ├── model/load.py          # モデル設定
+        ├── mcp_client/client.py   # MCP クライアント（Exa AI がデフォルト）
+        └── pyproject.toml         # Python 依存関係
+```
+
+`agentcore.json` がプロジェクトの中心で、エージェント、メモリ、クレデンシャル、評価器の定義がすべてここに集約される。以下のファイルはすべて `agentcore create` で自動生成されるため、手動で作成する必要はない。
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">agentcore.json（自動生成されるプロジェクト設定）</summary>
+
+```json title="agentcore/agentcore.json"
+{
+  "name": "AgentCoreTest",
+  "version": 1,
+  "agents": [
+    {
+      "type": "AgentCoreRuntime",
+      "name": "AgentCoreTest",
+      "build": "CodeZip",
+      "entrypoint": "main.py",
+      "codeLocation": "app/AgentCoreTest/",
+      "runtimeVersion": "PYTHON_3_12",
+      "networkMode": "PUBLIC",
+      "modelProvider": "Bedrock",
+      "protocol": "HTTP"
+    }
+  ],
+  "memories": [],
+  "credentials": [],
+  "evaluators": [],
+  "onlineEvalConfigs": []
+}
+```
+
+</details>
+
+### 生成されるエージェントコード
+
+生成された `main.py` は Strands Agents SDK と `bedrock-agentcore` ランタイムを使った構成だ。構造はシンプルで、`@tool` でツールを定義し、`@app.entrypoint` でエントリポイントを定義する。ストリーミング応答にも対応している。
+
+ポイントは以下の3点。
+
+- `@tool` デコレータでツールを定義 — サンプルとして `add_numbers` が含まれる
+- `@app.entrypoint` でエントリポイントを定義 — `payload.get("prompt")` でユーザー入力を受け取る
+- `agent.stream_async()` でストリーミング応答 — SSE でチャンクごとに返す
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">main.py（自動生成されるエージェントコード全体）</summary>
+
+```python title="app/AgentCoreTest/main.py"
+from strands import Agent, tool
+from bedrock_agentcore.runtime import BedrockAgentCoreApp
+from model.load import load_model
+from mcp_client.client import get_streamable_http_mcp_client
+
+app = BedrockAgentCoreApp()
+log = app.logger
+
+# Define a Streamable HTTP MCP Client
+mcp_clients = [get_streamable_http_mcp_client()]
+
+# Define a collection of tools used by the model
+tools = []
+
+# Define a simple function tool
+@tool
+def add_numbers(a: int, b: int) -> int:
+    """Return the sum of two numbers"""
+    return a+b
+tools.append(add_numbers)
+
+# Add MCP client to tools if available
+for mcp_client in mcp_clients:
+    if mcp_client:
+        tools.append(mcp_client)
+
+
+_agent = None
+
+def get_or_create_agent():
+    global _agent
+    if _agent is None:
+        _agent = Agent(
+            model=load_model(),
+            system_prompt="""
+                You are a helpful assistant. Use tools when appropriate.
+            """,
+            tools=tools
+        )
+    return _agent
+
+
+@app.entrypoint
+async def invoke(payload, context):
+    log.info("Invoking Agent.....")
+
+    agent = get_or_create_agent()
+
+    # Execute and format response
+    stream = agent.stream_async(payload.get("prompt"))
+
+    async for event in stream:
+        # Handle Text parts of the response
+        if "data" in event and isinstance(event["data"], str):
+            yield event["data"]
+
+
+if __name__ == "__main__":
+    app.run()
+```
+
+</details>
+
+モデル設定は `model/load.py` に分離されている。デフォルトでは Claude Sonnet 4.5 のグローバル推論プロファイルが指定される。
+
+```python title="app/AgentCoreTest/model/load.py"
+from strands.models.bedrock import BedrockModel
+
+def load_model() -> BedrockModel:
+    """Get Bedrock model client using IAM credentials."""
+    return BedrockModel(model_id="global.anthropic.claude-sonnet-4-5-20250929-v1:0")
+```
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">pyproject.toml（Python 依存関係）</summary>
+
+```toml title="app/AgentCoreTest/pyproject.toml"
+[project]
+name = "AgentCoreTest"
+version = "0.1.0"
+requires-python = ">=3.10"
+dependencies = [
+    "aws-opentelemetry-distro",
+    "bedrock-agentcore >= 1.0.3",
+    "botocore[crt] >= 1.35.0",
+    "mcp >= 1.19.0",
+    "strands-agents >= 1.13.0",
+]
+```
+
+</details>
+
+`agentcore/cdk/` ディレクトリには CDK のインフラコードが自動生成されるが、ユーザーが直接編集する必要はない。`agentcore.json` の設定変更に応じて CLI が CDK を操作する。
+
+## ローカル開発
+
+### dev サーバーの起動
+
+`agentcore dev` でローカル開発サーバーを起動する。`--logs` を付けると非対話モードでログが標準出力に流れる。
+
+```bash title="Terminal"
+agentcore dev --logs
+```
+
+```text title="Output"
+Starting dev server...
+Agent: AgentCoreTest
+Provider: Bedrock
+Server: http://localhost:8080/invocations
+
+→ INFO:     Uvicorn running on http://127.0.0.1:8080 (Press CTRL+C to quit)
+→ INFO:     Started reloader process [18029] using StatReload
+→ INFO:     Application startup complete.
+```
+
+内部的には uv で Python 仮想環境を自動作成し、`pyproject.toml` の依存関係をインストールした上で uvicorn を起動する。`StatReload` によるファイル変更監視でホットリロードも行われる。
+
+### エージェントの呼び出し
+
+dev サーバーを起動したまま、別のターミナルを開いてプロジェクトディレクトリに移動し、`agentcore dev --invoke` でローカルエージェントに質問を送信する。
+
+```bash title="Terminal（別ターミナル）"
+cd AgentCoreTest
+agentcore dev --invoke "What is 3 + 5?" --stream
+```
+
+```text title="Output"
+Provider: Bedrock
+The answer is **8**.
+```
+
+ツール呼び出しを明示的に指示してみる。
+
+```bash title="Terminal"
+agentcore dev --invoke "Please use the add_numbers tool to calculate 42 + 58" --stream
+```
+
+```text title="Output"
+Provider: Bedrock
+The answer is **100**.
+```
+
+dev サーバー側のログを見ると、ツール呼び出しの過程が確認できる。`Tool #1: add_numbers` のように、どのツールが呼ばれたかが表示される。
+
+```text title="Output（dev サーバー側）"
+→ {... "message": "Invoking Agent.....", "sessionId": "local-dev-session"}
+→ Tool #1: add_numbers
+→ INFO: 127.0.0.1:53698 - "POST /invocations HTTP/1.1" 200 OK
+```
+
+ローカル開発時のセッション ID は固定で `local-dev-session` が使われる。
+
+### ローカル開発の制約
+
+[ドキュメント](https://github.com/aws/agentcore-cli/blob/main/docs/local-development.md)に記載されている通り、ローカル開発とデプロイ後では以下の違いがある。
+
+| 項目 | ローカル | デプロイ後 |
+|------|---------|-----------|
+| API キー | `.env.local` | AgentCore Identity |
+| メモリ | 利用不可 | AgentCore Memory |
+| ゲートウェイ | デプロイ済み状態から環境変数注入 | CDK 注入 |
+| ネットワーク | localhost | Public |
+
+メモリ機能はデプロイしないとテストできない点は注意が必要だ。ゲートウェイの環境変数は、事前に `agentcore deploy` でゲートウェイを作成していれば `deployed-state.json` から読み取って自動注入される。
+
+## AWS へのデプロイ
+
+### デプロイターゲットの設定
+
+`agentcore/aws-targets.json` にデプロイ先のアカウントとリージョンを設定する。`agentcore create` 時点では空配列 `[]` なので、手動で設定が必要だ。
+
+`<ACCOUNT_ID>` は `aws sts get-caller-identity --query Account --output text` で取得できる。
+
+```bash title="Terminal"
+ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+
+cat > agentcore/aws-targets.json << EOF
+[
+  {
+    "name": "default",
+    "description": "Tokyo (ap-northeast-1)",
+    "account": "${ACCOUNT_ID}",
+    "region": "ap-northeast-1"
+  }
+]
+EOF
+```
+
+リージョンは自分の環境に合わせて変更する。
+
+### デプロイの実行
+
+まず `--plan` でプレビューを確認できる。
+
+```bash title="Terminal"
+agentcore deploy --plan --json
+```
+
+```json title="Output"
+{
+  "success": true,
+  "targetName": "default",
+  "stackName": "AgentCore-AgentCoreTest-default"
+}
+```
+
+問題なければデプロイを実行する。`-y` で確認プロンプトをスキップし、`-v` で詳細なリソース作成イベントが表示される。CDK bootstrap が未実施のアカウント/リージョンでも、CLI が自動で bootstrap を実行する。
+
+```bash title="Terminal"
+agentcore deploy -y -v
+```
+
+CloudFormation 経由で以下のリソースが作成された。
+
+1. `AWS::IAM::Role` + `AWS::IAM::Policy` — エージェント実行用の IAM ロール（Bedrock モデル呼び出し権限付き）
+2. `AWS::BedrockAgentCore::Runtime` — AgentCore Runtime リソース本体
+
+デプロイログによると、全体の所要時間は **1分22秒** だった。CloudFormation のデプロイ自体は約1分で、残りは CDK のビルド・シンセサイズ（約10秒）とバリデーション。
+
+```text title="Output"
+✓ Deployed to 'default' (stack: AgentCore-AgentCoreTest-default)
+
+Outputs:
+  RuntimeArn: arn:aws:bedrock-agentcore:ap-northeast-1:<ACCOUNT_ID>:runtime/AgentCoreTest_AgentCoreTest-yd8lp93Cqp
+  RuntimeId: AgentCoreTest_AgentCoreTest-yd8lp93Cqp
+```
+
+### デプロイ状態の確認
+
+`agentcore status` でデプロイ状態を確認できる。
+
+```bash title="Terminal"
+agentcore status --json
+```
+
+```json title="Output"
+{
+  "success": true,
+  "projectName": "AgentCoreTest",
+  "targetName": "default",
+  "targetRegion": "ap-northeast-1",
+  "resources": [
+    {
+      "resourceType": "agent",
+      "name": "AgentCoreTest",
+      "deploymentState": "deployed",
+      "detail": "READY"
+    }
+  ]
+}
+```
+
+`detail: "READY"` でエージェントが呼び出し可能な状態になっていることがわかる。
+
+## デプロイ済みエージェントの動作確認
+
+### invoke でエージェントを呼び出す
+
+```bash title="Terminal"
+agentcore invoke "Hello! What is 10 + 20? Please use the add_numbers tool." --stream
+```
+
+```text title="Output"
+The sum of 10 + 20 is **30**.
+```
+
+デプロイ済みエージェントでもツール呼び出しを含むストリーミング応答が正常に動作した。invoke ログによると、レスポンス全体の所要時間は約13秒だった。SSE でチャンクが返ってくる様子もログに記録されている。
+
+```text title="Output（invoke ログ抜粋）"
+[12:33:54.704] SSE: data: "The sum"
+[12:33:54.803] SSE: data: " of 10 + 20 "
+[12:33:54.856] SSE: data: "is **"
+[12:33:55.016] SSE: data: "30**."
+[12:33:55.181] INVOKE RESPONSE (12751ms)
+```
+
+### ログで実行過程を確認する
+
+`agentcore logs` でデプロイ済みエージェントのランタイムログを確認できる。
+
+```bash title="Terminal"
+agentcore logs --agent AgentCoreTest --since 10m
+```
+
+ログは OpenTelemetry 形式の構造化ログで出力される。以下のような情報が確認できた。
+
+- **分散トレーシング** — `traceId` と `spanId` が各ログエントリに付与されている
+- **モデル呼び出し** — `gen_ai.system: aws.bedrock` でタグ付けされ、システムプロンプト、ユーザー入力、アシスタント応答がすべて記録される
+- **ツール呼び出しの全過程** — `add_numbers` に `{a: 10, b: 20}` を渡して `30` が返る過程が、tool_calls → toolResult の形式で記録される
+- **セッション管理** — `session.id` でセッションが識別される（デプロイ後は UUID が自動生成される）
+
+特に設定をしなくても、デプロイしたエージェントには OpenTelemetry ベースのオブザーバビリティが自動で組み込まれる。これは `pyproject.toml` に含まれる `aws-opentelemetry-distro` によるもので、AgentCore Runtime が自動的にトレースとログを収集する仕組みだ。
+
+なお、ログの中に `Failed to export span batch code: 400, reason: Bad Request` というエラーが出力されていた。エージェントの動作自体には影響しなかったが、トレースデータの一部が欠損する可能性がある。CLI が Preview 段階であることに起因する問題と思われる。
+
+## まとめ
+
+AgentCore CLI を使って、プロジェクト作成からデプロイ、動作確認までの一連のフローを検証した。
+
+- **4コマンドでライフサイクル完結** — `create → dev → deploy → invoke` だけでエージェントの開発からデプロイまでが完了する。CDK のコードは自動生成されるため、インフラの知識がなくても始められる。初回デプロイも約1分半で完了した。
+- **ローカル開発の体験が良い** — `agentcore dev` で即座にローカルサーバーが起動し、uv による依存関係解決と uvicorn のホットリロードが自動で行われる。ただしメモリ機能はローカルでは使えないため、メモリを使うエージェントの開発ではデプロイが必要になる。
+- **構造化ログが標準装備** — デプロイ後のエージェントは OpenTelemetry ベースの構造化ログが自動で有効になり、トレース ID 付きでモデル呼び出しやツール実行の全過程が記録される。`agentcore logs` で手軽に確認できる。
+- **設定ファイル中心の宣言的な設計** — `agentcore.json` にエージェント、メモリ、クレデンシャル、評価器をすべて宣言的に定義し、`agentcore deploy` で反映する。リソースの追加・削除も `agentcore add` / `agentcore remove` → `agentcore deploy` のパターンで統一されている。
+
+今回はシンプルな構成での検証だったが、CLI は Memory（SEMANTIC / SUMMARIZATION / USER_PREFERENCE）、Gateway（MCP サーバー連携）、Evaluations（LLM-as-a-Judge による品質評価）などの機能もサポートしている。特に Evaluations はエージェントの品質管理において重要な機能なので、別途検証したい。
+
+## クリーンアップ
+
+```bash title="Terminal"
+# プロジェクト内のリソース定義をすべて削除
+agentcore remove all --force
+
+# AWS リソースを削除（空の状態をデプロイして CloudFormation スタックを削除）
+agentcore deploy -y
+
+# CLI のアンインストール（不要な場合）
+npm uninstall -g @aws/agentcore
+```

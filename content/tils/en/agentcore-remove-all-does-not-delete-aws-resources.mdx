@@ -1,0 +1,26 @@
+---
+title: "agentcore remove all does not delete AWS resources"
+description: "agentcore remove all --force only resets local config files. AWS resources remain until you run agentcore deploy to apply the empty state."
+date: "2026-03-23"
+published: true
+tags: ["bedrock", "agentcore", "agentcore-cli"]
+---
+
+I ran `agentcore remove all --force` expecting it to tear down my deployed agent, and got this:
+
+```json title="Output"
+{
+  "success": true,
+  "message": "All schemas reset to empty state",
+  "note": "Your source code has not been modified. Run `agentcore deploy` to apply changes to AWS."
+}
+```
+
+`remove all` only resets the agents / memories / credentials arrays in `agentcore.json` to empty. **The CloudFormation stack and AgentCore Runtime resources on AWS remain untouched.** To actually delete AWS resources, you need to deploy the empty state:
+
+```bash title="Terminal"
+agentcore remove all --force
+agentcore deploy -y              # This tears down the CloudFormation stack
+```
+
+The CLI follows a consistent pattern: `agentcore.json` is the declarative state definition, and `deploy` applies that state to AWS. `remove` only modifies the local definition — AWS changes always go through `deploy`. Not intuitive at first, but it prevents accidental deletions.
