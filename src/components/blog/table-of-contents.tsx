@@ -53,7 +53,7 @@ export function TableOfContents({ headings, locale }: TableOfContentsProps) {
         {t.toc.title}
       </summary>
       <nav aria-label={t.toc.title} className="px-5 py-3">
-        <ul className="space-y-0.5">
+        <ul className="space-y-0">
           {headings.map((heading) => {
             const isActive = activeId === heading.id;
             return (
@@ -72,7 +72,7 @@ export function TableOfContents({ headings, locale }: TableOfContentsProps) {
                   }}
                   className={`block rounded-md px-3 py-1 text-[0.9375rem] transition-colors hover:bg-muted/50 hover:text-foreground ${
                     isActive
-                      ? "border-l-2 border-foreground bg-muted/30 font-medium text-foreground"
+                      ? "border-l-2 border-transparent bg-muted/30 font-medium text-foreground"
                       : "border-l-2 border-transparent text-muted-foreground"
                   }`}
                 >
