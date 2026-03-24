@@ -1,0 +1,430 @@
+---
+title: "Aurora Blue/Green in Practice — Approaching Zero Downtime with the AWS JDBC Driver Plugin"
+description: "Compared downtime during Blue/Green Switchover across Plain JDBC, HikariCP with retry, and AWS JDBC Driver BG plugin. The plugin achieved 0 failures out of 400 queries. HikariCP kept connecting to the old writer — a critical pitfall."
+date: "2026-03-24"
+published: true
+featured: false
+categories: [infrastructure]
+tags: ["aws", "aurora", "postgresql", "rds", "blue-green-deployment", "database", "java", "jdbc"]
+series: "aurora-blue-green"
+seriesOrder: 2
+---
+
+## Introduction
+
+In the [previous article](/en/blog/2026/03/24/aurora-blue-green-downtime-measurement), I measured 26 seconds of downtime and 6 connection failures during an Aurora PostgreSQL Blue/Green Switchover using psql. DNS TTL of 60 seconds was identified as the primary bottleneck.
+
+The AWS official blog claims the [AWS JDBC Driver Blue/Green plugin](https://aws.amazon.com/blogs/database/achieve-near-zero-downtime-database-maintenance-by-using-blue-green-deployments-with-aws-jdbc-driver/) can achieve "near-zero downtime." But many Java applications use connection pools like HikariCP, raising the question: "Isn't retry logic enough?"
+
+In this article, I run three patterns simultaneously against the same Blue/Green Switchover and compare the results:
+
+1. **Plain JDBC** (no retry) — baseline
+2. **HikariCP + application retry** (3 retries, 1s backoff) — common production setup
+3. **AWS JDBC Driver Blue/Green plugin** — official recommendation
+
+## Test Environment
+
+| Item | Value |
+| --- | --- |
+| Region | ap-northeast-1 (Tokyo) |
+| Engine | Aurora PostgreSQL 16.9 (Blue) → 17.6 (Green) |
+| Instance class | db.r6g.large |
+| Topology | Writer × 1 + Reader × 1 |
+| Java | OpenJDK 21 |
+| PostgreSQL JDBC | 42.7.5 |
+| AWS JDBC Wrapper | 2.6.4 |
+| HikariCP | 6.2.1 |
+| Workload | `SELECT inet_server_addr()` every 1 second, 400 queries |
+
+Prerequisites:
+
+- Same Aurora cluster setup as Part 1 (logical replication enabled)
+- Java 21 + Maven
+- AWS CLI configured
+
+Skip to [Summary](#summary) if you only want the findings.
+
+## Test Application
+
+All three patterns are packaged in a single Java application. Each runs 400 queries at 1-second intervals, outputting timestamp, success/failure, latency, and server IP in CSV format.
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">pom.xml (dependencies)</summary>
+
+```xml title="pom.xml"
+<dependencies>
+    <dependency>
+        <groupId>org.postgresql</groupId>
+        <artifactId>postgresql</artifactId>
+        <version>42.7.5</version>
+    </dependency>
+    <dependency>
+        <groupId>software.amazon.jdbc</groupId>
+        <artifactId>aws-advanced-jdbc-wrapper</artifactId>
+        <version>2.6.4</version>
+    </dependency>
+    <dependency>
+        <groupId>com.zaxxer</groupId>
+        <artifactId>HikariCP</artifactId>
+        <version>6.2.1</version>
+    </dependency>
+</dependencies>
+```
+
+</details>
+
+### Pattern 1: Plain JDBC
+
+Creates a new connection for each query with no retry logic. The simplest possible setup.
+
+```java title="Plain JDBC (core)"
+String url = "jdbc:postgresql://" + endpoint + ":5432/postgres"
+        + "?connectTimeout=3&socketTimeout=3";
+try (Connection conn = DriverManager.getConnection(url, "postgres", password);
+     Statement stmt = conn.createStatement();
+     ResultSet rs = stmt.executeQuery("SELECT inet_server_addr()::text")) {
+    // success
+} catch (Exception e) {
+    // fail — no retry
+}
+```
+
+### Pattern 2: HikariCP + Retry
+
+Uses a connection pool with up to 3 retries and 1-second backoff. Represents a common production configuration.
+
+```java title="HikariCP + retry (core)"
+HikariConfig config = new HikariConfig();
+config.setJdbcUrl("jdbc:postgresql://" + endpoint + ":5432/postgres");
+config.setMaximumPoolSize(5);
+config.setConnectionTimeout(3000);
+HikariDataSource ds = new HikariDataSource(config);
+
+for (int attempt = 1; attempt <= 3; attempt++) {
+    try (Connection conn = ds.getConnection();
+         Statement stmt = conn.createStatement();
+         ResultSet rs = stmt.executeQuery("SELECT inet_server_addr()::text")) {
+        // success — break
+    } catch (Exception e) {
+        if (attempt == 3) { /* fail */ }
+        else { Thread.sleep(1000); }
+    }
+}
+```
+
+### Pattern 3: AWS JDBC Driver Blue/Green Plugin
+
+Enables the `bg` plugin in the AWS JDBC Wrapper. Only requires changing the connection URL to `jdbc:aws-wrapper:postgresql://` and setting plugin parameters.
+
+```java title="AWS JDBC Wrapper BG plugin (core)"
+String url = "jdbc:aws-wrapper:postgresql://" + endpoint + ":5432/postgres";
+Properties props = new Properties();
+props.setProperty("user", "postgres");
+props.setProperty("password", password);
+props.setProperty("wrapperPlugins", "bg,failover2,efm2");
+props.setProperty("bgdId", "bg-test-demo");
+props.setProperty("bgSwitchoverTimeoutMs", "600000");
+
+try (Connection conn = DriverManager.getConnection(url, props);
+     Statement stmt = conn.createStatement();
+     ResultSet rs = stmt.executeQuery("SELECT inet_server_addr()::text")) {
+    // success — plugin handles routing automatically
+}
+```
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">SwitchoverTest.java (full test application)</summary>
+
+```java title="SwitchoverTest.java"
+package bgtest;
+
+import java.sql.*;
+import java.time.Instant;
+import java.time.Duration;
+import java.util.Properties;
+import com.zaxxer.hikari.HikariConfig;
+import com.zaxxer.hikari.HikariDataSource;
+
+public class SwitchoverTest {
+    static final int CONNECT_TIMEOUT_SEC = 3;
+    static final int QUERY_TIMEOUT_SEC = 3;
+
+    public static void main(String[] args) throws Exception {
+        if (args.length < 3) {
+            System.err.println("Usage: SwitchoverTest <plain|hikari|wrapper> <endpoint> <password> [intervalMs] [maxQueries]");
+            System.exit(1);
+        }
+        String mode = args[0], endpoint = args[1], password = args[2];
+        int intervalMs = args.length > 3 ? Integer.parseInt(args[3]) : 1000;
+        int maxQueries = args.length > 4 ? Integer.parseInt(args[4]) : 400;
+
+        System.out.println("timestamp,query_num,status,latency_ms,server_ip,error");
+
+        switch (mode) {
+            case "plain"   -> runPlain(endpoint, password, intervalMs, maxQueries);
+            case "hikari"  -> runHikari(endpoint, password, intervalMs, maxQueries);
+            case "wrapper" -> runWrapper(endpoint, password, intervalMs, maxQueries);
+        }
+    }
+
+    static void runPlain(String endpoint, String password, int intervalMs, int max) throws Exception {
+        String url = "jdbc:postgresql://" + endpoint + ":5432/postgres"
+                + "?connectTimeout=" + CONNECT_TIMEOUT_SEC + "&socketTimeout=" + QUERY_TIMEOUT_SEC;
+        int ok = 0, fail = 0;
+        for (int n = 1; n <= max; n++) {
+            Instant start = Instant.now();
+            try (Connection c = DriverManager.getConnection(url, "postgres", password);
+                 Statement s = c.createStatement();
+                 ResultSet r = s.executeQuery("SELECT inet_server_addr()::text")) {
+                r.next();
+                long ms = Duration.between(start, Instant.now()).toMillis();
+                System.out.println(Instant.now()+","+n+",OK,"+ms+","+r.getString(1)+",");
+                ok++;
+            } catch (Exception e) {
+                long ms = Duration.between(start, Instant.now()).toMillis();
+                System.out.println(Instant.now()+","+n+",FAIL,"+ms+",,"+e.getMessage().replace('\n',' ').substring(0,Math.min(100,e.getMessage().length())));
+                fail++;
+            }
+            Thread.sleep(intervalMs);
+        }
+        System.err.println("=== Plain: OK="+ok+" FAIL="+fail+" ===");
+    }
+
+    static void runHikari(String endpoint, String password, int intervalMs, int max) throws Exception {
+        HikariConfig cfg = new HikariConfig();
+        cfg.setJdbcUrl("jdbc:postgresql://"+endpoint+":5432/postgres");
+        cfg.setUsername("postgres"); cfg.setPassword(password);
+        cfg.setMaximumPoolSize(5); cfg.setConnectionTimeout(3000);
+        HikariDataSource ds = new HikariDataSource(cfg);
+        int ok = 0, fail = 0;
+        for (int n = 1; n <= max; n++) {
+            Instant start = Instant.now();
+            boolean success = false;
+            for (int a = 1; a <= 3 && !success; a++) {
+                try (Connection c = ds.getConnection();
+                     Statement s = c.createStatement();
+                     ResultSet r = s.executeQuery("SELECT inet_server_addr()::text")) {
+                    r.next();
+                    long ms = Duration.between(start, Instant.now()).toMillis();
+                    System.out.println(Instant.now()+","+n+",OK,"+ms+","+r.getString(1)+","+(a>1?"retry="+a:""));
+                    success = true; ok++;
+                } catch (Exception e) {
+                    if (a == 3) {
+                        long ms = Duration.between(start, Instant.now()).toMillis();
+                        System.out.println(Instant.now()+","+n+",FAIL,"+ms+",,"+e.getMessage().replace('\n',' ').substring(0,Math.min(100,e.getMessage().length())));
+                        fail++;
+                    } else Thread.sleep(1000);
+                }
+            }
+            Thread.sleep(intervalMs);
+        }
+        ds.close();
+        System.err.println("=== HikariCP: OK="+ok+" FAIL="+fail+" ===");
+    }
+
+    static void runWrapper(String endpoint, String password, int intervalMs, int max) throws Exception {
+        String url = "jdbc:aws-wrapper:postgresql://"+endpoint+":5432/postgres";
+        Properties p = new Properties();
+        p.setProperty("user","postgres"); p.setProperty("password",password);
+        p.setProperty("wrapperPlugins","bg,failover2,efm2");
+        p.setProperty("bgdId","bg-test-demo");
+        p.setProperty("bgSwitchoverTimeoutMs","600000");
+        p.setProperty("blue-green-monitoring-connectTimeout","20000");
+        p.setProperty("blue-green-monitoring-socketTimeout","20000");
+        p.setProperty("connectTimeout",String.valueOf(CONNECT_TIMEOUT_SEC));
+        p.setProperty("socketTimeout",String.valueOf(QUERY_TIMEOUT_SEC));
+        p.setProperty("wrapperLoggerLevel","fine");
+        int ok = 0, fail = 0;
+        for (int n = 1; n <= max; n++) {
+            Instant start = Instant.now();
+            try (Connection c = DriverManager.getConnection(url, p);
+                 Statement s = c.createStatement();
+                 ResultSet r = s.executeQuery("SELECT inet_server_addr()::text")) {
+                r.next();
+                long ms = Duration.between(start, Instant.now()).toMillis();
+                System.out.println(Instant.now()+","+n+",OK,"+ms+","+r.getString(1)+",");
+                ok++;
+            } catch (Exception e) {
+                long ms = Duration.between(start, Instant.now()).toMillis();
+                System.out.println(Instant.now()+","+n+",FAIL,"+ms+",,"+e.getMessage().replace('\n',' ').substring(0,Math.min(100,e.getMessage().length())));
+                fail++;
+            }
+            Thread.sleep(intervalMs);
+        }
+        System.err.println("=== Wrapper: OK="+ok+" FAIL="+fail+" ===");
+    }
+}
+```
+
+</details>
+
+## Test Procedure
+
+### Environment Setup
+
+Uses the same Aurora PostgreSQL 16.9 cluster (with logical replication enabled) from Part 1. See the [previous article](/en/blog/2026/03/24/aurora-blue-green-downtime-measurement) for cluster setup.
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">Java project build steps</summary>
+
+```bash title="Terminal"
+# Install Java 21 + Maven (Ubuntu)
+sudo apt-get install -y openjdk-21-jdk maven
+
+# Create project directory
+mkdir -p bg-switchover-test/src/main/java/bgtest
+
+# Place pom.xml and SwitchoverTest.java (use the code above)
+
+# Build
+cd bg-switchover-test
+mvn package -q
+
+# Build classpath
+CP="target/bg-switchover-test-1.0.jar"
+for jar in target/lib/*.jar; do CP="$CP:$jar"; done
+
+# Verify (run 2 queries only)
+ENDPOINT="bg-test-apg.cluster-xxxxx.ap-northeast-1.rds.amazonaws.com"
+java -cp "$CP" bgtest.SwitchoverTest plain "$ENDPOINT" '<password>' 1000 2
+```
+
+</details>
+
+### Creating the Blue/Green Deployment and Running the Switchover
+
+Blue/Green deployment creation follows the same steps as [Part 1](/en/blog/2026/03/24/aurora-blue-green-downtime-measurement) Step 3. Once the Green environment reaches `AVAILABLE`, start all three patterns simultaneously and trigger the switchover.
+
+```bash title="Terminal"
+ENDPOINT="bg-test-apg.cluster-xxxxx.ap-northeast-1.rds.amazonaws.com"
+
+# Start all 3 patterns simultaneously
+java -cp "$CP" bgtest.SwitchoverTest plain  "$ENDPOINT" '<password>' 1000 400 > switchover-plain.log  2>&1 &
+java -cp "$CP" bgtest.SwitchoverTest hikari "$ENDPOINT" '<password>' 1000 400 > switchover-hikari.log 2>&1 &
+java -cp "$CP" bgtest.SwitchoverTest wrapper "$ENDPOINT" '<password>' 1000 400 > switchover-wrapper.log 2>&1 &
+
+# Trigger switchover
+aws rds switchover-blue-green-deployment \
+  --blue-green-deployment-identifier bgd-xxxxx \
+  --switchover-timeout 300 \
+  --region ap-northeast-1
+```
+
+## Results
+
+### Pattern 1: Plain JDBC — 8 Connection Failures
+
+```text title="Output (Plain JDBC)"
+04:56:35.879  #44  OK      90ms  172.31.47.234  ← Blue Writer (PG 16.9)
+04:56:39.894  #45  FAIL  3006ms               ← Timeouts begin
+04:56:43.899  #46  FAIL  3003ms
+04:56:47.904  #47  FAIL  3004ms
+04:56:51.933  #48  FAIL  3029ms
+04:56:55.938  #49  FAIL  3004ms
+04:56:59.933  #50  FAIL  2994ms
+04:57:03.937  #51  FAIL  3003ms
+04:57:07.941  #52  FAIL  3003ms               ← 8 consecutive timeouts
+04:57:11.071  #53  OK   2128ms  172.31.47.234  ← Recovery (still old IP)
+  ... #53–#60 connect to old IP ...
+04:57:19.921  #61  OK    115ms  172.31.32.43   ← Green Writer (PG 17.6)
+```
+
+Similar to the psql test from Part 1 (6 failures), but Java's `connectTimeout=3` behavior resulted in 8 failures. Downtime was approximately 32 seconds (#45 at 04:56:39 to #53 at 04:57:11). After recovery, the application continued connecting to the old IP for another ~8 seconds before switching to Green at #61.
+
+### Pattern 2: HikariCP + Retry — 2 Failures, but a Critical Pitfall
+
+```text title="Output (HikariCP + retry)"
+04:56:35.953  #48  OK      17ms  172.31.47.234  ← Last normal query
+04:56:47.961  #49  FAIL  11006ms               ← All 3 retries failed (3s × 3 + backoff)
+04:56:59.956  #50  FAIL  10992ms               ← Same
+04:57:11.429  #51  OK    10471ms 172.31.47.234  ← Recovered on 3rd retry (still old IP)
+```
+
+Retry logic reduced failures to 2. However, **all 400 queries connected to the old writer IP (172.31.47.234)**.
+
+```text title="IP transition (HikariCP)"
+398 queries  172.31.47.234  ← Old Blue Writer (demoted to Reader after switchover)
+```
+
+This is a critical pitfall with HikariCP. The connection pool reuses existing TCP connections, so even after DNS updates, it never switches to the new writer. After switchover, the application **keeps connecting to the old writer (now a reader)**. Read queries succeed, but write queries would fail with `read-only transaction` errors.
+
+### Pattern 3: AWS JDBC Wrapper BG Plugin — 0 Failures
+
+```text title="Output (AWS JDBC Wrapper)"
+04:56:35.838  #43  OK      100ms  172.31.47.234  ← Blue Writer
+04:57:12.511  #44  OK    35662ms  172.31.47.234  ← IN_PROGRESS, plugin suspends query
+04:57:13.614  #45  OK       93ms  172.31.32.43   ← POST phase, auto-routed to Green
+  ... all OK ...
+04:57:50.xxx  #78  OK       94ms  172.31.47.234  ← DNS updated, hostname-based routing resumes
+```
+
+**0 connection failures out of 400 queries**. However, note that #44 took ~36 seconds. The plugin suspended query execution during the IN_PROGRESS phase and resumed after the switchover completed. No connection was dropped, but applications with short HTTP request timeouts could be affected at a higher layer.
+
+The IP transition pattern (`Blue → Green → Blue`) occurs because the plugin temporarily uses IP-based routing to the Green environment during the POST phase, then reverts to hostname-based routing after DNS updates complete. The cluster endpoint ultimately points to the Green environment.
+
+The BG plugin logs show the switchover timeline:
+
+```text title="Output (BG plugin phase transitions)"
+04:55:48.233  -47890ms  NOT_CREATED
+04:55:48.508  -47616ms  CREATED
+04:56:31.485   -4633ms  PREPARATION
+04:56:36.119       0ms  IN_PROGRESS
+04:56:48.585   12466ms  POST
+04:57:01.421   25311ms  Green topology changed
+04:57:50.168   74064ms  Green DNS removed
+04:57:50.433   74329ms  Blue DNS updated
+04:57:50.433   74329ms  COMPLETED
+```
+
+The IN_PROGRESS phase (actual switchover) lasted about 12 seconds, but no queries failed during this time. The plugin suspended query execution during IN_PROGRESS and resumed with IP-based routing to the Green environment once the POST phase began.
+
+## Summary
+
+### Results Comparison
+
+| Metric | Plain JDBC | HikariCP + Retry | AWS JDBC Wrapper BG |
+| --- | --- | --- | --- |
+| Connection failures | 8 | 2 | **0** |
+| Downtime | ~32s | ~12s (with retries) | **0s** (but ~36s suspend) |
+| Post-switchover target | ✅ Green (~8s delay) | ❌ Old Blue | ✅ Green |
+| Write workload safety | ✅ (after switch) | ❌ read-only error risk | ✅ |
+| Implementation complexity | None | Low | Medium (dependency + config) |
+
+### Key Takeaways
+
+- **HikariCP retry alone is not enough** — Retry reduces connection failures, but the connection pool keeps reusing TCP connections to the old writer. After switchover, the application stays connected to the old environment. Write workloads would hit `read-only transaction` errors. This is a fundamental incompatibility between DNS-based endpoint switching and connection pooling.
+- **The AWS JDBC Driver BG plugin truly achieves zero downtime** — 0 failures out of 400 queries. The plugin monitors RDS metadata tables and switches connections using IP-based routing, completely bypassing the DNS TTL problem. However, during the IN_PROGRESS phase, query execution is suspended — one query took ~36 seconds. If your application has HTTP request timeouts shorter than this, the upper layer may time out.
+- **Plugin adoption cost is low** — Change the connection URL to `jdbc:aws-wrapper:postgresql://` and add `bg` to `wrapperPlugins`. No application code changes needed. However, it's only available for Java (JDBC).
+- **Connection pools need connection validation** — If using HikariCP without the BG plugin, configure `connectionTestQuery` and `validationTimeout` to detect and discard stale connections after switchover. Even so, this alone doesn't guarantee switching to the new writer.
+
+## Cleanup
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">Resource deletion commands</summary>
+
+```bash title="Terminal"
+# Delete Blue/Green deployment
+aws rds delete-blue-green-deployment \
+  --blue-green-deployment-identifier bgd-xxxxx \
+  --region ap-northeast-1
+
+# Delete old Blue instances and cluster
+aws rds delete-db-instance --db-instance-identifier bg-test-apg-reader-old1 --skip-final-snapshot
+aws rds delete-db-instance --db-instance-identifier bg-test-apg-writer-old1 --skip-final-snapshot
+aws rds delete-db-cluster --db-cluster-identifier bg-test-apg-old1 --skip-final-snapshot
+
+# Delete new cluster (promoted Green) instances and cluster
+aws rds delete-db-instance --db-instance-identifier bg-test-apg-reader --skip-final-snapshot
+aws rds delete-db-instance --db-instance-identifier bg-test-apg-writer --skip-final-snapshot
+aws rds delete-db-cluster --db-cluster-identifier bg-test-apg --skip-final-snapshot
+
+# Delete parameter groups and subnet group
+aws rds delete-db-cluster-parameter-group --db-cluster-parameter-group-name bg-test-apg16-params
+aws rds delete-db-cluster-parameter-group --db-cluster-parameter-group-name bg-test-apg17-params
+aws rds delete-db-subnet-group --db-subnet-group-name bg-test-subnet-group
+
+# Remove security group inbound rule
+aws ec2 revoke-security-group-ingress --group-id sg-xxxxx --protocol tcp --port 5432 --cidr <your-ip>/32
+```
+
+</details>
