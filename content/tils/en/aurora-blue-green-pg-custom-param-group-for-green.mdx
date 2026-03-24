@@ -1,0 +1,31 @@
+---
+title: "Aurora PostgreSQL Blue/Green with custom parameter groups requires a pre-created Green parameter group"
+description: "Creating a Blue/Green deployment with a major version upgrade on an Aurora PostgreSQL cluster using a custom parameter group fails with InvalidParameterCombination. You must explicitly specify a Green parameter group."
+date: "2026-03-25"
+published: true
+tags: ["aws", "aurora", "postgresql", "rds", "blue-green-deployment"]
+---
+
+When creating a Blue/Green deployment with a major version upgrade (e.g. PG 16 → 17) on an Aurora PostgreSQL cluster that uses a custom parameter group, you get:
+
+```text title="Output"
+InvalidParameterCombination: The current DB cluster parameter group
+bg-test-apg16-params is custom. You must explicitly specify a new DB cluster
+parameter group, either default or custom, for the engine version upgrade
+```
+
+Pre-create a parameter group for the Green environment and pass it via `--target-db-cluster-parameter-group-name`:
+
+```bash title="Terminal"
+aws rds create-db-cluster-parameter-group \
+  --db-cluster-parameter-group-name my-pg17-params \
+  --db-parameter-group-family aurora-postgresql17 \
+  --description "Params for PG17 green environment"
+
+aws rds create-blue-green-deployment \
+  --source arn:aws:rds:...:cluster:my-cluster \
+  --target-engine-version 17.6 \
+  --target-db-cluster-parameter-group-name my-pg17-params
+```
+
+Aurora MySQL doesn't have this issue — it can create the Green environment with the default parameter group. This is PostgreSQL-specific.

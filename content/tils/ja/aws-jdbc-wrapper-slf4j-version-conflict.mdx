@@ -1,0 +1,39 @@
+---
+title: "aws-advanced-jdbc-wrapper が slf4j-api 1.7 を引き込み HikariCP 6.x と競合する"
+description: "aws-advanced-jdbc-wrapper 2.6.4 が slf4j-api 1.7.36 を推移的依存で持ち込み、HikariCP 6.x が要求する SLF4J 2.x と競合する。exclusion で 1.7 を除外し slf4j-api 2.0 を明示的に指定する。"
+date: "2026-03-25"
+published: true
+tags: ["java", "jdbc", "hikaricp", "slf4j", "maven"]
+---
+
+`aws-advanced-jdbc-wrapper` 2.6.4 と HikariCP 6.2.1 を同じプロジェクトで使うと、以下のエラーが出る。
+
+```text title="Output"
+SLF4J: Failed to load class "org.slf4j.impl.StaticLoggerBinder".
+SLF4J: Defaulting to no-operation (NOP) logger implementation
+```
+
+原因は `aws-advanced-jdbc-wrapper` が `slf4j-api:1.7.36` を推移的依存で持ち込み、`slf4j-simple:2.0.16` と競合するためだ。`target/lib/` に `slf4j-api-1.7.36.jar` と `slf4j-api-2.0.16.jar` が共存してしまう。
+
+`exclusion` で 1.7 を除外し、`slf4j-api` 2.0 を明示的に指定すれば解決する。
+
+```xml title="pom.xml"
+<dependency>
+    <groupId>software.amazon.jdbc</groupId>
+    <artifactId>aws-advanced-jdbc-wrapper</artifactId>
+    <version>2.6.4</version>
+    <exclusions>
+        <exclusion>
+            <groupId>org.slf4j</groupId>
+            <artifactId>slf4j-api</artifactId>
+        </exclusion>
+    </exclusions>
+</dependency>
+<dependency>
+    <groupId>org.slf4j</groupId>
+    <artifactId>slf4j-api</artifactId>
+    <version>2.0.16</version>
+</dependency>
+```
+
+`mvn clean package` で `target/lib/` を再生成するのを忘れずに。`mvn package` だけだと古い jar が残る。

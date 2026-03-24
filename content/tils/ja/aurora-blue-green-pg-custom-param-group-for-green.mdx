@@ -1,0 +1,31 @@
+---
+title: "Aurora PostgreSQL の Blue/Green でカスタムパラメータグループ使用時は Green 用も事前作成が必要"
+description: "カスタムパラメータグループを使っている Aurora PostgreSQL クラスターでメジャーバージョンアップグレードを伴う Blue/Green デプロイメントを作成すると InvalidParameterCombination で失敗する。Green 用のパラメータグループを明示的に指定する必要がある。"
+date: "2026-03-25"
+published: true
+tags: ["aws", "aurora", "postgresql", "rds", "blue-green-deployment"]
+---
+
+カスタムパラメータグループを使っている Aurora PostgreSQL クラスターで、メジャーバージョンアップグレード（例: PG 16 → 17）を伴う Blue/Green デプロイメントを作成しようとすると、以下のエラーが出る。
+
+```text title="Output"
+InvalidParameterCombination: The current DB cluster parameter group
+bg-test-apg16-params is custom. You must explicitly specify a new DB cluster
+parameter group, either default or custom, for the engine version upgrade
+```
+
+Green 環境用のパラメータグループを事前に作成し、`--target-db-cluster-parameter-group-name` で指定する必要がある。
+
+```bash title="Terminal"
+aws rds create-db-cluster-parameter-group \
+  --db-cluster-parameter-group-name my-pg17-params \
+  --db-parameter-group-family aurora-postgresql17 \
+  --description "Params for PG17 green environment"
+
+aws rds create-blue-green-deployment \
+  --source arn:aws:rds:...:cluster:my-cluster \
+  --target-engine-version 17.6 \
+  --target-db-cluster-parameter-group-name my-pg17-params
+```
+
+Aurora MySQL ではデフォルトパラメータグループで Green を作成できるため、この問題は発生しない。PostgreSQL 固有の挙動だ。

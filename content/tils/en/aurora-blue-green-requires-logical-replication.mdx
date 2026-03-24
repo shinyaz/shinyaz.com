@@ -1,0 +1,34 @@
+---
+title: "Aurora Blue/Green deployments require logical replication to be enabled beforehand"
+description: "Running create-blue-green-deployment with the default parameter group fails with SourceClusterNotSupportedFault. Set rds.logical_replication = 1 for PostgreSQL or binlog_format = ROW for MySQL, then reboot all instances."
+date: "2026-03-25"
+published: true
+tags: ["aws", "aurora", "rds", "blue-green-deployment", "postgresql", "mysql"]
+---
+
+Running `create-blue-green-deployment` with the default parameter group fails with:
+
+```text title="Output"
+SourceClusterNotSupportedFault: Blue/Green Deployments require a DB cluster
+with logical replication enabled. Before you create a Blue/Green Deployment
+for a DB cluster, associate the DB cluster with a custom DB cluster parameter
+group that enables logical replication.
+```
+
+You need a custom parameter group with the engine-specific setting:
+
+```bash title="Terminal (PostgreSQL)"
+aws rds modify-db-cluster-parameter-group \
+  --db-cluster-parameter-group-name my-params \
+  --parameters "ParameterName=rds.logical_replication,ParameterValue=1,ApplyMethod=pending-reboot"
+```
+
+```bash title="Terminal (MySQL)"
+aws rds modify-db-cluster-parameter-group \
+  --db-cluster-parameter-group-name my-params \
+  --parameters "ParameterName=binlog_format,ParameterValue=ROW,ApplyMethod=pending-reboot"
+```
+
+Since `ApplyMethod=pending-reboot`, you must **reboot all instances** after applying the parameter group. Check `DBClusterParameterGroupStatus` is `in-sync` via `describe-db-clusters`. Leaving it at `pending-reboot` causes the same error when creating the Blue/Green deployment.
+
+See the [Aurora Blue/Green in Practice series](/en/blog/2026/03/25/aurora-blue-green-downtime-measurement) for the full verification.

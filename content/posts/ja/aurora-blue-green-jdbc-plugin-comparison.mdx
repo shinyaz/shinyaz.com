@@ -1,7 +1,7 @@
 ---
 title: "Aurora Blue/Green 実践検証 — AWS JDBC Driver プラグインでゼロダウンタイムに迫る"
 description: "Blue/Green Switchover 中のダウンタイムを Plain JDBC・HikariCP リトライ・AWS JDBC Driver BG プラグインの3パターンで比較。プラグインは400クエリ中0回の接続失敗を達成。HikariCP は旧 Writer に接続し続ける落とし穴も発見した。"
-date: "2026-03-24"
+date: "2026-03-25"
 published: true
 featured: false
 categories: [infrastructure]
@@ -12,7 +12,7 @@ seriesOrder: 2
 
 ## はじめに
 
-[前回の記事](/ja/blog/2026/03/24/aurora-blue-green-downtime-measurement)では、Aurora PostgreSQL の Blue/Green Switchover 中に psql で26秒・6回の接続失敗を観測した。DNS TTL 60秒がダウンタイムの主要因であることも確認した。
+[前回の記事](/ja/blog/2026/03/25/aurora-blue-green-downtime-measurement)では、Aurora PostgreSQL の Blue/Green Switchover 中に psql で26秒・6回の接続失敗を観測した。DNS TTL 60秒がダウンタイムの主要因であることも確認した。
 
 AWS の公式ブログでは、[AWS JDBC Driver の Blue/Green プラグイン](https://aws.amazon.com/jp/blogs/database/achieve-near-zero-downtime-database-maintenance-by-using-blue-green-deployments-with-aws-jdbc-driver/)を使うことで「ほぼゼロダウンタイム」を実現できるとしている。しかし、多くの Java アプリケーションは HikariCP などのコネクションプールを使っており、「リトライロジックを入れれば十分では？」という疑問がある。
 
@@ -30,17 +30,17 @@ AWS の公式ブログでは、[AWS JDBC Driver の Blue/Green プラグイン](
 | エンジン | Aurora PostgreSQL 16.9（Blue）→ 17.6（Green） |
 | インスタンスクラス | db.r6g.large |
 | 構成 | Writer × 1 + Reader × 1 |
+| VPC | デフォルト VPC（3 AZ） |
 | Java | OpenJDK 21 |
 | PostgreSQL JDBC | 42.7.5 |
 | AWS JDBC Wrapper | 2.6.4 |
 | HikariCP | 6.2.1 |
-| クエリ | `SELECT inet_server_addr()` を1秒間隔で400回 |
+| 接続テスト間隔 | 1秒（`SELECT inet_server_addr()` を400回実行） |
 
 前提条件:
 
-- 前回の記事と同じ Aurora クラスター構成（論理レプリケーション有効化済み）
+- AWS CLI セットアップ済み（`rds:*`、`ec2:*` の操作権限）
 - Java 21 + Maven
-- AWS CLI セットアップ済み
 
 結果だけ知りたい場合は [まとめ](#まとめ) にスキップできる。
 
@@ -49,26 +49,80 @@ AWS の公式ブログでは、[AWS JDBC Driver の Blue/Green プラグイン](
 3パターンを1つの Java アプリにまとめた。各パターンは1秒間隔で400回クエリを実行し、タイムスタンプ・成功/失敗・レイテンシ・接続先 IP を CSV 形式で出力する。
 
 <details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
-<summary className="cursor-pointer font-medium">pom.xml（依存関係）</summary>
+<summary className="cursor-pointer font-medium">pom.xml</summary>
 
 ```xml title="pom.xml"
-<dependencies>
-    <dependency>
-        <groupId>org.postgresql</groupId>
-        <artifactId>postgresql</artifactId>
-        <version>42.7.5</version>
-    </dependency>
-    <dependency>
-        <groupId>software.amazon.jdbc</groupId>
-        <artifactId>aws-advanced-jdbc-wrapper</artifactId>
-        <version>2.6.4</version>
-    </dependency>
-    <dependency>
-        <groupId>com.zaxxer</groupId>
-        <artifactId>HikariCP</artifactId>
-        <version>6.2.1</version>
-    </dependency>
-</dependencies>
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+    <groupId>bgtest</groupId>
+    <artifactId>bg-switchover-test</artifactId>
+    <version>1.0</version>
+    <properties>
+        <maven.compiler.source>21</maven.compiler.source>
+        <maven.compiler.target>21</maven.compiler.target>
+    </properties>
+    <dependencies>
+        <dependency>
+            <groupId>org.postgresql</groupId>
+            <artifactId>postgresql</artifactId>
+            <version>42.7.5</version>
+        </dependency>
+        <dependency>
+            <groupId>software.amazon.jdbc</groupId>
+            <artifactId>aws-advanced-jdbc-wrapper</artifactId>
+            <version>2.6.4</version>
+            <exclusions>
+                <exclusion>
+                    <groupId>org.slf4j</groupId>
+                    <artifactId>slf4j-api</artifactId>
+                </exclusion>
+            </exclusions>
+        </dependency>
+        <dependency>
+            <groupId>com.zaxxer</groupId>
+            <artifactId>HikariCP</artifactId>
+            <version>6.2.1</version>
+        </dependency>
+        <dependency>
+            <groupId>org.slf4j</groupId>
+            <artifactId>slf4j-api</artifactId>
+            <version>2.0.16</version>
+        </dependency>
+        <dependency>
+            <groupId>org.slf4j</groupId>
+            <artifactId>slf4j-simple</artifactId>
+            <version>2.0.16</version>
+        </dependency>
+    </dependencies>
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-jar-plugin</artifactId>
+                <version>3.4.2</version>
+                <configuration>
+                    <archive><manifest><mainClass>bgtest.SwitchoverTest</mainClass></manifest></archive>
+                </configuration>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-dependency-plugin</artifactId>
+                <version>3.8.1</version>
+                <executions>
+                    <execution>
+                        <id>copy-dependencies</id>
+                        <phase>package</phase>
+                        <goals><goal>copy-dependencies</goal></goals>
+                        <configuration><outputDirectory>${project.build.directory}/lib</outputDirectory></configuration>
+                    </execution>
+                </executions>
+            </plugin>
+        </plugins>
+    </build>
+</project>
 ```
 
 </details>
@@ -260,9 +314,71 @@ public class SwitchoverTest {
 
 ## 検証手順
 
-### 環境準備
+### Aurora クラスターの構築
 
-第1回と同じ Aurora PostgreSQL 16.9 クラスター（論理レプリケーション有効化済み）を使用する。クラスター構築手順は[前回の記事](/ja/blog/2026/03/24/aurora-blue-green-downtime-measurement)を参照。
+Aurora PostgreSQL 16.9 クラスター（Writer + Reader）を構築し、論理レプリケーションを有効化する。
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">Aurora クラスター構築手順</summary>
+
+```bash title="Terminal"
+# サブネットグループ作成
+aws rds create-db-subnet-group \
+  --db-subnet-group-name bg-test-subnet-group \
+  --db-subnet-group-description "Subnet group for Blue/Green test" \
+  --subnet-ids '["subnet-xxxxx","subnet-yyyyy","subnet-zzzzz"]' \
+  --region ap-northeast-1
+
+# カスタムパラメータグループ（論理レプリケーション有効化）
+aws rds create-db-cluster-parameter-group \
+  --db-cluster-parameter-group-name bg-test-apg16-params \
+  --db-parameter-group-family aurora-postgresql16 \
+  --description "Custom params for Blue/Green test"
+aws rds modify-db-cluster-parameter-group \
+  --db-cluster-parameter-group-name bg-test-apg16-params \
+  --parameters "ParameterName=rds.logical_replication,ParameterValue=1,ApplyMethod=pending-reboot"
+
+# クラスター作成
+aws rds create-db-cluster \
+  --db-cluster-identifier bg-test-apg \
+  --engine aurora-postgresql --engine-version 16.9 \
+  --master-username postgres --master-user-password '<your-password>' \
+  --db-subnet-group-name bg-test-subnet-group \
+  --db-cluster-parameter-group-name bg-test-apg16-params \
+  --storage-encrypted --no-deletion-protection \
+  --region ap-northeast-1
+
+# Writer / Reader インスタンス（パブリックアクセス有効）
+aws rds create-db-instance \
+  --db-instance-identifier bg-test-apg-writer \
+  --db-cluster-identifier bg-test-apg \
+  --db-instance-class db.r6g.large \
+  --engine aurora-postgresql --publicly-accessible \
+  --region ap-northeast-1
+aws rds create-db-instance \
+  --db-instance-identifier bg-test-apg-reader \
+  --db-cluster-identifier bg-test-apg \
+  --db-instance-class db.r6g.large \
+  --engine aurora-postgresql --publicly-accessible \
+  --region ap-northeast-1
+
+# インスタンスが available になったら再起動（パラメータグループ適用）
+aws rds reboot-db-instance --db-instance-identifier bg-test-apg-writer
+aws rds reboot-db-instance --db-instance-identifier bg-test-apg-reader
+
+# SG にローカル IP からの接続を許可
+SG_ID=$(aws rds describe-db-clusters --db-cluster-identifier bg-test-apg \
+  --query 'DBClusters[0].VpcSecurityGroups[0].VpcSecurityGroupId' \
+  --output text --region ap-northeast-1)
+MY_IP=$(curl -s https://checkip.amazonaws.com)
+aws ec2 authorize-security-group-ingress \
+  --group-id "${SG_ID}" --protocol tcp --port 5432 \
+  --cidr "${MY_IP}/32" --region ap-northeast-1
+```
+
+</details>
+
+### Java プロジェクトのビルド
 
 <details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
 <summary className="cursor-pointer font-medium">Java プロジェクトのビルド手順</summary>
@@ -293,7 +409,39 @@ java -cp "$CP" bgtest.SwitchoverTest plain "$ENDPOINT" '<password>' 1000 2
 
 ### Blue/Green デプロイメントの作成と Switchover
 
-Blue/Green デプロイメントの作成手順は[前回の記事](/ja/blog/2026/03/24/aurora-blue-green-downtime-measurement)の Step 3 と同じだ。Green 環境が `AVAILABLE` になったら、3パターンを同時にバックグラウンドで起動し、Switchover を実行する。
+Green 環境用のパラメータグループを作成し、Blue/Green デプロイメントを作成する。
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">Blue/Green デプロイメント作成手順</summary>
+
+```bash title="Terminal"
+# Green 用パラメータグループ（PG 17）
+aws rds create-db-cluster-parameter-group \
+  --db-cluster-parameter-group-name bg-test-apg17-params \
+  --db-parameter-group-family aurora-postgresql17 \
+  --description "Custom params for PG17 green environment"
+aws rds modify-db-cluster-parameter-group \
+  --db-cluster-parameter-group-name bg-test-apg17-params \
+  --parameters "ParameterName=rds.logical_replication,ParameterValue=1,ApplyMethod=pending-reboot"
+
+# Blue/Green デプロイメント作成（約30分かかる）
+aws rds create-blue-green-deployment \
+  --blue-green-deployment-name bg-test-upgrade \
+  --source arn:aws:rds:ap-northeast-1:<account-id>:cluster:bg-test-apg \
+  --target-engine-version 17.6 \
+  --target-db-cluster-parameter-group-name bg-test-apg17-params \
+  --region ap-northeast-1
+
+# 進捗確認
+aws rds describe-blue-green-deployments \
+  --blue-green-deployment-identifier bgd-xxxxx \
+  --query 'BlueGreenDeployments[0].{Status:Status,Tasks:Tasks[].{Name:Name,Status:Status}}' \
+  --region ap-northeast-1
+```
+
+</details>
+
+Green 環境が `AVAILABLE` になったら、3パターンを同時にバックグラウンドで起動し、Switchover を実行する。
 
 ```bash title="Terminal"
 ENDPOINT="bg-test-apg.cluster-xxxxx.ap-northeast-1.rds.amazonaws.com"

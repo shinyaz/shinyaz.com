@@ -1,0 +1,459 @@
+---
+title: "Aurora Blue/Green 実践検証 — Aurora MySQL での挙動の違いを確認する"
+description: "Aurora MySQL で Blue/Green Switchover を検証し、PostgreSQL との違いを比較。IN_PROGRESS フェーズが3秒と短い一方、BG プラグインでも1回の接続エラーが発生。HikariCP の旧 Writer 接続問題はエンジン共通。Plain JDBC は復旧後も旧ホストに31秒間接続し続けた。"
+date: "2026-03-25"
+published: true
+featured: false
+categories: [infrastructure]
+tags: ["aws", "aurora", "mysql", "rds", "blue-green-deployment", "database", "java", "jdbc"]
+series: "aurora-blue-green"
+seriesOrder: 3
+seriesExtra: true
+---
+
+## はじめに
+
+[第1回](/ja/blog/2026/03/25/aurora-blue-green-downtime-measurement)と[第2回](/ja/blog/2026/03/25/aurora-blue-green-jdbc-plugin-comparison)では Aurora PostgreSQL で Blue/Green Switchover のダウンタイムを検証した。AWS JDBC Driver の BG プラグインは PostgreSQL で400回中0回の接続失敗を達成したが、Aurora MySQL ではどうなるか。
+
+MySQL と PostgreSQL では Blue/Green デプロイメントの内部実装が異なる。PostgreSQL は論理レプリケーション、MySQL は binlog レプリケーションを使用する。メタデータの取得方法も異なり（PostgreSQL は `get_blue_green_fast_switchover_metadata()` 関数、MySQL は `mysql.rds_topology` テーブル）、Switchover の挙動に差が出る可能性がある。
+
+本記事では、Aurora MySQL 3.08.0 → 3.12.0 のメジャーアップグレードを伴う Switchover を、PostgreSQL と同じ3パターンで検証する。
+
+## 検証環境
+
+| 項目 | 値 |
+| --- | --- |
+| リージョン | ap-northeast-1（東京） |
+| エンジン | Aurora MySQL 3.08.0（Blue）→ 3.12.0（Green） |
+| インスタンスクラス | db.r6g.large |
+| 構成 | Writer × 1 + Reader × 1 |
+| VPC | デフォルト VPC（3 AZ） |
+| Java | OpenJDK 21 |
+| MySQL JDBC | mysql-connector-j 9.2.0 |
+| AWS JDBC Wrapper | 2.6.4 |
+| HikariCP | 6.2.1 |
+| 接続テスト間隔 | 1秒（`SELECT @@hostname` を400回実行） |
+
+## PostgreSQL との構築の違い
+
+Aurora MySQL の Blue/Green デプロイメントでも、binlog を有効にするカスタムパラメータグループが必要だ。PostgreSQL の `rds.logical_replication = 1` に相当するのが `binlog_format = ROW` だ。
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">クラスター構築コマンド（PostgreSQL 版との差分）</summary>
+
+```bash title="Terminal"
+# Aurora MySQL 3.08.0 クラスター作成（ユーザー名が admin、ポートが 3306）
+aws rds create-db-cluster \
+  --db-cluster-identifier bg-test-mysql \
+  --engine aurora-mysql \
+  --engine-version 8.0.mysql_aurora.3.08.0 \
+  --master-username admin \
+  --master-user-password '<your-password>' \
+  --db-subnet-group-name bg-test-mysql-subnet \
+  --storage-encrypted \
+  --no-deletion-protection \
+  --region ap-northeast-1
+
+# Writer / Reader インスタンス
+aws rds create-db-instance \
+  --db-instance-identifier bg-test-mysql-writer \
+  --db-cluster-identifier bg-test-mysql \
+  --db-instance-class db.r6g.large \
+  --engine aurora-mysql \
+  --publicly-accessible \
+  --region ap-northeast-1
+
+aws rds create-db-instance \
+  --db-instance-identifier bg-test-mysql-reader \
+  --db-cluster-identifier bg-test-mysql \
+  --db-instance-class db.r6g.large \
+  --engine aurora-mysql \
+  --publicly-accessible \
+  --region ap-northeast-1
+
+# SG に MySQL ポートを追加（PostgreSQL は 5432、MySQL は 3306）
+MY_IP=$(curl -s https://checkip.amazonaws.com)
+aws ec2 authorize-security-group-ingress \
+  --group-id "${SG_ID}" \
+  --protocol tcp --port 3306 \
+  --cidr "${MY_IP}/32" \
+  --region ap-northeast-1
+```
+
+</details>
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">MySQL 用パラメータグループの設定（binlog 有効化）</summary>
+
+```bash title="Terminal"
+# カスタムパラメータグループ作成
+aws rds create-db-cluster-parameter-group \
+  --db-cluster-parameter-group-name bg-test-mysql8-params \
+  --db-parameter-group-family aurora-mysql8.0 \
+  --description "Custom params for MySQL Blue/Green test"
+
+# binlog 有効化
+aws rds modify-db-cluster-parameter-group \
+  --db-cluster-parameter-group-name bg-test-mysql8-params \
+  --parameters "ParameterName=binlog_format,ParameterValue=ROW,ApplyMethod=pending-reboot"
+
+# クラスターに適用 → 全インスタンス再起動
+aws rds modify-db-cluster \
+  --db-cluster-identifier bg-test-mysql \
+  --db-cluster-parameter-group-name bg-test-mysql8-params \
+  --apply-immediately
+aws rds reboot-db-instance --db-instance-identifier bg-test-mysql-writer
+aws rds reboot-db-instance --db-instance-identifier bg-test-mysql-reader
+```
+
+</details>
+
+PostgreSQL と異なり、MySQL ではデフォルトパラメータグループで Green 環境を作成できる（Green 用のカスタムパラメータグループの事前作成が不要）。
+
+```bash title="Terminal"
+# Green 用パラメータグループの指定が不要
+aws rds create-blue-green-deployment \
+  --blue-green-deployment-name bg-test-mysql-upgrade \
+  --source arn:aws:rds:ap-northeast-1:<account-id>:cluster:bg-test-mysql \
+  --target-engine-version 8.0.mysql_aurora.3.12.0
+```
+
+## 検証結果
+
+[第2回](/ja/blog/2026/03/25/aurora-blue-green-jdbc-plugin-comparison)と同じ3パターンを同時に実行し、Switchover を実行した。テストアプリは第2回の PostgreSQL 版をベースに、以下を変更した。
+
+| 項目 | PostgreSQL 版 | MySQL 版 |
+| --- | --- | --- |
+| JDBC ドライバ | `org.postgresql:postgresql:42.7.5` | `com.mysql:mysql-connector-j:9.2.0` |
+| 接続 URL | `jdbc:postgresql://...:5432/postgres` | `jdbc:mysql://...:3306/mysql` |
+| Wrapper URL | `jdbc:aws-wrapper:postgresql://...` | `jdbc:aws-wrapper:mysql://...` |
+| Wrapper dialect | （自動検出） | `aurora-mysql` |
+| ユーザー名 | `postgres` | `admin` |
+| クエリ | `SELECT inet_server_addr()` | `SELECT @@hostname` |
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">Java プロジェクトのセットアップとビルド</summary>
+
+```bash title="Terminal"
+# Java 21 + Maven のインストール（Ubuntu）
+sudo apt-get install -y openjdk-21-jdk maven
+
+# プロジェクト作成
+mkdir -p bg-mysql-test/src/main/java/bgtest
+cd bg-mysql-test
+# pom.xml と MysqlSwitchoverTest.java を配置（下記参照）
+
+# ビルド
+mvn package -q
+```
+
+pom.xml:
+
+```xml title="pom.xml"
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+    <groupId>bgtest</groupId>
+    <artifactId>bg-mysql-test</artifactId>
+    <version>1.0</version>
+    <properties>
+        <maven.compiler.source>21</maven.compiler.source>
+        <maven.compiler.target>21</maven.compiler.target>
+    </properties>
+    <dependencies>
+        <dependency>
+            <groupId>com.mysql</groupId>
+            <artifactId>mysql-connector-j</artifactId>
+            <version>9.2.0</version>
+        </dependency>
+        <dependency>
+            <groupId>software.amazon.jdbc</groupId>
+            <artifactId>aws-advanced-jdbc-wrapper</artifactId>
+            <version>2.6.4</version>
+            <exclusions>
+                <exclusion>
+                    <groupId>org.slf4j</groupId>
+                    <artifactId>slf4j-api</artifactId>
+                </exclusion>
+            </exclusions>
+        </dependency>
+        <dependency>
+            <groupId>com.zaxxer</groupId>
+            <artifactId>HikariCP</artifactId>
+            <version>6.2.1</version>
+        </dependency>
+        <dependency>
+            <groupId>org.slf4j</groupId>
+            <artifactId>slf4j-api</artifactId>
+            <version>2.0.16</version>
+        </dependency>
+        <dependency>
+            <groupId>org.slf4j</groupId>
+            <artifactId>slf4j-simple</artifactId>
+            <version>2.0.16</version>
+        </dependency>
+    </dependencies>
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-jar-plugin</artifactId>
+                <version>3.4.2</version>
+                <configuration>
+                    <archive><manifest><mainClass>bgtest.MysqlSwitchoverTest</mainClass></manifest></archive>
+                </configuration>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-dependency-plugin</artifactId>
+                <version>3.8.1</version>
+                <executions>
+                    <execution>
+                        <id>copy-dependencies</id>
+                        <phase>package</phase>
+                        <goals><goal>copy-dependencies</goal></goals>
+                        <configuration><outputDirectory>${project.build.directory}/lib</outputDirectory></configuration>
+                    </execution>
+                </executions>
+            </plugin>
+        </plugins>
+    </build>
+</project>
+```
+
+MysqlSwitchoverTest.java:
+
+```java title="MysqlSwitchoverTest.java"
+package bgtest;
+
+import java.sql.*;
+import java.time.Instant;
+import java.time.Duration;
+import java.util.Properties;
+import com.zaxxer.hikari.HikariConfig;
+import com.zaxxer.hikari.HikariDataSource;
+
+public class MysqlSwitchoverTest {
+    static final int CONNECT_TIMEOUT_MS = 3000;
+    static final int QUERY_TIMEOUT_SEC = 3;
+    static final String QUERY = "SELECT @@hostname";
+
+    public static void main(String[] args) throws Exception {
+        if (args.length < 3) {
+            System.err.println("Usage: MysqlSwitchoverTest <plain|hikari|wrapper> <endpoint> <password> [intervalMs] [maxQueries]");
+            System.exit(1);
+        }
+        String mode = args[0], endpoint = args[1], password = args[2];
+        int intervalMs = args.length > 3 ? Integer.parseInt(args[3]) : 1000;
+        int maxQueries = args.length > 4 ? Integer.parseInt(args[4]) : 400;
+
+        System.out.println("timestamp,query_num,status,latency_ms,server_host,error");
+        switch (mode) {
+            case "plain"   -> runPlain(endpoint, password, intervalMs, maxQueries);
+            case "hikari"  -> runHikari(endpoint, password, intervalMs, maxQueries);
+            case "wrapper" -> runWrapper(endpoint, password, intervalMs, maxQueries);
+        }
+    }
+
+    static void runPlain(String ep, String pw, int interval, int max) throws Exception {
+        String url = "jdbc:mysql://" + ep + ":3306/mysql?connectTimeout=" + CONNECT_TIMEOUT_MS
+                + "&socketTimeout=" + (QUERY_TIMEOUT_SEC * 1000);
+        int ok = 0, fail = 0;
+        for (int n = 1; n <= max; n++) {
+            Instant s = Instant.now();
+            try (Connection c = DriverManager.getConnection(url, "admin", pw);
+                 Statement st = c.createStatement(); ResultSet r = st.executeQuery(QUERY)) {
+                r.next(); long ms = Duration.between(s, Instant.now()).toMillis();
+                System.out.println(Instant.now()+","+n+",OK,"+ms+","+r.getString(1)+","); ok++;
+            } catch (Exception e) {
+                long ms = Duration.between(s, Instant.now()).toMillis();
+                String err = e.getMessage().replace('\n',' ');
+                System.out.println(Instant.now()+","+n+",FAIL,"+ms+",,"+err.substring(0,Math.min(100,err.length()))); fail++;
+            }
+            Thread.sleep(interval);
+        }
+        System.err.println("=== Plain: OK="+ok+" FAIL="+fail+" ===");
+    }
+
+    static void runHikari(String ep, String pw, int interval, int max) throws Exception {
+        HikariConfig cfg = new HikariConfig();
+        cfg.setJdbcUrl("jdbc:mysql://"+ep+":3306/mysql");
+        cfg.setUsername("admin"); cfg.setPassword(pw);
+        cfg.setMaximumPoolSize(5); cfg.setConnectionTimeout(CONNECT_TIMEOUT_MS);
+        HikariDataSource ds = new HikariDataSource(cfg);
+        int ok = 0, fail = 0;
+        for (int n = 1; n <= max; n++) {
+            Instant s = Instant.now(); boolean success = false;
+            for (int a = 1; a <= 3 && !success; a++) {
+                try (Connection c = ds.getConnection();
+                     Statement st = c.createStatement(); ResultSet r = st.executeQuery(QUERY)) {
+                    r.next(); long ms = Duration.between(s, Instant.now()).toMillis();
+                    System.out.println(Instant.now()+","+n+",OK,"+ms+","+r.getString(1)+","+(a>1?"retry="+a:"")); success = true; ok++;
+                } catch (Exception e) {
+                    if (a == 3) { long ms = Duration.between(s, Instant.now()).toMillis(); String err = e.getMessage().replace('\n',' ');
+                        System.out.println(Instant.now()+","+n+",FAIL,"+ms+",,"+err.substring(0,Math.min(100,err.length()))); fail++;
+                    } else Thread.sleep(1000);
+                }
+            }
+            Thread.sleep(interval);
+        }
+        ds.close(); System.err.println("=== HikariCP: OK="+ok+" FAIL="+fail+" ===");
+    }
+
+    static void runWrapper(String ep, String pw, int interval, int max) throws Exception {
+        String url = "jdbc:aws-wrapper:mysql://"+ep+":3306/mysql";
+        Properties p = new Properties();
+        p.setProperty("user","admin"); p.setProperty("password",pw);
+        p.setProperty("wrapperPlugins","bg,failover2,efm2");
+        p.setProperty("wrapperDialect","aurora-mysql");
+        p.setProperty("bgdId","bg-mysql-demo");
+        p.setProperty("bgSwitchoverTimeoutMs","600000");
+        p.setProperty("blue-green-monitoring-connectTimeout","20000");
+        p.setProperty("blue-green-monitoring-socketTimeout","20000");
+        p.setProperty("connectTimeout",String.valueOf(CONNECT_TIMEOUT_MS));
+        p.setProperty("socketTimeout",String.valueOf(QUERY_TIMEOUT_SEC*1000));
+        p.setProperty("wrapperLoggerLevel","fine");
+        int ok = 0, fail = 0;
+        for (int n = 1; n <= max; n++) {
+            Instant s = Instant.now();
+            try (Connection c = DriverManager.getConnection(url, p);
+                 Statement st = c.createStatement(); ResultSet r = st.executeQuery(QUERY)) {
+                r.next(); long ms = Duration.between(s, Instant.now()).toMillis();
+                System.out.println(Instant.now()+","+n+",OK,"+ms+","+r.getString(1)+","); ok++;
+            } catch (Exception e) {
+                long ms = Duration.between(s, Instant.now()).toMillis(); String err = e.getMessage().replace('\n',' ');
+                System.out.println(Instant.now()+","+n+",FAIL,"+ms+",,"+err.substring(0,Math.min(100,err.length()))); fail++;
+            }
+            Thread.sleep(interval);
+        }
+        System.err.println("=== Wrapper: OK="+ok+" FAIL="+fail+" ===");
+    }
+}
+```
+
+</details>
+
+Green 環境が `AVAILABLE` になったら、3パターンを同時に起動して Switchover を実行する。
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">テスト実行と Switchover コマンド</summary>
+
+```bash title="Terminal"
+# クラスパス構築（MySQL 版）
+CP="target/bg-mysql-test-1.0.jar"
+for jar in target/lib/*.jar; do CP="$CP:$jar"; done
+
+ENDPOINT="bg-test-mysql.cluster-xxxxx.ap-northeast-1.rds.amazonaws.com"
+
+# 3パターンを同時起動（クラス名が MysqlSwitchoverTest に変わる点に注意）
+java -cp "$CP" bgtest.MysqlSwitchoverTest plain  "$ENDPOINT" '<password>' 1000 400 > mysql-plain.log  2>&1 &
+java -cp "$CP" bgtest.MysqlSwitchoverTest hikari "$ENDPOINT" '<password>' 1000 400 > mysql-hikari.log 2>&1 &
+java -cp "$CP" bgtest.MysqlSwitchoverTest wrapper "$ENDPOINT" '<password>' 1000 400 > mysql-wrapper.log 2>&1 &
+
+# Switchover 実行
+aws rds switchover-blue-green-deployment \
+  --blue-green-deployment-identifier bgd-xxxxx \
+  --switchover-timeout 300 \
+  --region ap-northeast-1
+```
+
+</details>
+
+### Pattern 1: Plain JDBC — 6回の接続失敗
+
+```text title="Output（Plain JDBC）"
+06:21:16.862  #32  OK      97ms  ip-10-7-2-23   ← Blue Writer
+06:21:20.880  #33  FAIL  3008ms                 ← タイムアウト開始
+06:21:24.885  #34  FAIL  3004ms
+06:21:28.889  #35  FAIL  3003ms
+06:21:32.891  #36  FAIL  3002ms
+06:21:36.895  #37  FAIL  3004ms
+06:21:40.900  #38  FAIL  3003ms                 ← 6回連続タイムアウト
+06:21:41.998  #39  OK      97ms  ip-10-7-2-23   ← 復旧（まだ旧ホスト）
+  ... #39〜#66 は旧ホストに接続 ...
+06:22:13.425  #67  OK     385ms  ip-10-7-2-34   ← Green Writer
+```
+
+PostgreSQL（8回）より少ない6回の失敗。ダウンタイムは約21秒（#33 の 06:21:20 〜 #39 の 06:21:41）で、PostgreSQL（約32秒）より短い。ただし、復旧後も約31秒間は旧ホストに接続し続け、#67 で初めて Green に切り替わった。
+
+### Pattern 2: HikariCP + リトライ — 2回の接続失敗、旧 Writer に接続し続ける
+
+```text title="Output（HikariCP + リトライ）"
+06:21:28.988  #36  FAIL  11006ms  ← リトライ3回すべて失敗
+06:21:40.992  #37  FAIL  11001ms  ← 同上
+```
+
+```text title="IP 遷移（HikariCP）"
+398回  ip-10-7-2-23  ← 旧 Blue Writer（全クエリが旧 Writer に接続）
+```
+
+PostgreSQL と全く同じ落とし穴。コネクションプールが旧 Writer への接続を保持し続ける。**この問題はエンジンに依存しない、コネクションプールの根本的な挙動だ**。
+
+### Pattern 3: AWS JDBC Wrapper BG プラグイン — 1回の接続失敗
+
+```text title="Output（AWS JDBC Wrapper）"
+06:21:14.557  #29  OK       97ms  ip-10-7-2-23   ← Blue Writer
+06:21:41.004  #30  FAIL  25437ms                 ← 接続切り替え検出エラー
+06:21:42.100  #31  OK       94ms  ip-10-7-2-34   ← Green Writer
+```
+
+PostgreSQL では0回だった接続失敗が、MySQL では **1回発生した**。エラーメッセージは「The active SQL connection has changed due to a connection failure」で、フェイルオーバープラグイン（`failover2`）が接続の切り替えを検出した際に発生するエラーだ。
+
+これは MySQL と PostgreSQL のフェイルオーバー検出メカニズムの違いに起因する。MySQL では接続が切断された際にフェイルオーバープラグインがエラーを返すのに対し、PostgreSQL では BG プラグインが先に接続を制御するため、フェイルオーバープラグインのエラーが発生しない。
+
+### BG プラグインのフェーズ遷移
+
+```text title="Output（BG プラグインのフェーズ遷移ログ）"
+06:20:42.460  -32703ms  NOT_CREATED
+06:20:42.674  -32489ms  CREATED
+06:21:10.643   -4520ms  PREPARATION
+06:21:15.164       0ms  IN_PROGRESS
+06:21:18.027    2862ms  POST
+06:21:31.728   16564ms  Green topology changed
+06:22:12.960   57797ms  Blue DNS updated
+06:22:54.723   99561ms  Green DNS removed
+06:22:54.723   99561ms  COMPLETED
+```
+
+IN_PROGRESS フェーズが **約3秒**（PostgreSQL は約12秒）と大幅に短い。MySQL の binlog レプリケーションは PostgreSQL の論理レプリケーションより切り替えが高速であることがわかる。
+
+## PostgreSQL との比較
+
+| 指標 | Aurora PostgreSQL | Aurora MySQL |
+| --- | --- | --- |
+| Plain JDBC 接続失敗 | 8回 / 約32秒 | **6回 / 約21秒** |
+| HikariCP 接続失敗 | 2回 / 旧 Writer 接続 | 2回 / 旧 Writer 接続 |
+| Wrapper BG 接続失敗 | **0回** / 36秒一時停止 | 1回 / 25秒一時停止 |
+| IN_PROGRESS 期間 | 約12秒 | **約3秒** |
+| 論理レプリケーション設定 | `rds.logical_replication = 1` | `binlog_format = ROW` |
+| Green 用パラメータグループ | 事前作成が必要 | 不要 |
+| COMPLETED までの時間 | 約74秒 | **約100秒** |
+
+## まとめ
+
+- **MySQL の IN_PROGRESS フェーズは PostgreSQL の4分の1** — binlog レプリケーションの切り替えが高速なため、実際の切り替え時間が約3秒と短い。Plain JDBC のダウンタイムも21秒と PostgreSQL（32秒）より短い。
+- **BG プラグインでも MySQL では1回の接続エラーが発生する** — フェイルオーバープラグインが接続切り替えを検出してエラーを返す。アプリケーション側で1回のリトライを入れれば対処可能だが、PostgreSQL のような完全なゼロエラーにはならない。
+- **HikariCP の旧 Writer 接続問題はエンジン共通** — PostgreSQL でも MySQL でも、コネクションプールが旧 Writer への TCP 接続を保持し続ける問題は同じ。これは DNS ベースのエンドポイント切り替えとコネクションプールの根本的な相性の問題であり、エンジンに依存しない。
+- **MySQL の方が構築が簡単** — Green 用のカスタムパラメータグループの事前作成が不要で、Blue/Green デプロイメントの作成コマンドがシンプルになる。
+
+## クリーンアップ
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">リソース削除コマンド</summary>
+
+```bash title="Terminal"
+aws rds delete-blue-green-deployment --blue-green-deployment-identifier bgd-xxxxx --region ap-northeast-1
+aws rds delete-db-instance --db-instance-identifier bg-test-mysql-reader-old1 --skip-final-snapshot
+aws rds delete-db-instance --db-instance-identifier bg-test-mysql-writer-old1 --skip-final-snapshot
+aws rds delete-db-instance --db-instance-identifier bg-test-mysql-reader --skip-final-snapshot
+aws rds delete-db-instance --db-instance-identifier bg-test-mysql-writer --skip-final-snapshot
+aws rds delete-db-cluster --db-cluster-identifier bg-test-mysql-old1 --skip-final-snapshot
+aws rds delete-db-cluster --db-cluster-identifier bg-test-mysql --skip-final-snapshot
+aws rds delete-db-cluster-parameter-group --db-cluster-parameter-group-name bg-test-mysql8-params
+aws rds delete-db-subnet-group --db-subnet-group-name bg-test-mysql-subnet
+aws ec2 revoke-security-group-ingress --group-id sg-xxxxx --protocol tcp --port 3306 --cidr <your-ip>/32
+```
+
+</details>

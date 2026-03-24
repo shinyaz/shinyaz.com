@@ -1,0 +1,518 @@
+---
+title: "Aurora Blue/Green 実践検証 — AWS JDBC Wrapper 3.2.0 で挙動は変わるか"
+description: "AWS JDBC Wrapper を 2.6.4 → 3.2.0 にアップグレードし、PostgreSQL と MySQL で Blue/Green Switchover を再検証。CHANGELOG から予測した MySQL の改善は実現せず、両エンジンとも 2.6.4 と同じ結果だった。3.x 移行の判断基準をまとめる。"
+date: "2026-03-25"
+published: true
+featured: false
+categories: [infrastructure]
+tags: ["aws", "aurora", "postgresql", "mysql", "rds", "blue-green-deployment", "database", "java", "jdbc"]
+series: "aurora-blue-green"
+seriesOrder: 4
+seriesExtra: true
+---
+
+## はじめに
+
+[第2回](/ja/blog/2026/03/25/aurora-blue-green-jdbc-plugin-comparison)と[番外編（MySQL）](/ja/blog/2026/03/25/aurora-blue-green-mysql-comparison)では、AWS JDBC Wrapper **2.6.4** の Blue/Green プラグインを検証した。PostgreSQL では 0 FAIL、MySQL では 1 FAIL という結果だった。
+
+検証後に確認したところ、AWS JDBC Wrapper の最新バージョンは **3.2.0**（2026年2月リリース）だった。2.6.4 → 3.2.0 の間に Blue/Green プラグイン関連のバグ修正が複数入っている。本記事では、CHANGELOG から挙動の変化を予測し、実機で検証して答え合わせをする。
+
+## 机上確認: CHANGELOG から予測する
+
+2.6.4 → 3.2.0 の間の Blue/Green 関連の変更を CHANGELOG から抽出した。
+
+| バージョン | 変更内容 | 予測される影響 |
+| --- | --- | --- |
+| 2.6.5 | PG で Switchover 完了後の BG メタデータ取得の問題を修正 | PG の安定性向上 |
+| 2.6.7 | Switchover 中の古いトポロジーが誤ったフェイルオーバーを引き起こす問題を修正 | **MySQL の 1 FAIL が解消される可能性** |
+| 2.6.7 | BG モニターインスタンスのセットアップを確実にする修正 | モニタリングの安定性向上 |
+| 3.0.0 | BG プラグインのリファクタリング、キャッシュ接続に有効期限追加 | 接続管理の改善 |
+| 3.0.0 | BG Switchover 完了後にモニターを再起動 | リソースリーク防止 |
+| 3.2.0 | BG モニターでの Statement 作成時のメモリスパイクを修正 | メモリ使用量の改善 |
+
+### 予測
+
+- **PostgreSQL**: 2.6.4 で既に 0 FAIL だったため、**変化なし**と予測
+- **MySQL**: 2.6.7 の「古いトポロジーが誤ったフェイルオーバーを引き起こす問題」の修正により、**1 FAIL → 0 FAIL に改善される可能性**
+
+### 3.0.0 の破壊的変更
+
+3.0.0 で `clusterId` パラメータが複数クラスター使用時に必須になったが、今回は単一クラスターなのでコード変更は不要。`keepSessionStateOnFailover` と `enableFailoverStrictReader` パラメータも削除されたが、使用していないため影響なし。
+
+## 検証環境
+
+| 項目 | 値 |
+| --- | --- |
+| リージョン | ap-northeast-1（東京） |
+| PostgreSQL | Aurora PostgreSQL 16.9 → 17.6 |
+| MySQL | Aurora MySQL 3.08.0 → 3.12.0 |
+| インスタンスクラス | db.r6g.large |
+| 構成 | Writer × 1 + Reader × 1（各エンジン） |
+| VPC | デフォルト VPC（3 AZ） |
+| AWS JDBC Wrapper | **3.2.0**（2.6.4 から変更） |
+| 接続テスト間隔 | 1秒、400回 |
+
+pom.xml の変更は `aws-advanced-jdbc-wrapper` のバージョンを `2.6.4` → `3.2.0` に変更するだけだ。テストコードの変更は不要。
+
+## 検証手順
+
+PostgreSQL と MySQL のクラスターを並行で構築し、Blue/Green デプロイメントも同時に作成する。
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">Aurora クラスター構築（PostgreSQL + MySQL 同時）</summary>
+
+```bash title="Terminal"
+# サブネットグループ（共有）
+aws rds create-db-subnet-group \
+  --db-subnet-group-name bg-v3-subnet \
+  --db-subnet-group-description "Subnet group for v3 test" \
+  --subnet-ids '["subnet-xxxxx","subnet-yyyyy","subnet-zzzzz"]'
+
+# PostgreSQL: パラメータグループ + クラスター
+aws rds create-db-cluster-parameter-group \
+  --db-cluster-parameter-group-name bg-v3-pg16-params \
+  --db-parameter-group-family aurora-postgresql16 \
+  --description "PG16 params for v3 test"
+aws rds modify-db-cluster-parameter-group \
+  --db-cluster-parameter-group-name bg-v3-pg16-params \
+  --parameters "ParameterName=rds.logical_replication,ParameterValue=1,ApplyMethod=pending-reboot"
+aws rds create-db-cluster \
+  --db-cluster-identifier bg-v3-pg \
+  --engine aurora-postgresql --engine-version 16.9 \
+  --master-username postgres --master-user-password '<password>' \
+  --db-subnet-group-name bg-v3-subnet \
+  --db-cluster-parameter-group-name bg-v3-pg16-params \
+  --storage-encrypted --no-deletion-protection
+
+# MySQL: パラメータグループ + クラスター
+aws rds create-db-cluster-parameter-group \
+  --db-cluster-parameter-group-name bg-v3-mysql8-params \
+  --db-parameter-group-family aurora-mysql8.0 \
+  --description "MySQL params for v3 test"
+aws rds modify-db-cluster-parameter-group \
+  --db-cluster-parameter-group-name bg-v3-mysql8-params \
+  --parameters "ParameterName=binlog_format,ParameterValue=ROW,ApplyMethod=pending-reboot"
+aws rds create-db-cluster \
+  --db-cluster-identifier bg-v3-mysql \
+  --engine aurora-mysql --engine-version 8.0.mysql_aurora.3.08.0 \
+  --master-username admin --master-user-password '<password>' \
+  --db-subnet-group-name bg-v3-subnet \
+  --db-cluster-parameter-group-name bg-v3-mysql8-params \
+  --storage-encrypted --no-deletion-protection
+
+# 4インスタンスを同時作成（パブリックアクセス有効）
+for pair in "bg-v3-pg-writer:bg-v3-pg:aurora-postgresql" "bg-v3-pg-reader:bg-v3-pg:aurora-postgresql" \
+            "bg-v3-mysql-writer:bg-v3-mysql:aurora-mysql" "bg-v3-mysql-reader:bg-v3-mysql:aurora-mysql"; do
+  IFS=: read -r inst cluster engine <<< "$pair"
+  aws rds create-db-instance \
+    --db-instance-identifier "$inst" --db-cluster-identifier "$cluster" \
+    --db-instance-class db.r6g.large --engine "$engine" \
+    --publicly-accessible --no-auto-minor-version-upgrade &
+done
+wait
+
+# SG にローカル IP からの接続を許可（PG: 5432, MySQL: 3306）
+MY_IP=$(curl -s https://checkip.amazonaws.com)
+SG_ID=$(aws rds describe-db-clusters --db-cluster-identifier bg-v3-pg \
+  --query 'DBClusters[0].VpcSecurityGroups[0].VpcSecurityGroupId' --output text)
+aws ec2 authorize-security-group-ingress --group-id "$SG_ID" \
+  --ip-permissions "[{\"IpProtocol\":\"tcp\",\"FromPort\":5432,\"ToPort\":5432,\"IpRanges\":[{\"CidrIp\":\"${MY_IP}/32\"}]},{\"IpProtocol\":\"tcp\",\"FromPort\":3306,\"ToPort\":3306,\"IpRanges\":[{\"CidrIp\":\"${MY_IP}/32\"}]}]"
+```
+
+</details>
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">Blue/Green デプロイメント作成（PostgreSQL + MySQL 同時）</summary>
+
+```bash title="Terminal"
+# PostgreSQL: Green 用パラメータグループ + Blue/Green 作成
+aws rds create-db-cluster-parameter-group \
+  --db-cluster-parameter-group-name bg-v3-pg17-params \
+  --db-parameter-group-family aurora-postgresql17 \
+  --description "PG17 params for v3 Green"
+aws rds modify-db-cluster-parameter-group \
+  --db-cluster-parameter-group-name bg-v3-pg17-params \
+  --parameters "ParameterName=rds.logical_replication,ParameterValue=1,ApplyMethod=pending-reboot"
+aws rds create-blue-green-deployment \
+  --blue-green-deployment-name bg-v3-pg-upgrade \
+  --source arn:aws:rds:ap-northeast-1:<account-id>:cluster:bg-v3-pg \
+  --target-engine-version 17.6 \
+  --target-db-cluster-parameter-group-name bg-v3-pg17-params
+
+# MySQL: Blue/Green 作成（Green 用パラメータグループ不要）
+aws rds create-blue-green-deployment \
+  --blue-green-deployment-name bg-v3-mysql-upgrade \
+  --source arn:aws:rds:ap-northeast-1:<account-id>:cluster:bg-v3-mysql \
+  --target-engine-version 8.0.mysql_aurora.3.12.0
+```
+
+</details>
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">pom.xml とプロジェクトセットアップ</summary>
+
+```bash title="Terminal"
+# Java 21 + Maven のインストール（Ubuntu）
+sudo apt-get install -y openjdk-21-jdk maven
+
+# プロジェクト作成
+mkdir -p bg-switchover-test/src/main/java/bgtest
+cd bg-switchover-test
+# pom.xml と SwitchoverTest.java を配置（下記参照）
+```
+
+pom.xml（AWS JDBC Wrapper **3.2.0**）:
+
+```xml title="pom.xml"
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+    <groupId>bgtest</groupId>
+    <artifactId>bg-switchover-test</artifactId>
+    <version>1.0</version>
+    <properties>
+        <maven.compiler.source>21</maven.compiler.source>
+        <maven.compiler.target>21</maven.compiler.target>
+    </properties>
+    <dependencies>
+        <dependency>
+            <groupId>org.postgresql</groupId>
+            <artifactId>postgresql</artifactId>
+            <version>42.7.5</version>
+        </dependency>
+        <dependency>
+            <groupId>com.mysql</groupId>
+            <artifactId>mysql-connector-j</artifactId>
+            <version>9.2.0</version>
+        </dependency>
+        <dependency>
+            <groupId>software.amazon.jdbc</groupId>
+            <artifactId>aws-advanced-jdbc-wrapper</artifactId>
+            <version>3.2.0</version>
+            <exclusions>
+                <exclusion>
+                    <groupId>org.slf4j</groupId>
+                    <artifactId>slf4j-api</artifactId>
+                </exclusion>
+            </exclusions>
+        </dependency>
+        <dependency>
+            <groupId>com.zaxxer</groupId>
+            <artifactId>HikariCP</artifactId>
+            <version>6.2.1</version>
+        </dependency>
+        <dependency>
+            <groupId>org.slf4j</groupId>
+            <artifactId>slf4j-api</artifactId>
+            <version>2.0.16</version>
+        </dependency>
+        <dependency>
+            <groupId>org.slf4j</groupId>
+            <artifactId>slf4j-simple</artifactId>
+            <version>2.0.16</version>
+        </dependency>
+    </dependencies>
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-jar-plugin</artifactId>
+                <version>3.4.2</version>
+                <configuration>
+                    <archive><manifest><mainClass>bgtest.SwitchoverTest</mainClass></manifest></archive>
+                </configuration>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-dependency-plugin</artifactId>
+                <version>3.8.1</version>
+                <executions>
+                    <execution>
+                        <id>copy-dependencies</id>
+                        <phase>package</phase>
+                        <goals><goal>copy-dependencies</goal></goals>
+                        <configuration><outputDirectory>${project.build.directory}/lib</outputDirectory></configuration>
+                    </execution>
+                </executions>
+            </plugin>
+        </plugins>
+    </build>
+</project>
+```
+
+</details>
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">SwitchoverTest.java（PostgreSQL 用）</summary>
+
+```java title="SwitchoverTest.java"
+package bgtest;
+
+import java.sql.*;
+import java.time.Instant;
+import java.time.Duration;
+import java.util.Properties;
+import com.zaxxer.hikari.HikariConfig;
+import com.zaxxer.hikari.HikariDataSource;
+
+public class SwitchoverTest {
+    static final int CONNECT_TIMEOUT_SEC = 3;
+    static final int QUERY_TIMEOUT_SEC = 3;
+
+    public static void main(String[] args) throws Exception {
+        if (args.length < 3) {
+            System.err.println("Usage: SwitchoverTest <plain|hikari|wrapper> <endpoint> <password> [intervalMs] [maxQueries]");
+            System.exit(1);
+        }
+        String mode = args[0], endpoint = args[1], password = args[2];
+        int intervalMs = args.length > 3 ? Integer.parseInt(args[3]) : 1000;
+        int maxQueries = args.length > 4 ? Integer.parseInt(args[4]) : 400;
+
+        System.out.println("timestamp,query_num,status,latency_ms,server_ip,error");
+        switch (mode) {
+            case "plain"   -> runPlain(endpoint, password, intervalMs, maxQueries);
+            case "wrapper" -> runWrapper(endpoint, password, intervalMs, maxQueries);
+        }
+    }
+
+    static void runPlain(String ep, String pw, int interval, int max) throws Exception {
+        String url = "jdbc:postgresql://" + ep + ":5432/postgres"
+                + "?connectTimeout=" + CONNECT_TIMEOUT_SEC + "&socketTimeout=" + QUERY_TIMEOUT_SEC;
+        int ok = 0, fail = 0;
+        for (int n = 1; n <= max; n++) {
+            Instant s = Instant.now();
+            try (Connection c = DriverManager.getConnection(url, "postgres", pw);
+                 Statement st = c.createStatement();
+                 ResultSet r = st.executeQuery("SELECT inet_server_addr()::text")) {
+                r.next(); long ms = Duration.between(s, Instant.now()).toMillis();
+                System.out.println(Instant.now()+","+n+",OK,"+ms+","+r.getString(1)+","); ok++;
+            } catch (Exception e) {
+                long ms = Duration.between(s, Instant.now()).toMillis(); String err = e.getMessage().replace('\n',' ');
+                System.out.println(Instant.now()+","+n+",FAIL,"+ms+",,"+err.substring(0,Math.min(100,err.length()))); fail++;
+            }
+            Thread.sleep(interval);
+        }
+        System.err.println("=== Plain JDBC Summary: OK="+ok+" FAIL="+fail+" Total="+max+" ===");
+    }
+
+    static void runWrapper(String ep, String pw, int interval, int max) throws Exception {
+        String url = "jdbc:aws-wrapper:postgresql://"+ep+":5432/postgres";
+        Properties p = new Properties();
+        p.setProperty("user","postgres"); p.setProperty("password",pw);
+        p.setProperty("wrapperPlugins","bg,failover2,efm2");
+        p.setProperty("bgdId","bg-test-demo");
+        p.setProperty("bgSwitchoverTimeoutMs","600000");
+        p.setProperty("blue-green-monitoring-connectTimeout","20000");
+        p.setProperty("blue-green-monitoring-socketTimeout","20000");
+        p.setProperty("connectTimeout",String.valueOf(CONNECT_TIMEOUT_SEC));
+        p.setProperty("socketTimeout",String.valueOf(QUERY_TIMEOUT_SEC));
+        p.setProperty("wrapperLoggerLevel","fine");
+        int ok = 0, fail = 0;
+        for (int n = 1; n <= max; n++) {
+            Instant s = Instant.now();
+            try (Connection c = DriverManager.getConnection(url, p);
+                 Statement st = c.createStatement();
+                 ResultSet r = st.executeQuery("SELECT inet_server_addr()::text")) {
+                r.next(); long ms = Duration.between(s, Instant.now()).toMillis();
+                System.out.println(Instant.now()+","+n+",OK,"+ms+","+r.getString(1)+","); ok++;
+            } catch (Exception e) {
+                long ms = Duration.between(s, Instant.now()).toMillis(); String err = e.getMessage().replace('\n',' ');
+                System.out.println(Instant.now()+","+n+",FAIL,"+ms+",,"+err.substring(0,Math.min(100,err.length()))); fail++;
+            }
+            Thread.sleep(interval);
+        }
+        System.err.println("=== Wrapper Summary: OK="+ok+" FAIL="+fail+" Total="+max+" ===");
+    }
+}
+```
+
+</details>
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">MysqlSwitchoverTest.java（MySQL 用）</summary>
+
+```java title="MysqlSwitchoverTest.java"
+package bgtest;
+
+import java.sql.*;
+import java.time.Instant;
+import java.time.Duration;
+import java.util.Properties;
+
+public class MysqlSwitchoverTest {
+    static final int CONNECT_TIMEOUT_MS = 3000;
+    static final int QUERY_TIMEOUT_SEC = 3;
+    static final String QUERY = "SELECT @@hostname";
+
+    public static void main(String[] args) throws Exception {
+        if (args.length < 3) {
+            System.err.println("Usage: MysqlSwitchoverTest <plain|wrapper> <endpoint> <password> [intervalMs] [maxQueries]");
+            System.exit(1);
+        }
+        String mode = args[0], endpoint = args[1], password = args[2];
+        int intervalMs = args.length > 3 ? Integer.parseInt(args[3]) : 1000;
+        int maxQueries = args.length > 4 ? Integer.parseInt(args[4]) : 400;
+
+        System.out.println("timestamp,query_num,status,latency_ms,server_host,error");
+        switch (mode) {
+            case "plain"   -> runPlain(endpoint, password, intervalMs, maxQueries);
+            case "wrapper" -> runWrapper(endpoint, password, intervalMs, maxQueries);
+        }
+    }
+
+    static void runPlain(String ep, String pw, int interval, int max) throws Exception {
+        String url = "jdbc:mysql://" + ep + ":3306/mysql?connectTimeout=" + CONNECT_TIMEOUT_MS
+                + "&socketTimeout=" + (QUERY_TIMEOUT_SEC * 1000);
+        int ok = 0, fail = 0;
+        for (int n = 1; n <= max; n++) {
+            Instant s = Instant.now();
+            try (Connection c = DriverManager.getConnection(url, "admin", pw);
+                 Statement st = c.createStatement(); ResultSet r = st.executeQuery(QUERY)) {
+                r.next(); long ms = Duration.between(s, Instant.now()).toMillis();
+                System.out.println(Instant.now()+","+n+",OK,"+ms+","+r.getString(1)+","); ok++;
+            } catch (Exception e) {
+                long ms = Duration.between(s, Instant.now()).toMillis(); String err = e.getMessage().replace('\n',' ');
+                System.out.println(Instant.now()+","+n+",FAIL,"+ms+",,"+err.substring(0,Math.min(100,err.length()))); fail++;
+            }
+            Thread.sleep(interval);
+        }
+        System.err.println("=== Plain: OK="+ok+" FAIL="+fail+" ===");
+    }
+
+    static void runWrapper(String ep, String pw, int interval, int max) throws Exception {
+        String url = "jdbc:aws-wrapper:mysql://"+ep+":3306/mysql";
+        Properties p = new Properties();
+        p.setProperty("user","admin"); p.setProperty("password",pw);
+        p.setProperty("wrapperPlugins","bg,failover2,efm2");
+        p.setProperty("wrapperDialect","aurora-mysql");
+        p.setProperty("bgdId","bg-mysql-demo");
+        p.setProperty("bgSwitchoverTimeoutMs","600000");
+        p.setProperty("blue-green-monitoring-connectTimeout","20000");
+        p.setProperty("blue-green-monitoring-socketTimeout","20000");
+        p.setProperty("connectTimeout",String.valueOf(CONNECT_TIMEOUT_MS));
+        p.setProperty("socketTimeout",String.valueOf(QUERY_TIMEOUT_SEC*1000));
+        p.setProperty("wrapperLoggerLevel","fine");
+        int ok = 0, fail = 0;
+        for (int n = 1; n <= max; n++) {
+            Instant s = Instant.now();
+            try (Connection c = DriverManager.getConnection(url, p);
+                 Statement st = c.createStatement(); ResultSet r = st.executeQuery(QUERY)) {
+                r.next(); long ms = Duration.between(s, Instant.now()).toMillis();
+                System.out.println(Instant.now()+","+n+",OK,"+ms+","+r.getString(1)+","); ok++;
+            } catch (Exception e) {
+                long ms = Duration.between(s, Instant.now()).toMillis(); String err = e.getMessage().replace('\n',' ');
+                System.out.println(Instant.now()+","+n+",FAIL,"+ms+",,"+err.substring(0,Math.min(100,err.length()))); fail++;
+            }
+            Thread.sleep(interval);
+        }
+        System.err.println("=== Wrapper: OK="+ok+" FAIL="+fail+" ===");
+    }
+}
+```
+
+</details>
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">ビルドとテスト実行</summary>
+
+```bash title="Terminal"
+# ビルド
+mvn clean package -q
+
+# クラスパス構築
+CP="target/bg-switchover-test-1.0.jar"
+for jar in target/lib/*.jar; do CP="$CP:$jar"; done
+
+# 両エンジンで Wrapper + Plain を同時起動
+java -cp "$CP" bgtest.SwitchoverTest wrapper "$PG_ENDPOINT" '<password>' 1000 400 > v3-pg-wrapper.log 2>&1 &
+java -cp "$CP" bgtest.SwitchoverTest plain  "$PG_ENDPOINT" '<password>' 1000 400 > v3-pg-plain.log 2>&1 &
+java -cp "$CP" bgtest.MysqlSwitchoverTest wrapper "$MYSQL_ENDPOINT" '<password>' 1000 400 > v3-mysql-wrapper.log 2>&1 &
+java -cp "$CP" bgtest.MysqlSwitchoverTest plain  "$MYSQL_ENDPOINT" '<password>' 1000 400 > v3-mysql-plain.log 2>&1 &
+
+# Switchover 実行（MySQL が先に AVAILABLE になることが多い）
+aws rds switchover-blue-green-deployment --blue-green-deployment-identifier bgd-xxxxx --switchover-timeout 300
+aws rds switchover-blue-green-deployment --blue-green-deployment-identifier bgd-yyyyy --switchover-timeout 300
+```
+
+</details>
+
+## 検証結果
+
+PostgreSQL と MySQL の Blue/Green デプロイメントを並行で構築し、それぞれ Wrapper BG プラグインと Plain JDBC を同時に実行して Switchover した。
+
+### PostgreSQL: 予測通り変化なし
+
+| パターン | 2.6.4 | 3.2.0 | 変化 |
+| --- | --- | --- | --- |
+| Wrapper BG | 0 FAIL | **0 FAIL** | なし |
+| Plain JDBC | 8 FAIL | 8 FAIL | なし |
+
+Wrapper は 3.2.0 でも 400回中 0回の接続失敗。2.6.4 と同じ結果だ。
+
+3.2.0 で変わった点として、Switchover 完了後に BG モニターが自動的にリセットされるようになった（3.0.0 の PR #1639）。PostgreSQL ではログ上で COMPLETED の代わりに NOT_CREATED に遷移する。MySQL では COMPLETED まで出力された後にリセットされる。いずれも連続した Blue/Green Switchover に対応するための改善で、単発の Switchover では挙動に影響しない。
+
+### MySQL: 予測に反して変化なし
+
+| パターン | 2.6.4 | 3.2.0 | 変化 |
+| --- | --- | --- | --- |
+| Wrapper BG | 1 FAIL | **1 FAIL** | なし |
+| Plain JDBC | 6 FAIL | 6 FAIL | なし |
+
+**予測は外れた**。3.2.0 でも MySQL では 1回の接続失敗が発生する。
+
+```text title="Output（MySQL Wrapper 3.2.0）"
+09:53:46.061  #33  FAIL  3408ms  ← The active SQL connection has changed due to a connection failure
+```
+
+エラーメッセージは 2.6.4 と全く同じだ。このエラーは `failover2` プラグインが接続の切断を検出した際に発生するもので、BG プラグインのバグ修正では解消されない。MySQL のフェイルオーバー検出メカニズムに起因する構造的な挙動であり、バージョンアップでは解消されないことが確認できた。
+
+## 2.6.4 vs 3.2.0 総合比較
+
+| 指標 | 2.6.4 | 3.2.0 |
+| --- | --- | --- |
+| PG Wrapper FAIL | 0 | 0 |
+| PG Plain FAIL | 8 | 8 |
+| MySQL Wrapper FAIL | 1 | 1 |
+| MySQL Plain FAIL | 6 | 6 |
+| BG モニターの自動リセット | なし | あり（3.0.0〜） |
+| メモリスパイク修正 | なし | あり（3.2.0） |
+| 連続 Switchover 対応 | 不完全 | 改善 |
+
+## まとめ
+
+- **Blue/Green Switchover の接続失敗回数は 2.6.4 と 3.2.0 で同じ** — PostgreSQL は 0 FAIL、MySQL は 1 FAIL。CHANGELOG のバグ修正は Switchover 中の接続失敗回数には影響しなかった。
+- **MySQL の 1 FAIL は `failover2` プラグインの構造的な挙動** — BG プラグインのバグ修正では解消されない。MySQL で完全なゼロエラーを実現するには、アプリケーション側で 1回のリトライを入れる必要がある。
+- **3.x への移行は「今すぐ必要」ではないが「推奨」** — Switchover の接続失敗回数は変わらないが、メモリスパイク修正やモニターの自動リセットなど、長時間稼働時の安定性が改善されている。特に連続した Blue/Green Switchover を行う運用では 3.x が有利だ。
+- **CHANGELOG だけでは挙動の変化を正確に予測できない** — 「古いトポロジーが誤ったフェイルオーバーを引き起こす問題」の修正が MySQL の 1 FAIL を解消すると予測したが、実際には別の原因（`failover2` プラグインの接続切り替え検出）だった。実機検証の重要性を改めて確認した。
+
+## クリーンアップ
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">リソース削除コマンド</summary>
+
+```bash title="Terminal"
+# Blue/Green デプロイメント削除
+aws rds delete-blue-green-deployment --blue-green-deployment-identifier bgd-xxxxx
+aws rds delete-blue-green-deployment --blue-green-deployment-identifier bgd-yyyyy
+
+# 全インスタンス削除（PG + MySQL、old1 含む）
+for inst in bg-v3-pg-writer bg-v3-pg-reader bg-v3-pg-writer-old1 bg-v3-pg-reader-old1 \
+            bg-v3-mysql-writer bg-v3-mysql-reader bg-v3-mysql-writer-old1 bg-v3-mysql-reader-old1; do
+  aws rds delete-db-instance --db-instance-identifier "$inst" --skip-final-snapshot 2>/dev/null
+done
+
+# クラスター削除
+for cluster in bg-v3-pg bg-v3-pg-old1 bg-v3-mysql bg-v3-mysql-old1; do
+  aws rds delete-db-cluster --db-cluster-identifier "$cluster" --skip-final-snapshot 2>/dev/null
+done
+
+# パラメータグループ・サブネットグループ削除
+aws rds delete-db-cluster-parameter-group --db-cluster-parameter-group-name bg-v3-pg16-params
+aws rds delete-db-cluster-parameter-group --db-cluster-parameter-group-name bg-v3-pg17-params
+aws rds delete-db-cluster-parameter-group --db-cluster-parameter-group-name bg-v3-mysql8-params
+aws rds delete-db-subnet-group --db-subnet-group-name bg-v3-subnet
+```
+
+</details>
