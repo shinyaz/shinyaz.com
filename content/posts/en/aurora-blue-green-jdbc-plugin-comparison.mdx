@@ -1,6 +1,6 @@
 ---
 title: "Aurora Blue/Green in Practice — Approaching Zero Downtime with the AWS JDBC Driver Plugin"
-description: "Compared downtime during Blue/Green Switchover across Plain JDBC, HikariCP with retry, and AWS JDBC Driver BG plugin. The plugin achieved 0 failures out of 400 queries. HikariCP kept connecting to the old writer — a critical pitfall."
+description: "Compared downtime during Blue/Green Switchover across Plain JDBC, HikariCP with retry, and AWS JDBC Driver BG plugin. The plugin recorded 0 failures in 400 queries during testing. HikariCP kept connecting to the old writer — a critical pitfall."
 date: "2026-03-25"
 published: true
 featured: false
@@ -543,7 +543,7 @@ The IN_PROGRESS phase (actual switchover) lasted about 12 seconds, but no querie
 ### Key Takeaways
 
 - **HikariCP retry alone is not enough** — Retry reduces connection failures, but all connections are [dropped during switchover](https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/blue-green-deployments-switching.html). When HikariCP creates new connections, if the DNS cache still returns the old writer's IP, it reconnects to the old environment (now demoted to reader). Write workloads would hit `read-only transaction` errors. Depending on DNS propagation timing, new connections may reach the new writer, but during the 60-second DNS TTL window there is a risk of connecting to the old environment. Use the BG plugin when reliable switchover is required.
-- **The AWS JDBC Driver BG plugin truly achieves zero downtime** — 0 failures out of 400 queries. The plugin monitors RDS metadata tables and switches connections using IP-based routing, completely bypassing the DNS TTL problem. However, during the IN_PROGRESS phase, query execution is suspended — one query took ~36 seconds. If your application has HTTP request timeouts shorter than this, the upper layer may time out.
+- **The AWS JDBC Driver BG plugin recorded 0 failures across all 3 test runs on PostgreSQL** — 0 failures out of 400 queries. The plugin monitors RDS metadata tables and switches connections using IP-based routing, completely bypassing the DNS TTL problem. However, during the IN_PROGRESS phase, query execution is suspended — one query took ~36 seconds. If your application has HTTP request timeouts shorter than this, the upper layer may time out.
 - **Plugin adoption cost is low** — Change the connection URL to `jdbc:aws-wrapper:postgresql://` and add `bg` to `wrapperPlugins`. No application code changes needed. However, it's only available for Java (JDBC).
 - **Connection pools need connection validation** — If using HikariCP without the BG plugin, configure `connectionTestQuery` and `validationTimeout` to detect and discard stale connections after switchover. Even so, this alone doesn't guarantee switching to the new writer.
 

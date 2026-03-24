@@ -1,6 +1,6 @@
 ---
 title: "Aurora Blue/Green 実践検証 — AWS JDBC Driver プラグインでゼロダウンタイムに迫る"
-description: "Blue/Green Switchover 中のダウンタイムを Plain JDBC・HikariCP リトライ・AWS JDBC Driver BG プラグインの3パターンで比較。プラグインは400クエリ中0回の接続失敗を達成。HikariCP は旧 Writer に接続し続ける落とし穴も発見した。"
+description: "Blue/Green Switchover 中のダウンタイムを Plain JDBC・HikariCP リトライ・AWS JDBC Driver BG プラグインの3パターンで比較。プラグインは検証した400クエリ中0回の接続失敗。HikariCP は旧 Writer に接続し続ける落とし穴も発見した。"
 date: "2026-03-25"
 published: true
 featured: false
@@ -508,7 +508,7 @@ aws rds switchover-blue-green-deployment \
 04:57:50.xxx  #78  OK       94ms  172.31.47.234  ← DNS 更新後、ホスト名ベースに復帰
 ```
 
-**400回のクエリ中、接続失敗は0回**。ただし `#44` のレイテンシが約36秒に跳ね上がっている点に注目だ。これはプラグインが IN_PROGRESS フェーズ中にクエリ実行を一時停止（suspend）し、切り替え完了後に再開したためだ。接続は切れないが、アプリケーション側ではタイムアウト設定によっては影響を受ける可能性がある。
+**400回のクエリ中、接続失敗は0回だった**。ただし `#44` のレイテンシが約36秒に跳ね上がっている点に注目だ。これはプラグインが IN_PROGRESS フェーズ中にクエリ実行を一時停止（suspend）し、切り替え完了後に再開したためだ。接続は切れないが、アプリケーション側ではタイムアウト設定によっては影響を受ける可能性がある。
 
 IP 遷移が `Blue → Green → Blue` に戻っているのは、POST フェーズで一時的に Green の IP に直接ルーティングした後、DNS 更新が完了してホスト名ベースの接続に復帰したためだ。最終的にはクラスターエンドポイントが Green 環境を指すようになっている。
 
@@ -543,7 +543,7 @@ IN_PROGRESS フェーズ（実際の切り替え）は約12秒間だったが、
 ### 得られた知見
 
 - **HikariCP のリトライだけでは不十分** — リトライで接続失敗は減るが、Switchover 中に[全接続が切断された](https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/blue-green-deployments-switching.html)後、HikariCP が新規接続を作成する際に DNS キャッシュが旧 Writer の IP を返すと、旧環境（Reader に降格済み）に再接続してしまう。書き込みワークロードでは `read-only transaction` エラーが発生する。DNS の伝播タイミングによっては新しい Writer に接続できるケースもあるが、DNS TTL 60秒の間は旧環境に接続し続けるリスクがある。確実な切り替えが必要な場合は BG プラグインの使用を推奨する。
-- **AWS JDBC Driver BG プラグインは確かにゼロダウンタイムを実現する** — 400回のクエリ中0回の接続失敗。プラグインが RDS のメタデータテーブルを監視し、DNS に依存せず IP ベースで接続先を切り替えるため、DNS TTL の問題を完全に回避できる。ただし、IN_PROGRESS フェーズ中はクエリ実行が一時停止されるため、1回のクエリに約36秒かかるケースがあった。アプリケーション側のタイムアウト設定（HTTP リクエストタイムアウト等）がこれより短い場合は、上位レイヤーでタイムアウトする可能性がある。
+- **AWS JDBC Driver BG プラグインは検証3回すべてで接続失敗0回を記録した** — 400回のクエリ中0回の接続失敗。プラグインが RDS のメタデータテーブルを監視し、DNS に依存せず IP ベースで接続先を切り替えるため、DNS TTL の問題を完全に回避できる。ただし、IN_PROGRESS フェーズ中はクエリ実行が一時停止されるため、1回のクエリに約36秒かかるケースがあった。アプリケーション側のタイムアウト設定（HTTP リクエストタイムアウト等）がこれより短い場合は、上位レイヤーでタイムアウトする可能性がある。
 - **プラグインの導入コストは低い** — 接続 URL を `jdbc:aws-wrapper:postgresql://` に変更し、`wrapperPlugins` に `bg` を追加するだけ。アプリケーションコードの変更は不要だ。ただし、Java（JDBC）以外の言語では利用できない点に注意が必要だ。
 - **コネクションプールを使う場合は接続の有効性検証が重要** — HikariCP の `connectionTestQuery` や `validationTimeout` を適切に設定し、Switchover 後に古い接続を検出・破棄する仕組みが必要だ。ただし、これだけでは新しい Writer への切り替えは保証されない。
 

@@ -1,6 +1,6 @@
 ---
 title: "Aurora Blue/Green in Practice — Comparing Behavior with Aurora MySQL"
-description: "Tested Blue/Green Switchover on Aurora MySQL and compared with PostgreSQL. IN_PROGRESS phase was only 3s (vs 12s for PG), but the BG plugin had 1 connection error. HikariCP's stale writer problem is engine-agnostic. Plain JDBC stayed on old host for 31s after recovery."
+description: "Tested Blue/Green Switchover on Aurora MySQL and compared with PostgreSQL. IN_PROGRESS phase was only 3s (vs 12s for PG), but the BG plugin may have 0–1 connection errors (timing-dependent). HikariCP's stale writer problem is engine-agnostic. Plain JDBC stayed on old host for 31s after recovery."
 date: "2026-03-25"
 published: true
 featured: false
@@ -36,13 +36,29 @@ This article tests a Switchover with Aurora MySQL 3.08.0 → 3.12.0 major upgrad
 
 ## Setup Differences from PostgreSQL
 
-Aurora MySQL Blue/Green deployments also require a custom parameter group, but instead of `rds.logical_replication = 1`, you set `binlog_format = ROW`.
+Aurora MySQL Blue/Green deployments also require a custom parameter group, but instead of `rds.logical_replication = 1`, you set `binlog_format = ROW`. Specifying the parameter group at cluster creation time avoids the need to apply it later and reboot.
 
 <details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
-<summary className="cursor-pointer font-medium">Cluster creation commands (differences from PostgreSQL)</summary>
+<summary className="cursor-pointer font-medium">Aurora MySQL cluster setup</summary>
 
 ```bash title="Terminal"
-# Aurora MySQL 3.08.0 cluster (username is admin, port is 3306)
+# Create subnet group
+aws rds create-db-subnet-group \
+  --db-subnet-group-name bg-test-mysql-subnet \
+  --db-subnet-group-description "Subnet group for MySQL Blue/Green test" \
+  --subnet-ids '["subnet-xxxxx","subnet-yyyyy","subnet-zzzzz"]' \
+  --region ap-northeast-1
+
+# Custom parameter group (enable binlog)
+aws rds create-db-cluster-parameter-group \
+  --db-cluster-parameter-group-name bg-test-mysql8-params \
+  --db-parameter-group-family aurora-mysql8.0 \
+  --description "Custom params for MySQL Blue/Green test"
+aws rds modify-db-cluster-parameter-group \
+  --db-cluster-parameter-group-name bg-test-mysql8-params \
+  --parameters "ParameterName=binlog_format,ParameterValue=ROW,ApplyMethod=pending-reboot"
+
+# Aurora MySQL 3.08.0 cluster (with parameter group)
 aws rds create-db-cluster \
   --db-cluster-identifier bg-test-mysql \
   --engine aurora-mysql \
@@ -50,11 +66,12 @@ aws rds create-db-cluster \
   --master-username admin \
   --master-user-password '<your-password>' \
   --db-subnet-group-name bg-test-mysql-subnet \
+  --db-cluster-parameter-group-name bg-test-mysql8-params \
   --storage-encrypted \
   --no-deletion-protection \
   --region ap-northeast-1
 
-# Writer / Reader instances
+# Writer / Reader instances (publicly accessible)
 aws rds create-db-instance \
   --db-instance-identifier bg-test-mysql-writer \
   --db-cluster-identifier bg-test-mysql \
@@ -71,39 +88,16 @@ aws rds create-db-instance \
   --publicly-accessible \
   --region ap-northeast-1
 
-# Add MySQL port to SG (PostgreSQL uses 5432, MySQL uses 3306)
+# Add MySQL port to SG
+SG_ID=$(aws rds describe-db-clusters --db-cluster-identifier bg-test-mysql \
+  --query 'DBClusters[0].VpcSecurityGroups[0].VpcSecurityGroupId' \
+  --output text --region ap-northeast-1)
 MY_IP=$(curl -s https://checkip.amazonaws.com)
 aws ec2 authorize-security-group-ingress \
   --group-id "${SG_ID}" \
   --protocol tcp --port 3306 \
   --cidr "${MY_IP}/32" \
   --region ap-northeast-1
-```
-
-</details>
-
-<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
-<summary className="cursor-pointer font-medium">MySQL parameter group setup (enable binlog)</summary>
-
-```bash title="Terminal"
-# Create custom parameter group
-aws rds create-db-cluster-parameter-group \
-  --db-cluster-parameter-group-name bg-test-mysql8-params \
-  --db-parameter-group-family aurora-mysql8.0 \
-  --description "Custom params for MySQL Blue/Green test"
-
-# Enable binlog
-aws rds modify-db-cluster-parameter-group \
-  --db-cluster-parameter-group-name bg-test-mysql8-params \
-  --parameters "ParameterName=binlog_format,ParameterValue=ROW,ApplyMethod=pending-reboot"
-
-# Apply to cluster and reboot all instances
-aws rds modify-db-cluster \
-  --db-cluster-identifier bg-test-mysql \
-  --db-cluster-parameter-group-name bg-test-mysql8-params \
-  --apply-immediately
-aws rds reboot-db-instance --db-instance-identifier bg-test-mysql-writer
-aws rds reboot-db-instance --db-instance-identifier bg-test-mysql-reader
 ```
 
 </details>
@@ -391,7 +385,7 @@ Fewer failures than PostgreSQL (8) — 6 failures with ~21 seconds of downtime v
 
 Identical pitfall to PostgreSQL. The connection pool keeps reusing TCP connections to the old writer. **This problem is engine-agnostic — it's a fundamental connection pool behavior**.
 
-### Pattern 3: AWS JDBC Wrapper BG Plugin — 1 Connection Failure
+### Pattern 3: AWS JDBC Wrapper BG Plugin — 0–1 Connection Failures
 
 ```text title="Output (AWS JDBC Wrapper)"
 06:21:14.557  #29  OK       97ms  ip-10-7-2-23   ← Blue Writer
@@ -399,7 +393,9 @@ Identical pitfall to PostgreSQL. The connection pool keeps reusing TCP connectio
 06:21:42.100  #31  OK       94ms  ip-10-7-2-34   ← Green Writer
 ```
 
-Unlike PostgreSQL (0 failures), MySQL had **1 failure**. The error message — "The active SQL connection has changed due to a connection failure" — comes from the failover plugin (`failover2`) detecting the connection switch.
+Unlike PostgreSQL (0 failures in testing), MySQL had **1 failure** in this test run. The error message — "The active SQL connection has changed due to a connection failure" — comes from the failover plugin (`failover2`) detecting the connection switch.
+
+However, this error is timing-dependent and doesn't occur every time. A subsequent reproduction test showed 0 failures.
 
 This stems from differences in failover detection between MySQL and PostgreSQL. In MySQL, the failover plugin raises an error when it detects a connection drop, whereas in PostgreSQL, the BG plugin takes control before the failover plugin triggers.
 
@@ -425,7 +421,7 @@ The IN_PROGRESS phase was only **~3 seconds** (vs ~12 seconds for PostgreSQL). M
 | --- | --- | --- |
 | Plain JDBC failures | 8 / ~32s | **6 / ~21s** |
 | HikariCP failures | 2 / stale writer | 2 / stale writer |
-| Wrapper BG failures | **0** / 36s suspend | 1 / 25s suspend |
+| Wrapper BG failures | **0** / 36s suspend | 0–1 / 25s suspend |
 | IN_PROGRESS duration | ~12s | **~3s** |
 | Replication setup | `rds.logical_replication = 1` | `binlog_format = ROW` |
 | Green parameter group | Must pre-create | Not needed |
@@ -434,7 +430,7 @@ The IN_PROGRESS phase was only **~3 seconds** (vs ~12 seconds for PostgreSQL). M
 ## Summary
 
 - **MySQL's IN_PROGRESS phase is 4x shorter than PostgreSQL** — Binlog replication switches over faster, resulting in ~3 seconds vs ~12 seconds. Plain JDBC downtime is also shorter at ~21 seconds vs ~32 seconds.
-- **The BG plugin has 1 connection error on MySQL** — The failover plugin detects the connection switch and raises an error. A single retry in the application handles this, but it's not the perfect zero-error result seen with PostgreSQL.
+- **The BG plugin may have 0–1 connection errors on MySQL** — The failover plugin can detect the connection switch and raise an error, but this is timing-dependent and doesn't always occur. A single retry in the application is recommended for safety.
 - **HikariCP's stale writer problem is engine-agnostic** — Both PostgreSQL and MySQL exhibit the same behavior: the connection pool keeps reusing TCP connections to the old writer after switchover. This is a fundamental incompatibility between DNS-based endpoint switching and connection pooling, regardless of engine.
 - **MySQL setup is simpler** — No need to pre-create a Green parameter group, making the Blue/Green deployment creation command simpler.
 
