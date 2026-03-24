@@ -1,0 +1,444 @@
+---
+title: "Aurora Blue/Green in Practice — Measuring Actual Downtime During Maintenance"
+description: "Measured real downtime during Aurora PostgreSQL failover vs Blue/Green Switchover. Failover took ~10s, Blue/Green Switchover ~26s but included a PG16→17 major upgrade. DNS TTL of 60s is the key bottleneck."
+date: "2026-03-24"
+published: true
+featured: true
+categories: [infrastructure]
+tags: ["aws", "aurora", "postgresql", "rds", "blue-green-deployment", "database"]
+series: "aurora-blue-green"
+seriesOrder: 1
+---
+
+## Introduction
+
+If you run Aurora PostgreSQL in production, maintenance downtime is an unavoidable concern. Minor version updates, major version upgrades, parameter changes — without knowing how long things will be down, you can't plan your maintenance windows.
+
+AWS added [Blue/Green deployment](https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/blue-green-deployments.html) support for Aurora in 2023, and in February 2026 announced the [AWS JDBC Driver Blue/Green plugin](https://aws.amazon.com/blogs/database/achieve-near-zero-downtime-database-maintenance-by-using-blue-green-deployments-with-aws-jdbc-driver/). The official blog claims "near-zero downtime," but what does that look like in practice?
+
+In this article, I measure the following using an Aurora PostgreSQL 16.9 cluster:
+
+1. How long a **standard failover** takes
+2. How long a **Blue/Green Switchover** takes (PG 16.9 → 17.6 major upgrade)
+3. How **DNS behavior** affects downtime
+
+This is Part 1 of the "Aurora Blue/Green in Practice" series. Part 2 will test the AWS JDBC Driver Blue/Green plugin to see how much it improves things.
+
+## Test Environment
+
+| Item | Value |
+| --- | --- |
+| Region | ap-northeast-1 (Tokyo) |
+| Engine | Aurora PostgreSQL 16.9 (Blue) → 17.6 (Green) |
+| Instance class | db.r6g.large |
+| Topology | Writer × 1 + Reader × 1 |
+| VPC | Default VPC (3 AZs) |
+| Test interval | 1 second (psql running `SELECT inet_server_addr()`) |
+
+Prerequisites:
+
+- AWS CLI configured (`rds:*`, `ec2:*` permissions)
+- psql (PostgreSQL client)
+- dig (DNS lookup)
+
+The full setup-to-switchover process is documented for reproducibility. Skip to [Results Summary](#results-summary) if you only want the findings.
+
+## Step 1: Building the Aurora Cluster
+
+### Subnet Group and Cluster Creation
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">Cluster setup commands (subnet group → cluster → instances)</summary>
+
+```bash title="Terminal"
+# Create subnet group (default VPC, 3 AZs)
+aws rds create-db-subnet-group \
+  --db-subnet-group-name bg-test-subnet-group \
+  --db-subnet-group-description "Subnet group for Blue/Green deployment test" \
+  --subnet-ids '["subnet-xxxxx","subnet-yyyyy","subnet-zzzzz"]' \
+  --region ap-northeast-1
+
+# Create Aurora PostgreSQL 16.9 cluster
+aws rds create-db-cluster \
+  --db-cluster-identifier bg-test-apg \
+  --engine aurora-postgresql \
+  --engine-version 16.9 \
+  --master-username postgres \
+  --master-user-password '<your-password>' \
+  --db-subnet-group-name bg-test-subnet-group \
+  --storage-encrypted \
+  --no-deletion-protection \
+  --region ap-northeast-1
+
+# Writer instance
+aws rds create-db-instance \
+  --db-instance-identifier bg-test-apg-writer \
+  --db-cluster-identifier bg-test-apg \
+  --db-instance-class db.r6g.large \
+  --engine aurora-postgresql \
+  --no-auto-minor-version-upgrade \
+  --region ap-northeast-1
+
+# Reader instance
+aws rds create-db-instance \
+  --db-instance-identifier bg-test-apg-reader \
+  --db-cluster-identifier bg-test-apg \
+  --db-instance-class db.r6g.large \
+  --engine aurora-postgresql \
+  --no-auto-minor-version-upgrade \
+  --region ap-northeast-1
+```
+
+</details>
+
+Cluster and instance creation took about 10–15 minutes. Once both instances show `available`, verify the connection.
+
+```bash title="Terminal"
+psql -h bg-test-apg.cluster-xxxxx.ap-northeast-1.rds.amazonaws.com \
+  -U postgres -d postgres -c "SELECT version();"
+```
+
+```text title="Output"
+PostgreSQL 16.9 on aarch64-unknown-linux-gnu, compiled by aarch64-unknown-linux-gnu-gcc (GCC) 10.5.0, 64-bit
+```
+
+### Checking Initial DNS State
+
+Aurora's cluster endpoint is a CNAME record pointing to the writer instance endpoint.
+
+```bash title="Terminal"
+dig +noall +answer bg-test-apg.cluster-xxxxx.ap-northeast-1.rds.amazonaws.com A
+```
+
+```text title="Output"
+bg-test-apg.cluster-xxxxx...rds.amazonaws.com. 60 IN CNAME bg-test-apg-writer.xxxxx...rds.amazonaws.com.
+bg-test-apg-writer.xxxxx...rds.amazonaws.com.  60 IN A     172.31.37.206
+```
+
+The key observation: **TTL is 60 seconds**. After a failover or switchover updates DNS, clients may continue resolving to the old IP for up to 60 seconds. This is the primary cause of downtime.
+
+## Step 2: Measuring Failover Downtime
+
+### Connectivity Test Script
+
+I prepared a script that connects to the cluster endpoint every second, recording success/failure, latency, and the server IP.
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">connectivity-test.sh (full script)</summary>
+
+```bash title="connectivity-test.sh"
+#!/usr/bin/env bash
+set -euo pipefail
+
+ENDPOINT="${1:?Usage: $0 <cluster-endpoint> <password> [interval_ms]}"
+PASSWORD="${2:?Password required}"
+INTERVAL_MS="${3:-500}"
+INTERVAL_SEC=$(echo "scale=3; ${INTERVAL_MS}/1000" | bc)
+
+TOTAL=0; SUCCESS=0; FAIL=0
+FIRST_FAIL_TS=""; LAST_FAIL_TS=""
+OUTFILE="/tmp/bg-test/connectivity-$(date '+%Y%m%d-%H%M%S').csv"
+
+echo "timestamp,query_num,status,latency_ms,server_ip,error" | tee "${OUTFILE}"
+
+cleanup() {
+  echo ""
+  echo "=== Summary ==="
+  echo "Total: ${TOTAL} | Success: ${SUCCESS} | Failed: ${FAIL}"
+  if [ -n "${FIRST_FAIL_TS}" ]; then
+    echo "First failure: ${FIRST_FAIL_TS}"
+    echo "Last failure: ${LAST_FAIL_TS}"
+  fi
+}
+trap cleanup EXIT
+
+export PGCONNECT_TIMEOUT=3
+
+while true; do
+  TOTAL=$((TOTAL + 1))
+  TS=$(date '+%Y-%m-%dT%H:%M:%S.%3N')
+  START_NS=$(date '+%s%N')
+
+  RESULT=$(PGPASSWORD="${PASSWORD}" psql -h "${ENDPOINT}" -p 5432 -U postgres -d postgres \
+    -t -A -c "SELECT inet_server_addr()::text" 2>&1) && STATUS="OK" || STATUS="FAIL"
+
+  END_NS=$(date '+%s%N')
+  LATENCY_MS=$(( (END_NS - START_NS) / 1000000 ))
+
+  if [ "${STATUS}" = "OK" ]; then
+    SUCCESS=$((SUCCESS + 1))
+    echo "${TS},${TOTAL},OK,${LATENCY_MS},${RESULT}," | tee -a "${OUTFILE}"
+  else
+    FAIL=$((FAIL + 1))
+    ERROR=$(echo "${RESULT}" | tr '\n' ' ' | cut -c1-100)
+    [ -z "${FIRST_FAIL_TS}" ] && FIRST_FAIL_TS="${TS}"
+    LAST_FAIL_TS="${TS}"
+    echo "${TS},${TOTAL},FAIL,${LATENCY_MS},,${ERROR}" | tee -a "${OUTFILE}"
+  fi
+
+  sleep "${INTERVAL_SEC}"
+done
+```
+
+</details>
+
+### Failover Execution and Results
+
+With the connectivity test running in the background, I triggered a failover targeting the reader instance.
+
+```bash title="Terminal"
+# Start connectivity test (background)
+./connectivity-test.sh bg-test-apg.cluster-xxxxx.rds.amazonaws.com '<password>' 1000 &
+
+# Trigger failover
+aws rds failover-db-cluster \
+  --db-cluster-identifier bg-test-apg \
+  --target-db-instance-identifier bg-test-apg-reader \
+  --region ap-northeast-1
+```
+
+Results:
+
+```text title="Output (connectivity test during failover)"
+10:01:29.278  #18  OK    124ms  172.31.37.206  ← Blue Writer
+10:01:30.406  #19  FAIL  634ms                 ← Failures begin
+10:01:32.050  #20  FAIL   54ms
+10:01:33.113  #21  FAIL   55ms
+10:01:34.177  #22  FAIL   52ms
+10:01:35.238  #23  FAIL   58ms
+10:01:36.304  #24  FAIL   53ms
+10:01:37.364  #25  FAIL   54ms
+10:01:38.427  #26  FAIL  742ms
+10:01:40.178  #27  OK    141ms  172.31.37.206  ← Recovery (same IP)
+  ... normal ...
+10:02:16.658  #59  FAIL 3113ms                 ← Second outage (timeout)
+10:02:20.780  #60  FAIL 3052ms
+10:02:24.839  #61  OK    134ms  172.31.37.206  ← Recovery
+```
+
+### Failover Analysis
+
+| Metric | Value |
+| --- | --- |
+| Failed connections | 10 |
+| First outage | ~10 seconds (10:01:30–10:01:40) |
+| Second outage | ~4 seconds (10:02:16–10:02:20, timeouts) |
+| Failure pattern | Two separate outage windows |
+
+Two things stand out:
+
+1. **Two distinct outage windows** — The first ~10 seconds saw immediate connection refusals. After recovery, two more 3-second timeouts occurred ~40 seconds later. This aligns with the DNS TTL (60s) expiring and the client attempting to connect to the old IP.
+2. **Same IP after recovery** — After failover, the cluster endpoint CNAME updates to point to the new writer, but DNS cache keeps resolving to the old IP. Since the old writer was still running, connections succeeded — but a write workload would have hit errors.
+
+## Step 3: Blue/Green Deployment and Switchover
+
+### Enabling Logical Replication
+
+Blue/Green deployments require logical replication. Create a custom parameter group and apply it to the cluster.
+
+```bash title="Terminal"
+# Create custom parameter group
+aws rds create-db-cluster-parameter-group \
+  --db-cluster-parameter-group-name bg-test-apg16-params \
+  --db-parameter-group-family aurora-postgresql16 \
+  --description "Custom params for Blue/Green deployment test"
+
+# Enable logical replication
+aws rds modify-db-cluster-parameter-group \
+  --db-cluster-parameter-group-name bg-test-apg16-params \
+  --parameters "ParameterName=rds.logical_replication,ParameterValue=1,ApplyMethod=pending-reboot"
+
+# Apply to cluster
+aws rds modify-db-cluster \
+  --db-cluster-identifier bg-test-apg \
+  --db-cluster-parameter-group-name bg-test-apg16-params \
+  --apply-immediately
+```
+
+After applying the parameter group, **all instances must be rebooted**. Wait for the status to change from `pending-reboot` to `in-sync`.
+
+```bash title="Terminal"
+# Reboot both instances
+aws rds reboot-db-instance --db-instance-identifier bg-test-apg-reader
+aws rds reboot-db-instance --db-instance-identifier bg-test-apg-writer
+
+# Verify
+psql -h <cluster-endpoint> -U postgres -c "SHOW rds.logical_replication;"
+```
+
+```text title="Output"
+ rds.logical_replication
+-------------------------
+ on
+```
+
+One gotcha: **if you use a custom parameter group, you must also create one for the Green environment**. Since we're upgrading PG 16 → 17, we need an `aurora-postgresql17` family parameter group.
+
+```bash title="Terminal"
+aws rds create-db-cluster-parameter-group \
+  --db-cluster-parameter-group-name bg-test-apg17-params \
+  --db-parameter-group-family aurora-postgresql17 \
+  --description "Custom params for PG17 green environment"
+
+aws rds modify-db-cluster-parameter-group \
+  --db-cluster-parameter-group-name bg-test-apg17-params \
+  --parameters "ParameterName=rds.logical_replication,ParameterValue=1,ApplyMethod=pending-reboot"
+```
+
+### Creating the Blue/Green Deployment
+
+```bash title="Terminal"
+aws rds create-blue-green-deployment \
+  --blue-green-deployment-name bg-test-upgrade \
+  --source arn:aws:rds:ap-northeast-1:<account-id>:cluster:bg-test-apg \
+  --target-engine-version 17.6 \
+  --target-db-cluster-parameter-group-name bg-test-apg17-params \
+  --region ap-northeast-1
+```
+
+Green environment provisioning progresses through three phases:
+
+| Phase | Description | Duration (measured) |
+| --- | --- | --- |
+| CREATING_READ_REPLICA_OF_SOURCE | Create replica of Blue cluster | ~18 min |
+| DB_ENGINE_VERSION_UPGRADE | Upgrade PG 16.9 → 17.6 | ~8 min |
+| CREATE_DB_INSTANCES_FOR_CLUSTER | Create Green instances | ~4 min |
+| **Total** | | **~30 min** |
+
+During these 30 minutes, the Blue environment remains fully operational. Zero impact on the application.
+
+### Switchover Execution and Results
+
+Once the Green environment reaches `AVAILABLE`, start the connectivity test and execute the switchover.
+
+```bash title="Terminal"
+aws rds switchover-blue-green-deployment \
+  --blue-green-deployment-identifier bgd-xxxxx \
+  --switchover-timeout 300 \
+  --region ap-northeast-1
+```
+
+Results:
+
+```text title="Output (connectivity test during switchover)"
+10:55:55.524  #24  OK    130ms  172.31.26.53   ← Blue Writer (PG 16.9)
+10:55:56.658  #25  FAIL 3046ms                 ← Timeouts begin
+10:56:00.713  #26  FAIL 3055ms
+10:56:04.777  #27  FAIL 3050ms
+10:56:08.837  #28  FAIL 3049ms
+10:56:12.895  #29  FAIL 3045ms
+10:56:16.953  #30  FAIL 3045ms
+10:56:21.008  #31  OK    249ms  172.31.26.53   ← Brief Blue connection
+10:56:22.263  #32  OK    204ms  172.31.21.178  ← Green Writer (PG 17.6)
+```
+
+### Switchover Analysis
+
+| Metric | Value |
+| --- | --- |
+| Failed connections | 6 |
+| Downtime | ~26 seconds (10:55:56–10:56:22) |
+| Failure pattern | All timeouts (~3s each) |
+| IP transition | 172.31.26.53 → 172.31.21.178 |
+
+The differences from failover are clear:
+
+1. **All failures are timeouts** — During failover, some connections were immediately refused. During switchover, all failures were 3-second timeouts because the Blue environment stops accepting connections during the transition.
+2. **Clean IP transition** — Unlike failover where the same IP persisted, switchover shows a clear transition to the Green environment's new IP.
+3. **Version upgraded** — Post-switchover connections return PG 17.6. The major version upgrade completed successfully.
+
+```bash title="Terminal (post-switchover verification)"
+psql -h bg-test-apg.cluster-xxxxx.rds.amazonaws.com -U postgres \
+  -c "SELECT version();"
+```
+
+```text title="Output"
+PostgreSQL 17.6 on aarch64-unknown-linux-gnu
+```
+
+## Results Summary
+
+| Metric | Failover | Blue/Green Switchover |
+| --- | --- | --- |
+| Downtime | ~10s + sporadic timeouts | ~26s (continuous) |
+| Failed connections | 10 | 6 |
+| Failure pattern | Refusals + timeouts mixed | Timeouts only |
+| Version change | None | PG 16.9 → 17.6 |
+| Preparation time | None | ~30 min (Green provisioning) |
+| App changes | None | None |
+
+## Summary
+
+- **DNS TTL of 60s is the biggest bottleneck** — In both failover and switchover, DNS cache returning stale IPs is the primary cause of downtime. Reducing DNS cache TTL on the application side or switching to IP-based routing could help.
+- **Blue/Green Switchover downtime is "longer but predictable"** — At 26 seconds vs failover's 10 seconds, switchover takes longer, but the failure pattern is uniform (all timeouts), making retry logic easier to design.
+- **Green environment takes 30 minutes to build** — With a major version upgrade, Green provisioning takes about 30 minutes. The Blue environment stays fully operational during this time, but it needs to be factored into maintenance window planning.
+- **Logical replication must be enabled beforehand** — Blue/Green deployments require `rds.logical_replication = 1`, which needs a custom parameter group and a full instance reboot. Enable this in production environments ahead of time.
+
+## Next Up
+
+In this test, a simple psql connectivity test showed 26 seconds of downtime during switchover. The AWS official blog claims the [AWS JDBC Driver Blue/Green plugin](https://aws.amazon.com/blogs/database/achieve-near-zero-downtime-database-maintenance-by-using-blue-green-deployments-with-aws-jdbc-driver/) can achieve "near-zero downtime."
+
+In Part 2, I'll test this plugin and compare it against HikariCP retry-only configurations to measure the actual improvement.
+
+## Cleanup
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">Resource deletion commands</summary>
+
+```bash title="Terminal"
+# Delete Blue/Green deployment
+aws rds delete-blue-green-deployment \
+  --blue-green-deployment-identifier bgd-xxxxx \
+  --delete-target \
+  --region ap-northeast-1
+
+# Delete old Blue instances (-old1 suffix)
+aws rds delete-db-instance \
+  --db-instance-identifier bg-test-apg-reader-old1 \
+  --skip-final-snapshot \
+  --region ap-northeast-1
+aws rds delete-db-instance \
+  --db-instance-identifier bg-test-apg-writer-old1 \
+  --skip-final-snapshot \
+  --region ap-northeast-1
+
+# Delete old Blue cluster
+aws rds delete-db-cluster \
+  --db-cluster-identifier bg-test-apg-old1 \
+  --skip-final-snapshot \
+  --region ap-northeast-1
+
+# Delete new cluster instances (promoted Green)
+aws rds delete-db-instance \
+  --db-instance-identifier bg-test-apg-reader \
+  --skip-final-snapshot \
+  --region ap-northeast-1
+aws rds delete-db-instance \
+  --db-instance-identifier bg-test-apg-writer \
+  --skip-final-snapshot \
+  --region ap-northeast-1
+
+# Delete new cluster
+aws rds delete-db-cluster \
+  --db-cluster-identifier bg-test-apg \
+  --skip-final-snapshot \
+  --region ap-northeast-1
+
+# Delete parameter groups (after cluster deletion)
+aws rds delete-db-cluster-parameter-group \
+  --db-cluster-parameter-group-name bg-test-apg16-params
+aws rds delete-db-cluster-parameter-group \
+  --db-cluster-parameter-group-name bg-test-apg17-params
+
+# Delete subnet group
+aws rds delete-db-subnet-group \
+  --db-subnet-group-name bg-test-subnet-group
+
+# Remove security group inbound rule
+aws ec2 revoke-security-group-ingress \
+  --group-id sg-xxxxx \
+  --protocol tcp --port 5432 \
+  --cidr <your-ip>/32
+```
+
+</details>
