@@ -496,6 +496,8 @@ aws rds switchover-blue-green-deployment \
 
 これは HikariCP の重大な落とし穴だ。コネクションプールは既存の TCP 接続を再利用するため、DNS が更新されても新しい Writer に切り替わらない。Switchover 後、アプリケーションは **旧 Writer（現在は Reader）に接続し続ける**。読み取りクエリは成功するが、書き込みクエリは `read-only transaction` エラーになる。
 
+> **補足**: [AWS のドキュメント](https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/blue-green-deployments-switching.html)によると、Switchover 中に両環境の全接続が強制切断される。その後、HikariCP が新規接続を作成する際、DNS キャッシュがまだ旧 Writer の IP を返していると旧環境（Reader に降格済み）に再接続してしまう。DNS の伝播タイミングによっては新しい Writer に接続できるケースもあるが、DNS TTL 60秒の間は旧環境に接続し続けるリスクがある。
+
 ### Pattern 3: AWS JDBC Wrapper BG プラグイン — 0回の接続失敗
 
 ```text title="Output（AWS JDBC Wrapper）"
@@ -540,7 +542,7 @@ IN_PROGRESS フェーズ（実際の切り替え）は約12秒間だったが、
 
 ### 得られた知見
 
-- **HikariCP のリトライだけでは不十分** — リトライで接続失敗は減るが、コネクションプールが旧 Writer への接続を保持し続けるため、Switchover 後も旧環境に接続し続ける。書き込みワークロードでは `read-only transaction` エラーが発生する。これは DNS ベースのエンドポイント切り替えとコネクションプールの根本的な相性の悪さだ。
+- **HikariCP のリトライだけでは不十分** — リトライで接続失敗は減るが、Switchover 中に[全接続が切断された](https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/blue-green-deployments-switching.html)後、HikariCP が新規接続を作成する際に DNS キャッシュが旧 Writer の IP を返すと、旧環境（Reader に降格済み）に再接続してしまう。書き込みワークロードでは `read-only transaction` エラーが発生する。DNS の伝播タイミングによっては新しい Writer に接続できるケースもあるが、DNS TTL 60秒の間は旧環境に接続し続けるリスクがある。確実な切り替えが必要な場合は BG プラグインの使用を推奨する。
 - **AWS JDBC Driver BG プラグインは確かにゼロダウンタイムを実現する** — 400回のクエリ中0回の接続失敗。プラグインが RDS のメタデータテーブルを監視し、DNS に依存せず IP ベースで接続先を切り替えるため、DNS TTL の問題を完全に回避できる。ただし、IN_PROGRESS フェーズ中はクエリ実行が一時停止されるため、1回のクエリに約36秒かかるケースがあった。アプリケーション側のタイムアウト設定（HTTP リクエストタイムアウト等）がこれより短い場合は、上位レイヤーでタイムアウトする可能性がある。
 - **プラグインの導入コストは低い** — 接続 URL を `jdbc:aws-wrapper:postgresql://` に変更し、`wrapperPlugins` に `bg` を追加するだけ。アプリケーションコードの変更は不要だ。ただし、Java（JDBC）以外の言語では利用できない点に注意が必要だ。
 - **コネクションプールを使う場合は接続の有効性検証が重要** — HikariCP の `connectionTestQuery` や `validationTimeout` を適切に設定し、Switchover 後に古い接続を検出・破棄する仕組みが必要だ。ただし、これだけでは新しい Writer への切り替えは保証されない。

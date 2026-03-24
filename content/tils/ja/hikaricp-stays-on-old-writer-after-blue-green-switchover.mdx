@@ -1,6 +1,6 @@
 ---
 title: "HikariCP は Blue/Green Switchover 後も旧 Writer に接続し続ける"
-description: "HikariCP のコネクションプールは TCP 接続を再利用するため、Blue/Green Switchover で DNS が更新されても新しい Writer に切り替わらない。書き込みワークロードでは read-only transaction エラーが発生する。PostgreSQL でも MySQL でも同じ挙動。"
+description: "Blue/Green Switchover 中に全接続が切断された後、HikariCP が DNS キャッシュ経由で旧 Writer に再接続してしまう問題。書き込みワークロードでは read-only transaction エラーが発生する。PostgreSQL でも MySQL でも同じ挙動。"
 date: "2026-03-25"
 published: true
 tags: ["aws", "aurora", "blue-green-deployment", "java", "hikaricp", "jdbc"]
@@ -8,9 +8,9 @@ tags: ["aws", "aurora", "blue-green-deployment", "java", "hikaricp", "jdbc"]
 
 Aurora の Blue/Green Switchover 後、HikariCP を使ったアプリケーションが旧 Writer（Reader に降格済み）に接続し続ける問題に遭遇した。成功した398回のクエリすべてが旧 IP に接続し続け、Green 環境の新 Writer には一度も切り替わらなかった。
 
-原因は HikariCP がプール内の TCP 接続を再利用するためだ。DNS が新しい Writer を指すように更新されても、既存の TCP 接続はそのまま旧インスタンスに繋がり続ける。読み取りクエリは成功するが、書き込みクエリは `read-only transaction` エラーになる。
+[AWS のドキュメント](https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/blue-green-deployments-switching.html)によると、Switchover 中に両環境の全接続が強制切断される。しかし、切断後に HikariCP が新規接続を作成する際、DNS キャッシュがまだ旧 Writer の IP を返していると旧環境（Reader に降格済み）に再接続してしまう。Aurora のクラスターエンドポイントは DNS TTL が 60秒のため、この間は旧環境に接続し続けるリスクがある。読み取りクエリは成功するが、書き込みクエリは `read-only transaction` エラーになる。
 
-この問題は PostgreSQL でも MySQL でも同じで、エンジンに依存しない。DNS ベースのエンドポイント切り替えとコネクションプールの根本的な相性の悪さだ。
+この問題は PostgreSQL でも MySQL でも同じで、エンジンに依存しない。DNS キャッシュとコネクションプールの再接続タイミングの問題であり、DNS の伝播タイミングによっては新しい Writer に接続できるケースもある。
 
 対策としては以下がある。
 

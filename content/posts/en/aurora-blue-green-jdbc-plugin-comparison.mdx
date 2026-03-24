@@ -496,6 +496,8 @@ Retry logic reduced failures to 2. However, **all 400 queries connected to the o
 
 This is a critical pitfall with HikariCP. The connection pool reuses existing TCP connections, so even after DNS updates, it never switches to the new writer. After switchover, the application **keeps connecting to the old writer (now a reader)**. Read queries succeed, but write queries would fail with `read-only transaction` errors.
 
+> **Note**: According to [AWS documentation](https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/blue-green-deployments-switching.html), all connections to both environments are dropped during switchover. When HikariCP creates new connections afterward, if the DNS cache still returns the old writer's IP, it reconnects to the old environment (now demoted to reader). Depending on DNS propagation timing, it may connect to the new writer instead, but during the 60-second DNS TTL window there is a risk of staying connected to the old environment.
+
 ### Pattern 3: AWS JDBC Wrapper BG Plugin — 0 Failures
 
 ```text title="Output (AWS JDBC Wrapper)"
@@ -540,7 +542,7 @@ The IN_PROGRESS phase (actual switchover) lasted about 12 seconds, but no querie
 
 ### Key Takeaways
 
-- **HikariCP retry alone is not enough** — Retry reduces connection failures, but the connection pool keeps reusing TCP connections to the old writer. After switchover, the application stays connected to the old environment. Write workloads would hit `read-only transaction` errors. This is a fundamental incompatibility between DNS-based endpoint switching and connection pooling.
+- **HikariCP retry alone is not enough** — Retry reduces connection failures, but all connections are [dropped during switchover](https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/blue-green-deployments-switching.html). When HikariCP creates new connections, if the DNS cache still returns the old writer's IP, it reconnects to the old environment (now demoted to reader). Write workloads would hit `read-only transaction` errors. Depending on DNS propagation timing, new connections may reach the new writer, but during the 60-second DNS TTL window there is a risk of connecting to the old environment. Use the BG plugin when reliable switchover is required.
 - **The AWS JDBC Driver BG plugin truly achieves zero downtime** — 0 failures out of 400 queries. The plugin monitors RDS metadata tables and switches connections using IP-based routing, completely bypassing the DNS TTL problem. However, during the IN_PROGRESS phase, query execution is suspended — one query took ~36 seconds. If your application has HTTP request timeouts shorter than this, the upper layer may time out.
 - **Plugin adoption cost is low** — Change the connection URL to `jdbc:aws-wrapper:postgresql://` and add `bg` to `wrapperPlugins`. No application code changes needed. However, it's only available for Java (JDBC).
 - **Connection pools need connection validation** — If using HikariCP without the BG plugin, configure `connectionTestQuery` and `validationTimeout` to detect and discard stale connections after switchover. Even so, this alone doesn't guarantee switching to the new writer.

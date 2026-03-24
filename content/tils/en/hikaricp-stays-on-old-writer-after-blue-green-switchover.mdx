@@ -1,6 +1,6 @@
 ---
 title: "HikariCP keeps connecting to the old writer after Blue/Green Switchover"
-description: "HikariCP's connection pool reuses TCP connections, so even after DNS updates during Blue/Green Switchover, it never switches to the new writer. Write queries fail with read-only transaction errors. Same behavior on both PostgreSQL and MySQL."
+description: "All connections are dropped during Blue/Green Switchover, but HikariCP may reconnect to the old writer via DNS cache. Write queries fail with read-only transaction errors. Same behavior on both PostgreSQL and MySQL."
 date: "2026-03-25"
 published: true
 tags: ["aws", "aurora", "blue-green-deployment", "java", "hikaricp", "jdbc"]
@@ -8,9 +8,9 @@ tags: ["aws", "aurora", "blue-green-deployment", "java", "hikaricp", "jdbc"]
 
 After an Aurora Blue/Green Switchover, a HikariCP-based application kept connecting to the old writer (now demoted to reader). All 398 successful queries stayed on the old IP — it never switched to the Green environment's new writer.
 
-The root cause is that HikariCP reuses TCP connections from the pool. Even after DNS updates to point to the new writer, existing TCP connections remain connected to the old instance. Read queries succeed, but writes fail with `read-only transaction` errors.
+According to [AWS documentation](https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/blue-green-deployments-switching.html), all connections to both environments are dropped during switchover. However, when HikariCP creates new connections afterward, if the DNS cache still returns the old writer's IP, it reconnects to the old environment (now demoted to reader). Aurora cluster endpoints have a DNS TTL of 60 seconds, so there is a risk of staying connected to the old environment during this window. Read queries succeed, but writes fail with `read-only transaction` errors.
 
-This behavior is identical on both PostgreSQL and MySQL — it's engine-agnostic. It's a fundamental incompatibility between DNS-based endpoint switching and connection pooling.
+This behavior is identical on both PostgreSQL and MySQL — it's engine-agnostic. It's a DNS cache and connection pool reconnection timing issue. Depending on DNS propagation timing, new connections may reach the new writer instead.
 
 Mitigations:
 
