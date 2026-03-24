@@ -41,7 +41,7 @@ Prerequisites:
 - psql (PostgreSQL client)
 - dig (DNS lookup)
 
-The full setup-to-switchover process is documented for reproducibility. Skip to [Results Summary](#results-summary) if you only want the findings.
+The full setup-to-switchover process is documented for reproducibility. Skip to [Summary](#summary) if you only want the findings.
 
 ## Step 1: Building the Aurora Cluster
 
@@ -275,8 +275,10 @@ Results:
 
 Two things stand out:
 
-1. **Two distinct outage windows** — The first ~10 seconds saw immediate connection refusals. After recovery, four consecutive 3-second timeouts occurred ~36 seconds later. This aligns with the DNS TTL (60s) expiring and the new DNS resolution returning the old writer's IP, which was already shutting down.
-2. **Same IP after recovery** — After failover, the cluster endpoint CNAME updates to point to the new writer, but DNS cache keeps resolving to the old IP. Since the old writer was still running, connections succeeded — but a write workload would have hit errors.
+1. **Two distinct outage windows** — The first ~10 seconds saw immediate connection refusals as the instance stopped accepting connections during failover processing. After recovery, four consecutive 3-second timeouts occurred ~36 seconds later. Since the client was still connecting to the old writer's IP (172.31.37.206) after the first recovery, the second outage likely occurred when the DNS cache expired and re-resolution hit an unstable state during endpoint switchover.
+2. **Same IP after recovery** — After failover, the cluster endpoint CNAME updates to point to the new writer, but DNS cache keeps resolving to the old IP. Since the old writer was still running, read queries succeeded — but **a write workload would have hit read-only errors**. This is a fundamental limitation of DNS-based failover.
+
+Failover shows that DNS cache causes split outage windows and risks connecting to the wrong instance after recovery. How does Blue/Green deployment compare?
 
 ## Step 3: Blue/Green Deployment and Switchover
 
@@ -416,8 +418,8 @@ Results:
 
 The differences from failover are clear:
 
-1. **All failures are timeouts** — During failover, some connections were immediately refused. During switchover, all failures were 3-second timeouts because the Blue environment stops accepting connections during the transition.
-2. **Clean IP transition** — Unlike failover where the same IP persisted, switchover shows a clear transition to the Green environment's new IP.
+1. **All failures are timeouts** — During failover, some connections were immediately refused. During switchover, all failures were 3-second timeouts. The timeout (rather than immediate refusal) occurs because the Blue instance stops during switchover and no longer responds at the TCP level.
+2. **Clean IP transition** — Unlike failover where the same IP persisted, switchover shows a clear transition to the Green environment's new IP. Notably, #31 briefly connected to the Blue IP (172.31.26.53) — likely because DNS hadn't fully updated yet and the Blue instance momentarily accepted the connection.
 3. **Version upgraded** — Post-switchover connections return PG 17.6. The major version upgrade completed successfully.
 
 ```bash title="Terminal (post-switchover verification)"
@@ -429,7 +431,9 @@ psql -h bg-test-apg.cluster-xxxxx.rds.amazonaws.com -U postgres \
 PostgreSQL 17.6 on aarch64-unknown-linux-gnu
 ```
 
-## Results Summary
+## Summary
+
+### Results Comparison
 
 | Metric | Failover | Blue/Green Switchover |
 | --- | --- | --- |
@@ -440,7 +444,7 @@ PostgreSQL 17.6 on aarch64-unknown-linux-gnu
 | Preparation time | None | ~30 min (Green provisioning) |
 | App changes | None | None |
 
-## Summary
+### Key Takeaways
 
 - **DNS TTL of 60s is the biggest bottleneck** — In both failover and switchover, DNS cache returning stale IPs is the primary cause of downtime. Reducing DNS cache TTL on the application side or switching to IP-based routing could help.
 - **Blue/Green Switchover downtime is "longer but predictable"** — Failover had connection refusals and timeouts mixed across two separate windows, while switchover showed a continuous 26-second window of uniform timeouts, making retry logic easier to design.
