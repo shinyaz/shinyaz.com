@@ -3,6 +3,7 @@ import Image from "next/image";
 import type { MDXComponents } from "mdx/types";
 import { CodeBlock } from "./code-block";
 import { Mermaid } from "./mermaid";
+import { HeadingH2, HeadingH3, HeadingH4 } from "./heading-link";
 
 /**
  * Extract plain text from rehype-pretty-code's span tree.
@@ -44,6 +45,9 @@ function isMermaidBlock(
 }
 
 export const mdxComponents: MDXComponents = {
+  h2: HeadingH2,
+  h3: HeadingH3,
+  h4: HeadingH4,
   pre: ({ children, ...props }) => {
     const child = children as
       | React.ReactElement<{
