@@ -91,7 +91,54 @@ aws rds create-db-instance \
 
 </details>
 
-クラスターとインスタンスの作成には約10〜15分かかった。両方のインスタンスが `available` になったら接続を確認する。
+クラスターとインスタンスの作成には約10〜15分かかった。以下のコマンドで両方のインスタンスが `available` になるまで待つ。
+
+```bash title="Terminal（状態確認）"
+aws rds describe-db-instances \
+  --filters Name=db-cluster-id,Values=bg-test-apg \
+  --query 'DBInstances[].{Id:DBInstanceIdentifier,Status:DBInstanceStatus}' \
+  --region ap-northeast-1
+```
+
+`available` になったら、ローカルから接続するためにセキュリティグループとパブリックアクセスを設定する。
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">ローカル接続用の設定（SG インバウンドルール + パブリックアクセス）</summary>
+
+```bash title="Terminal"
+# クラスターが使用しているセキュリティグループ ID を確認
+SG_ID=$(aws rds describe-db-clusters \
+  --db-cluster-identifier bg-test-apg \
+  --query 'DBClusters[0].VpcSecurityGroups[0].VpcSecurityGroupId' \
+  --output text --region ap-northeast-1)
+
+# 自分のパブリック IP を取得
+MY_IP=$(curl -s https://checkip.amazonaws.com)
+
+# PostgreSQL ポートを自分の IP からのみ許可
+aws ec2 authorize-security-group-ingress \
+  --group-id "${SG_ID}" \
+  --protocol tcp --port 5432 \
+  --cidr "${MY_IP}/32" \
+  --region ap-northeast-1
+
+# 両インスタンスをパブリックアクセス可能にする
+aws rds modify-db-instance \
+  --db-instance-identifier bg-test-apg-writer \
+  --publicly-accessible --apply-immediately \
+  --region ap-northeast-1
+
+aws rds modify-db-instance \
+  --db-instance-identifier bg-test-apg-reader \
+  --publicly-accessible --apply-immediately \
+  --region ap-northeast-1
+```
+
+パブリックアクセスの反映には1〜2分かかる。反映後、DNS が パブリック IP を返すようになる。
+
+</details>
+
+接続を確認する。
 
 ```bash title="Terminal"
 psql -h bg-test-apg.cluster-xxxxx.ap-northeast-1.rds.amazonaws.com \
@@ -235,10 +282,13 @@ aws rds failover-db-cluster \
 
 ### 論理レプリケーションの有効化
 
-Blue/Green デプロイメントには論理レプリケーションが必要だ。カスタムパラメータグループを作成してクラスターに適用する。
+Blue/Green デプロイメントには論理レプリケーションが必要だ。カスタムパラメータグループを作成してクラスターに適用し、全インスタンスを再起動する。
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">論理レプリケーション有効化の手順（パラメータグループ作成 → 適用 → 再起動）</summary>
 
 ```bash title="Terminal"
-# カスタムパラメータグループ作成
+# Blue 環境用カスタムパラメータグループ作成
 aws rds create-db-cluster-parameter-group \
   --db-cluster-parameter-group-name bg-test-apg16-params \
   --db-parameter-group-family aurora-postgresql16 \
@@ -254,16 +304,26 @@ aws rds modify-db-cluster \
   --db-cluster-identifier bg-test-apg \
   --db-cluster-parameter-group-name bg-test-apg16-params \
   --apply-immediately
+
+# 全インスタンスを再起動（pending-reboot → in-sync にするため）
+aws rds reboot-db-instance --db-instance-identifier bg-test-apg-writer
+aws rds reboot-db-instance --db-instance-identifier bg-test-apg-reader
 ```
 
-パラメータグループの適用後、**全インスタンスの再起動が必要**だ。`pending-reboot` ステータスが `in-sync` になるまで待つ。
+再起動後、パラメータグループのステータスが `in-sync` になるまで待つ。
+
+```bash title="Terminal（ステータス確認）"
+aws rds describe-db-clusters \
+  --db-cluster-identifier bg-test-apg \
+  --query 'DBClusters[0].DBClusterMembers[].{Id:DBInstanceIdentifier,ParamStatus:DBClusterParameterGroupStatus}' \
+  --region ap-northeast-1
+```
+
+</details>
+
+`in-sync` になったら、論理レプリケーションが有効になっていることを確認する。
 
 ```bash title="Terminal"
-# 両インスタンスを再起動
-aws rds reboot-db-instance --db-instance-identifier bg-test-apg-reader
-aws rds reboot-db-instance --db-instance-identifier bg-test-apg-writer
-
-# 確認
 psql -h <cluster-endpoint> -U postgres -c "SHOW rds.logical_replication;"
 ```
 
@@ -274,6 +334,9 @@ psql -h <cluster-endpoint> -U postgres -c "SHOW rds.logical_replication;"
 ```
 
 ここで1つ注意点がある。**カスタムパラメータグループを使っている場合、Green 環境用のパラメータグループも事前に作成しておく必要がある**。今回は PG 16 → 17 のメジャーアップグレードなので、`aurora-postgresql17` ファミリーのパラメータグループが必要だ。
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">Green 環境用パラメータグループの作成</summary>
 
 ```bash title="Terminal"
 aws rds create-db-cluster-parameter-group \
@@ -286,6 +349,8 @@ aws rds modify-db-cluster-parameter-group \
   --parameters "ParameterName=rds.logical_replication,ParameterValue=1,ApplyMethod=pending-reboot"
 ```
 
+</details>
+
 ### Blue/Green デプロイメントの作成
 
 ```bash title="Terminal"
@@ -297,7 +362,14 @@ aws rds create-blue-green-deployment \
   --region ap-northeast-1
 ```
 
-Green 環境のプロビジョニングは3つのフェーズで進行する。
+Green 環境のプロビジョニングは3つのフェーズで進行する。進捗は以下のコマンドで確認できる。
+
+```bash title="Terminal（進捗確認）"
+aws rds describe-blue-green-deployments \
+  --blue-green-deployment-identifier bgd-xxxxx \
+  --query 'BlueGreenDeployments[0].{Status:Status,Tasks:Tasks[].{Name:Name,Status:Status}}' \
+  --region ap-northeast-1
+```
 
 | フェーズ | 内容 | 所要時間（実測） |
 | --- | --- | --- |

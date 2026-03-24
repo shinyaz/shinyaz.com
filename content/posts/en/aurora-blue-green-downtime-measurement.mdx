@@ -91,7 +91,54 @@ aws rds create-db-instance \
 
 </details>
 
-Cluster and instance creation took about 10–15 minutes. Once both instances show `available`, verify the connection.
+Cluster and instance creation took about 10–15 minutes. Check the status with:
+
+```bash title="Terminal (status check)"
+aws rds describe-db-instances \
+  --filters Name=db-cluster-id,Values=bg-test-apg \
+  --query 'DBInstances[].{Id:DBInstanceIdentifier,Status:DBInstanceStatus}' \
+  --region ap-northeast-1
+```
+
+Once both show `available`, configure network access for local connectivity.
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">Local connectivity setup (SG inbound rule + public access)</summary>
+
+```bash title="Terminal"
+# Get the security group ID used by the cluster
+SG_ID=$(aws rds describe-db-clusters \
+  --db-cluster-identifier bg-test-apg \
+  --query 'DBClusters[0].VpcSecurityGroups[0].VpcSecurityGroupId' \
+  --output text --region ap-northeast-1)
+
+# Get your public IP
+MY_IP=$(curl -s https://checkip.amazonaws.com)
+
+# Allow PostgreSQL port from your IP only
+aws ec2 authorize-security-group-ingress \
+  --group-id "${SG_ID}" \
+  --protocol tcp --port 5432 \
+  --cidr "${MY_IP}/32" \
+  --region ap-northeast-1
+
+# Make both instances publicly accessible
+aws rds modify-db-instance \
+  --db-instance-identifier bg-test-apg-writer \
+  --publicly-accessible --apply-immediately \
+  --region ap-northeast-1
+
+aws rds modify-db-instance \
+  --db-instance-identifier bg-test-apg-reader \
+  --publicly-accessible --apply-immediately \
+  --region ap-northeast-1
+```
+
+Public access takes 1–2 minutes to propagate. After that, DNS will resolve to public IPs.
+
+</details>
+
+Verify the connection.
 
 ```bash title="Terminal"
 psql -h bg-test-apg.cluster-xxxxx.ap-northeast-1.rds.amazonaws.com \
@@ -235,10 +282,13 @@ Two things stand out:
 
 ### Enabling Logical Replication
 
-Blue/Green deployments require logical replication. Create a custom parameter group and apply it to the cluster.
+Blue/Green deployments require logical replication. Create a custom parameter group, apply it to the cluster, and reboot all instances.
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">Logical replication setup (parameter group → apply → reboot)</summary>
 
 ```bash title="Terminal"
-# Create custom parameter group
+# Create custom parameter group for Blue environment
 aws rds create-db-cluster-parameter-group \
   --db-cluster-parameter-group-name bg-test-apg16-params \
   --db-parameter-group-family aurora-postgresql16 \
@@ -254,16 +304,26 @@ aws rds modify-db-cluster \
   --db-cluster-identifier bg-test-apg \
   --db-cluster-parameter-group-name bg-test-apg16-params \
   --apply-immediately
+
+# Reboot all instances (required to move from pending-reboot to in-sync)
+aws rds reboot-db-instance --db-instance-identifier bg-test-apg-writer
+aws rds reboot-db-instance --db-instance-identifier bg-test-apg-reader
 ```
 
-After applying the parameter group, **all instances must be rebooted**. Wait for the status to change from `pending-reboot` to `in-sync`.
+Wait for the parameter group status to show `in-sync`:
+
+```bash title="Terminal (status check)"
+aws rds describe-db-clusters \
+  --db-cluster-identifier bg-test-apg \
+  --query 'DBClusters[0].DBClusterMembers[].{Id:DBInstanceIdentifier,ParamStatus:DBClusterParameterGroupStatus}' \
+  --region ap-northeast-1
+```
+
+</details>
+
+Once `in-sync`, verify logical replication is enabled.
 
 ```bash title="Terminal"
-# Reboot both instances
-aws rds reboot-db-instance --db-instance-identifier bg-test-apg-reader
-aws rds reboot-db-instance --db-instance-identifier bg-test-apg-writer
-
-# Verify
 psql -h <cluster-endpoint> -U postgres -c "SHOW rds.logical_replication;"
 ```
 
@@ -274,6 +334,9 @@ psql -h <cluster-endpoint> -U postgres -c "SHOW rds.logical_replication;"
 ```
 
 One gotcha: **if you use a custom parameter group, you must also create one for the Green environment**. Since we're upgrading PG 16 → 17, we need an `aurora-postgresql17` family parameter group.
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">Green environment parameter group creation</summary>
 
 ```bash title="Terminal"
 aws rds create-db-cluster-parameter-group \
@@ -286,6 +349,8 @@ aws rds modify-db-cluster-parameter-group \
   --parameters "ParameterName=rds.logical_replication,ParameterValue=1,ApplyMethod=pending-reboot"
 ```
 
+</details>
+
 ### Creating the Blue/Green Deployment
 
 ```bash title="Terminal"
@@ -297,7 +362,14 @@ aws rds create-blue-green-deployment \
   --region ap-northeast-1
 ```
 
-Green environment provisioning progresses through three phases:
+Green environment provisioning progresses through three phases. Check progress with:
+
+```bash title="Terminal (progress check)"
+aws rds describe-blue-green-deployments \
+  --blue-green-deployment-identifier bgd-xxxxx \
+  --query 'BlueGreenDeployments[0].{Status:Status,Tasks:Tasks[].{Name:Name,Status:Status}}' \
+  --region ap-northeast-1
+```
 
 | Phase | Description | Duration (measured) |
 | --- | --- | --- |
