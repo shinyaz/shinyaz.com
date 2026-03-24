@@ -1,0 +1,261 @@
+---
+title: "Lambda Durable Functions 不正検知実践 — デプロイ・テスト・運用の知見"
+description: "SAMデプロイのハマりポイント、LocalDurableTestRunnerによるローカルテスト、実行履歴の追跡方法を実体験ベースで整理。修飾付きARN必須の罠が最初の関門。"
+date: 2026-03-26
+published: false
+featured: false
+categories:
+  - infrastructure
+tags: ["aws", "lambda", "serverless", "durable-functions", "bedrock", "agentcore", "fraud-detection"]
+series: "lambda-durable-fraud-detection"
+seriesOrder: 3
+---
+
+## はじめに
+
+[Part 1](/ja/blog/2026/03/26/lambda-durable-fraud-detection-overview) でデモの全体像と基本動作を、[Part 2](/ja/blog/2026/03/26/lambda-durable-fraud-detection-best-practices) で6つのベストプラクティスを検証した。本記事では、デプロイ・テスト・運用で得た実践的な知見を共有する。
+
+公式ブログやドキュメントには書かれていない、実際に手を動かして初めて分かるポイントに焦点を当てる。
+
+## デプロイ時のハマりポイント
+
+### tsc がグローバルにない問題
+
+`deploy-sam.sh` は TypeScript のコンパイルに `tsc` を直接呼び出す。グローバルにインストールされていない環境では以下のエラーで止まる。
+
+```text title="Output"
+deploy-sam.sh: line 88: tsc: command not found
+```
+
+`npx tsc` に置き換えるか、手動で `FraudDetection-Lambda/` ディレクトリに入ってビルドすれば解決する。
+
+```bash title="Terminal"
+cd FraudDetection-Lambda
+npm install
+npx tsc
+```
+
+デプロイスクリプトは Docker イメージのビルド → Lambda パッケージ作成 → S3 アップロード → SAM デプロイの順で実行されるため、`tsc` のエラーは Docker イメージのプッシュ後に発生する。つまり ECR へのプッシュは成功しているので、手動ビルド後に S3 アップロードと SAM デプロイだけ再実行すればよい。
+
+### 修飾付き ARN が必須
+
+Durable Function の呼び出しには、バージョン修飾子付きの ARN が必要だ。未修飾の関数名で呼び出すと以下のエラーになる。
+
+```text title="Output"
+An error occurred (InvalidParameterValueException):
+You cannot invoke a durable function using an unqualified ARN.
+```
+
+`fn-Fraud-Detection:$LATEST` のように `$LATEST` を付けるか、`publish-version` で作成したバージョン番号を指定する。シェルスクリプトでは `$LATEST` の `$` がエスケープ対象になるため注意が必要だ。
+
+```bash title="Terminal"
+# 正しい
+aws lambda invoke --function-name "fn-Fraud-Detection:\$LATEST" ...
+
+# 間違い（$LATEST が展開されて空文字になる）
+aws lambda invoke --function-name "fn-Fraud-Detection:$LATEST" ...
+```
+
+### SAM テンプレートの DurableConfig
+
+SAM テンプレートでは `AWS::Serverless::Function` の `DurableConfig` プロパティで Durable 設定を宣言的に定義できる。
+
+```yaml title="template.yaml"
+FraudDetectionFunction:
+  Type: AWS::Serverless::Function
+  Properties:
+    DurableConfig:
+      ExecutionTimeout: !Ref ExecutionTimeout
+      RetentionPeriodInDays: !Ref RetentionPeriodInDays
+```
+
+AWS CLI で `create-function` する場合の `--durable-config` と同等だが、CloudFormation / SAM で管理できるため、IaC との親和性が高い。
+
+## ローカルテスト
+
+### LocalDurableTestRunner
+
+デモには `FraudDetection-Lambda/src/index.test.ts` にユニットテストが含まれている。`LocalDurableTestRunner` を使うことで、AWS にデプロイせずにローカルで Durable Functions のワークフローをテストできる。
+
+```bash title="Terminal"
+cd FraudDetection-Lambda
+npm install
+npm test
+```
+
+```text title="Output"
+PASS src/index.test.ts
+  Fraud Detection Durable Function
+    Low Risk Transactions (score < 3)
+      ✓ should authorize transaction immediately when score is 1 (246 ms)
+      ✓ should authorize transaction when score is 2 (160 ms)
+    High Risk Transactions (score >= 5)
+      ✓ should send to fraud department when score is 5 (163 ms)
+    Medium Risk Transactions (score 3-4) - Human Verification
+      ✓ should authorize when customer approves via email callback (302 ms)
+      ✓ should authorize when customer approves via SMS callback (299 ms)
+      ✓ should verify parallel operation structure exists (313 ms)
+
+Test Suites: 1 passed, 1 total
+Tests:       6 passed, 6 total
+```
+
+6テストで全3分岐をカバーしている。テストでは `score` フィールドをイベントに直接渡すことで Bedrock AgentCore の呼び出しをバイパスし、決定的なテストを実現している。
+
+### コールバックのテスト方法
+
+Medium Risk のテストでは、`waitForData` と `sendCallbackSuccess` を使ってコールバックをシミュレートしている。実際のテストコード（`index.test.ts`）を簡略化すると以下の流れになる。
+
+```typescript title="テストの流れ（概要）"
+// 1. 実行を開始
+const runner = new LocalDurableTestRunner(handler);
+const execution = runner.start(mediumRiskEvent);
+
+// 2. コールバック待ちになるまで待機
+const callbackData = await execution.waitForData(WaitingOperationStatus.STARTED);
+
+// 3. コールバックを送信
+await execution.sendCallbackSuccess(callbackId, { status: "approved" });
+
+// 4. 結果を検証
+const result = await execution.getResult();
+expect(result.body.result).toBe("authorized");
+```
+
+実際の AWS 環境にデプロイせずにコールバックフローを検証できるのは、開発サイクルの高速化に大きく貢献する。
+
+## 運用時の追跡方法
+
+### 実行一覧の確認
+
+`list-durable-executions-by-function` で関数に紐づく全実行を一覧できる。
+
+```bash title="Terminal"
+aws lambda list-durable-executions-by-function \
+  --function-name "fn-Fraud-Detection:\$LATEST" \
+  --region us-east-2
+```
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">Output（実行一覧の例）</summary>
+
+```json title="Output"
+{
+  "DurableExecutions": [
+    {
+      "DurableExecutionName": "tx-medium-risk-001",
+      "Status": "SUCCEEDED",
+      "StartTimestamp": "2026-03-24T22:51:00.375000+09:00",
+      "EndTimestamp": "2026-03-24T22:52:03.191000+09:00"
+    },
+    {
+      "DurableExecutionName": "tx-high-risk-001",
+      "Status": "SUCCEEDED",
+      "StartTimestamp": "2026-03-24T22:50:34.026000+09:00",
+      "EndTimestamp": "2026-03-24T22:50:34.638000+09:00"
+    },
+    {
+      "DurableExecutionName": "tx-low-risk-001",
+      "Status": "SUCCEEDED",
+      "StartTimestamp": "2026-03-24T22:50:05.834000+09:00",
+      "EndTimestamp": "2026-03-24T22:50:08.570000+09:00"
+    }
+  ]
+}
+```
+
+</details>
+
+ステータス（`RUNNING`, `SUCCEEDED`, `FAILED`）とタイムスタンプで実行状況を把握できる。
+
+### 実行履歴の詳細
+
+`get-durable-execution-history` で各ステップの詳細を時系列で確認できる。`--include-execution-data` を付けると、各ステップの入出力データも含まれる。
+
+```bash title="Terminal"
+aws lambda get-durable-execution-history \
+  --durable-execution-arn "<EXECUTION_ARN>" \
+  --region us-east-2 \
+  --include-execution-data
+```
+
+Medium Risk の実行履歴からは以下が読み取れる。
+
+- `fraudCheck` のスコア結果（3）
+- `suspend-3` の成功
+- `human-verification` の Parallel 構造（2ブランチ）
+- 各コールバックの ID とタイムアウト値（86400秒 = 24時間）
+- アクティブ処理時間（約730ms）
+
+### CloudWatch Logs
+
+`context.logger` で出力したログは CloudWatch Logs に記録される。`requestId` と `executionArn` が自動付与されるため、特定の実行に絞り込める。
+
+```bash title="Terminal"
+aws logs tail /aws/lambda/fn-Fraud-Detection \
+  --region us-east-2 \
+  --follow
+```
+
+```json title="Output（ログエントリ例）"
+{
+  "requestId": "58528d39-1385-45a1-80f1-57213d7afa4b",
+  "timestamp": "2026-03-24T13:51:00.525Z",
+  "level": "INFO",
+  "executionArn": "d0167685-e349-3d67-9031-cdd59577e831",
+  "message": "Transaction Score { score: 3, txId: 3 }"
+}
+```
+
+## Bedrock AgentCore エージェントについて
+
+デモのエージェント（`FraudDetection-Agent/agent.py`）は FastAPI + Strands SDK で実装されているが、実際の LLM は使っていない。金額に基づく重み付きランダムでスコアを返す。
+
+```text title="スコアの決定ロジック"
+$1,000 未満     → スコア 1-2（自動承認）
+$1,000-$4,999  → スコア 1-4（低リスク寄り）
+$5,000-$9,999  → スコア 3-5（高リスク寄り）
+$6,500（固定）  → スコア 3（Medium Risk 確定）
+$10,000 以上    → スコア 5（不正部門送り確定）
+```
+
+検証の再現性を確保するには6,500ドル（必ずスコア3）や10,000ドル（必ずスコア5）を使うとよい。ランダム要素のある金額帯では、実行ごとに異なるパスに分岐する可能性がある。
+
+また、イベントに `score` フィールドを直接渡すとエージェント呼び出しをバイパスできる。ローカルテストではこの仕組みを活用している。
+
+## クリーンアップ
+
+SAM でデプロイした場合は `sam delete` で全リソースを一括削除できる。
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">リソース削除コマンド</summary>
+
+```bash title="Terminal"
+# SAM スタックの削除（Lambda, IAM, AgentCore Runtime を含む）
+sam delete --stack-name fraud-detection-durable-function --region us-east-2
+
+# S3 バケットの削除（SAM スタック外で作成した場合）
+aws s3 rb s3://durable-functions-<ACCOUNT_ID> --force --region us-east-2
+
+# ECR リポジトリの削除
+aws ecr delete-repository \
+  --repository-name fraud-risk-scorer \
+  --region us-east-2 \
+  --force
+
+# CloudWatch ロググループの削除
+aws logs delete-log-group \
+  --log-group-name /aws/lambda/fn-Fraud-Detection \
+  --region us-east-2
+```
+
+Durable Functions のチェックポイントデータは `RetentionPeriodInDays`（デモでは7日）で自動削除されるため、手動対応は不要だ。
+
+</details>
+
+## まとめ
+
+- **LocalDurableTestRunner がローカル開発の鍵** — AWS にデプロイせずにコールバックフローまで検証できる。開発サイクルの高速化に直結する。テストでは `score` フィールドでエージェント呼び出しをバイパスし、決定的なテストを実現している。
+- **修飾付き ARN 必須は最初の関門** — `$LATEST` を付け忘れると即座にエラーになる。シェルスクリプトでの `$` エスケープも要注意。ドキュメントを読んでいても実際にハマるポイントだ。
+- **実行履歴 API が監査・デバッグに有用** — `get-durable-execution-history` で各ステップの入出力・タイムスタンプ・コールバック ID を時系列で追跡できる。金融系ワークフローの監査要件にも対応しやすい。
+- **SAM テンプレートの DurableConfig で IaC 管理** — `ExecutionTimeout` や `RetentionPeriodInDays` を CloudFormation パラメータとして管理できるため、環境ごとの設定変更が容易だ。

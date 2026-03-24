@@ -1,0 +1,25 @@
+---
+title: "Lambda Durable Functions の呼び出しには修飾付き ARN が必須"
+description: "未修飾の関数名で invoke すると InvalidParameterValueException になる。$LATEST を付けるか publish-version したバージョン番号を指定する。"
+date: "2026-03-26"
+published: false
+tags: ["aws", "lambda", "durable-functions"]
+---
+
+Durable Function を普通の関数名で呼び出したら即エラーになった。
+
+```text title="Output"
+An error occurred (InvalidParameterValueException) when calling the Invoke operation: You cannot invoke a durable function using an unqualified ARN.
+```
+
+`fn-Fraud-Detection:$LATEST` のようにバージョン修飾子を付ける必要がある。`publish-version` で作成したバージョン番号でもよい。
+
+```bash title="Terminal"
+# 正しい（$LATEST をエスケープ）
+aws lambda invoke --function-name "fn-Fraud-Detection:\$LATEST" ...
+
+# 間違い（$LATEST がシェル変数として展開され空文字になる）
+aws lambda invoke --function-name "fn-Fraud-Detection:$LATEST" ...
+```
+
+シェルスクリプトでは `$LATEST` の `$` がエスケープ対象になる点も罠だ。ダブルクォート内では `\$LATEST`、シングルクォート内ならそのまま `$LATEST` で通る。通常の Lambda 関数では未修飾でも動くため、Durable Functions を初めて触るときに確実にハマるポイントだと思う。

@@ -1,0 +1,244 @@
+---
+title: "6 best practices for Lambda Durable Functions verified with a fraud detection demo"
+description: "Verified idempotency, DurableExecutionName, parallel callbacks, and timeout configuration hands-on. The common principle: design everything assuming replay will happen."
+date: 2026-03-26
+published: false
+featured: false
+categories:
+  - infrastructure
+tags: ["aws", "lambda", "serverless", "durable-functions", "bedrock", "agentcore", "fraud-detection"]
+series: "lambda-durable-fraud-detection"
+seriesOrder: 2
+---
+
+## Introduction
+
+[Part 1](/en/blog/2026/03/26/lambda-durable-fraud-detection-overview) covered the demo overview and basic behavior across three risk patterns. This article verifies the six best practices from the [AWS Compute Blog post](https://aws.amazon.com/blogs/compute/best-practices-for-lambda-durable-functions-using-a-fraud-detection-example/).
+
+The common principle across all six best practices is "design assuming replay will happen." Durable Functions use a checkpoint-and-replay model, meaning steps can execute more than once. Without understanding this, you risk duplicate charges or indefinite waits.
+
+## BP1: Design Steps to Be Idempotent
+
+Durable Functions default to at-least-once execution. Steps retry on failure, so any step with side effects must be idempotent.
+
+### Strategy A: External API Idempotency Keys
+
+The demo code passes `idempotency_key` to the authorization step.
+
+```typescript title="index.ts"
+return await context.step(`authorize-${tx.id}`, async () =>
+  tx.authorize(tx, false, { idempotency_key: `tx-${tx.id}` })
+);
+```
+
+```typescript title="index.ts (finalize step)"
+return await tx.authorize(tx, true, { idempotency_key: `finalize-${tx.id}` });
+```
+
+The step name includes the transaction ID (`authorize-${tx.id}`), and the external API also receives an idempotency key — defense in depth. Even if Lambda's checkpoint fails, the external API prevents duplicates. In financial workflows, a duplicate charge is the worst-case scenario, so relying on a single layer of protection is not enough.
+
+### Strategy B: At-Most-Once Semantics
+
+For legacy systems without idempotency support, use `StepSemantics.AtMostOncePerRetry`.
+
+```typescript title="TypeScript"
+await context.step("charge-legacy-system", async () => {
+  return await legacyPaymentSystem.charge(tx.amount);
+}, {
+  semantics: StepSemantics.AtMostOncePerRetry,
+  retryStrategy: createRetryStrategy({ maxAttempts: 0 })
+});
+```
+
+This checkpoints before execution, preventing re-execution. The tradeoff: if the step fails, you must decide whether to retry (risking duplicates) or fail the entire workflow.
+
+### Decision Guide
+
+| Situation | Recommended Strategy |
+|---|---|
+| External API supports idempotency keys | Strategy A (idempotency keys) |
+| Legacy system, no idempotency | Strategy B (AtMostOnce) |
+| Database writes (UPSERT possible) | Strategy A (unique key UPSERT) |
+| Notifications (email, SMS) | Strategy A (message ID deduplication) |
+
+## BP2: Prevent Duplicate Executions with DurableExecutionName
+
+Step-level idempotency isn't enough. Duplicate queue messages or UI double-clicks can launch the workflow multiple times.
+
+`DurableExecutionName` ensures only one concurrent execution per unique name. If an execution with the same name already exists, the API returns the existing execution's ARN instead of creating a new one.
+
+```bash title="Terminal (first invocation)"
+aws lambda invoke \
+  --function-name "fn-Fraud-Detection:\$LATEST" \
+  --invocation-type Event \
+  --durable-execution-name "tx-medium-risk-001" \
+  --payload '{"id": 3, "amount": 6500, ...}' \
+  --region us-east-2 response.json
+```
+
+```json title="Output"
+{
+  "StatusCode": 202,
+  "DurableExecutionArn": "...tx-medium-risk-001/d0167685-e349-3d67-..."
+}
+```
+
+Invoke again with the same name.
+
+```bash title="Terminal (second invocation — same name)"
+aws lambda invoke \
+  --function-name "fn-Fraud-Detection:\$LATEST" \
+  --invocation-type Event \
+  --durable-execution-name "tx-medium-risk-001" \
+  --payload '{"id": 3, "amount": 6500, ...}' \
+  --region us-east-2 response.json
+```
+
+```json title="Output"
+{
+  "StatusCode": 202,
+  "DurableExecutionArn": "...tx-medium-risk-001/d0167685-e349-3d67-..."
+}
+```
+
+**Same `DurableExecutionArn` returned.** No new execution was created. Using a business-unique key like transaction ID as the `DurableExecutionName` provides workflow-level idempotency.
+
+## BP3: Use an Intermediary Lambda for Event Source Mappings
+
+Event Source Mappings (ESM) for SQS, Kinesis, and DynamoDB Streams invoke Lambda synchronously, subject to the 15-minute limit. Workflows with 24-hour callback waits can't be invoked directly from ESM.
+
+The solution is an intermediary Lambda function.
+
+```text title="Architecture"
+SQS → Intermediary Lambda (ESM, sync) → Durable Function (Event, async)
+```
+
+```typescript title="Intermediary Lambda"
+export const handler = async (event) => {
+  for (const record of event.Records) {
+    const transaction = JSON.parse(record.body);
+    await lambda.invoke({
+      FunctionName: process.env.FRAUD_DETECTION_FUNCTION,
+      InvocationType: 'Event',
+      DurableExecutionName: `tx-${transaction.id}`,
+      Payload: JSON.stringify(transaction)
+    });
+  }
+};
+```
+
+The blog recommends [Powertools for AWS Lambda](https://aws.amazon.com/powertools-for-aws-lambda/) for idempotency in the intermediary function, plus SQS dead letter queues or on-failure destinations for failure handling.
+
+This demo doesn't use ESM, so I didn't verify this hands-on, but it's a critical pattern for production.
+
+## BP4: Match Timeouts to Invocation Type
+
+Three timeout types exist, and their relationship matters.
+
+| Setting | Demo Value | Meaning |
+|---|---|---|
+| Lambda `Timeout` | 120 seconds | Max duration per active execution phase (one invocation or replay cycle; doesn't count during suspension) |
+| `ExecutionTimeout` | 90000 seconds (25 hours) | Max total workflow duration including suspension |
+| `InvocationType` | Event (async) | Async allows up to 1 year; sync is limited to 15 minutes |
+
+`ExecutionTimeout` (25 hours) is intentionally set above the callback `timeout: { days: 1 }` (24 hours). This leaves room for fallback processing (escalation to fraud department) after callback timeout.
+
+### Verifying the Synchronous Invocation Limit
+
+What happens when you synchronously invoke a Durable Function with `ExecutionTimeout` over 15 minutes?
+
+```bash title="Terminal"
+aws lambda invoke \
+  --function-name "fn-Fraud-Detection:\$LATEST" \
+  --invocation-type RequestResponse \
+  --durable-execution-name "tx-sync-test" \
+  --payload '{"id": 4, "amount": 6500, ...}' \
+  --region us-east-2 response.json
+```
+
+```text title="Output"
+An error occurred (InvalidParameterValueException):
+You cannot synchronously invoke a durable function
+with an executionTimeout greater than 15 minutes.
+```
+
+A clear error message at invocation time. Long-running workflows require `InvocationType: 'Event'`.
+
+## BP5: Execute Concurrent Operations with context.parallel()
+
+The demo sends Email and SMS notifications concurrently using `context.parallel()` with `completionConfig: { minSuccessful: 1 }` — the first-response-wins pattern where either channel's success completes the workflow.
+
+### First-Response-Wins Pattern Verified
+
+In Part 1, I confirmed that sending only the email callback completed the workflow. The SMS callback was never sent, but `minSuccessful: 1` meant the email success alone completed the parallel operation.
+
+This pattern works well for:
+
+- **Notification channel redundancy** — If email fails to deliver, SMS can still reach the user
+- **Response speed optimization** — Whichever channel responds first drives the workflow forward
+- **User experience** — Responding from either channel produces the same result
+
+Note: `context.parallel()` manages internal execution state, but concurrent access to external shared state (e.g., databases) is your responsibility.
+
+## BP6: Always Configure Callback Timeouts
+
+BP5's parallel operation plus timeout and error handling gives us the demo's actual code. A `waitForCallback` without a timeout waits until `ExecutionTimeout` — 25 hours in this demo, but up to 1 year by default.
+
+```typescript title="index.ts (timeout + error handling)"
+try {
+  verified = await context.parallel("human-verification", [
+    (ctx) => ctx.waitForCallback("SendVerificationEmail",
+      async (callbackId) => tx.sendCustomerNotification(callbackId, 'email', tx),
+      { timeout: { days: 1 } }  // 24-hour timeout
+    ),
+    (ctx) => ctx.waitForCallback("SendVerificationSMS",
+      async (callbackId) => tx.sendCustomerNotification(callbackId, 'sms', tx),
+      { timeout: { days: 1 } }
+    )
+  ], { maxConcurrency: 2, completionConfig: { minSuccessful: 1 } });
+} catch (error) {
+  const isTimeout = (error instanceof Error && error.message?.includes("timeout")) ||
+    (typeof error === 'string' && error.includes("timeout"));
+  context.logger.warn(
+    isTimeout ? "Customer verification timeout" : "Customer verification failed",
+    { error, txId: tx.id }
+  );
+  // Fallback: escalate to fraud department
+  return await context.step(`timeout-escalate-${tx.id}`, async () =>
+    tx.sendToFraud(tx, true)
+  );
+}
+```
+
+Three key points:
+
+1. **Explicit timeout** — `timeout: { days: 1 }` caps the wait at 24 hours
+2. **try/catch for timeout detection** — Checks if the error message contains "timeout", handling both `Error` objects and string errors
+3. **Fallback processing** — Whether timeout or not, any error in the catch block triggers escalation to the fraud department. Timeout errors are logged at `warn` level for distinction
+
+Timeouts work with `minSuccessful`: if one branch times out but the other succeeds, the parallel operation still completes. Only when both time out does the catch block execute.
+
+## How the 6 Best Practices Connect
+
+The six BPs appear independent but work together in practice.
+
+```text title="BP relationships"
+At invocation:  BP2 (DurableExecutionName) → workflow deduplication
+                BP4 (InvocationType: Event) → bypass 15-min limit
+                BP3 (intermediary Lambda) → for ESM sources
+
+During execution: BP1 (idempotent steps) → prevent side-effect duplication
+                  BP5 (parallel) → concurrent notifications
+                  BP6 (timeouts) → prevent indefinite waits
+
+Unifying principle: design assuming replay will happen
+```
+
+## Takeaways
+
+- **"Assume replay" is the unifying principle** — Understanding the checkpoint-and-replay model makes all six BPs intuitive. Idempotency and timeouts are both defenses against replay.
+- **Defense in depth is key for financial workflows** — BP1's idempotency keys (external API) + checkpoints (Lambda), BP2's DurableExecutionName + BP1's step idempotency. Never rely on a single layer of protection.
+- **Design timeout hierarchies deliberately** — Callback timeout (24h) < ExecutionTimeout (25h) < max execution lifetime (1 year). Verify that each layer nests correctly.
+- **The ESM intermediary pattern is common in production** — Event-driven processing from SQS or Kinesis is standard in financial systems. The intermediary Lambda + Powertools idempotency + DLQ combination is a pattern worth internalizing.
+
+Next: [Part 3](/en/blog/2026/03/26/lambda-durable-fraud-detection-operations) shares practical insights from deployment, testing, and operations.

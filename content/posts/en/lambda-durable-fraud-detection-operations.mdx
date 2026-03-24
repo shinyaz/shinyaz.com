@@ -1,0 +1,259 @@
+---
+title: "Deploy, test, and operations insights for the Lambda Durable Functions fraud detection demo"
+description: "SAM deployment gotchas, local testing with LocalDurableTestRunner, and execution history tracking from hands-on experience. The qualified ARN requirement is the first hurdle."
+date: 2026-03-26
+published: false
+featured: false
+categories:
+  - infrastructure
+tags: ["aws", "lambda", "serverless", "durable-functions", "bedrock", "agentcore", "fraud-detection"]
+series: "lambda-durable-fraud-detection"
+seriesOrder: 3
+---
+
+## Introduction
+
+[Part 1](/en/blog/2026/03/26/lambda-durable-fraud-detection-overview) covered the demo overview and basic behavior. [Part 2](/en/blog/2026/03/26/lambda-durable-fraud-detection-best-practices) verified the six best practices. This article shares practical insights from deployment, testing, and operations — things you only discover by actually doing it.
+
+## Deployment Gotchas
+
+### tsc Not Found Globally
+
+`deploy-sam.sh` calls `tsc` directly for TypeScript compilation. Without a global install, it fails:
+
+```text title="Output"
+deploy-sam.sh: line 88: tsc: command not found
+```
+
+Replace with `npx tsc` or manually build in the `FraudDetection-Lambda/` directory.
+
+```bash title="Terminal"
+cd FraudDetection-Lambda
+npm install
+npx tsc
+```
+
+The deploy script runs in order: Docker image build → Lambda packaging → S3 upload → SAM deploy. The `tsc` error occurs after the Docker image push to ECR succeeds. So after manual building, you only need to re-run the S3 upload and SAM deploy steps.
+
+### Qualified ARN Required
+
+Durable Function invocation requires a version-qualified ARN. Using an unqualified function name produces:
+
+```text title="Output"
+An error occurred (InvalidParameterValueException):
+You cannot invoke a durable function using an unqualified ARN.
+```
+
+Append `$LATEST` like `fn-Fraud-Detection:$LATEST`, or use a version number from `publish-version`. In shell scripts, the `$` in `$LATEST` needs escaping.
+
+```bash title="Terminal"
+# Correct
+aws lambda invoke --function-name "fn-Fraud-Detection:\$LATEST" ...
+
+# Wrong ($LATEST expands to empty string)
+aws lambda invoke --function-name "fn-Fraud-Detection:$LATEST" ...
+```
+
+### DurableConfig in SAM Templates
+
+SAM templates support the `DurableConfig` property on `AWS::Serverless::Function` for declarative Durable configuration.
+
+```yaml title="template.yaml"
+FraudDetectionFunction:
+  Type: AWS::Serverless::Function
+  Properties:
+    DurableConfig:
+      ExecutionTimeout: !Ref ExecutionTimeout
+      RetentionPeriodInDays: !Ref RetentionPeriodInDays
+```
+
+Equivalent to `--durable-config` with `create-function` via AWS CLI, but managed through CloudFormation/SAM for better IaC integration.
+
+## Local Testing
+
+### LocalDurableTestRunner
+
+The demo includes unit tests in `FraudDetection-Lambda/src/index.test.ts`. `LocalDurableTestRunner` lets you test Durable Functions workflows locally without deploying to AWS.
+
+```bash title="Terminal"
+cd FraudDetection-Lambda
+npm install
+npm test
+```
+
+```text title="Output"
+PASS src/index.test.ts
+  Fraud Detection Durable Function
+    Low Risk Transactions (score < 3)
+      ✓ should authorize transaction immediately when score is 1 (246 ms)
+      ✓ should authorize transaction when score is 2 (160 ms)
+    High Risk Transactions (score >= 5)
+      ✓ should send to fraud department when score is 5 (163 ms)
+    Medium Risk Transactions (score 3-4) - Human Verification
+      ✓ should authorize when customer approves via email callback (302 ms)
+      ✓ should authorize when customer approves via SMS callback (299 ms)
+      ✓ should verify parallel operation structure exists (313 ms)
+
+Test Suites: 1 passed, 1 total
+Tests:       6 passed, 6 total
+```
+
+Six tests cover all three branches. Tests pass a `score` field directly in the event to bypass the Bedrock AgentCore call, enabling deterministic testing.
+
+### Testing Callbacks
+
+Medium Risk tests use `waitForData` and `sendCallbackSuccess` to simulate callbacks. Here's a simplified version of the actual test flow from `index.test.ts`.
+
+```typescript title="Test flow (overview)"
+// 1. Start execution
+const runner = new LocalDurableTestRunner(handler);
+const execution = runner.start(mediumRiskEvent);
+
+// 2. Wait until callback is pending
+const callbackData = await execution.waitForData(WaitingOperationStatus.STARTED);
+
+// 3. Send callback
+await execution.sendCallbackSuccess(callbackId, { status: "approved" });
+
+// 4. Verify result
+const result = await execution.getResult();
+expect(result.body.result).toBe("authorized");
+```
+
+Being able to verify callback flows without deploying to AWS significantly speeds up the development cycle.
+
+## Operations Tracking
+
+### Listing Executions
+
+`list-durable-executions-by-function` lists all executions for a function.
+
+```bash title="Terminal"
+aws lambda list-durable-executions-by-function \
+  --function-name "fn-Fraud-Detection:\$LATEST" \
+  --region us-east-2
+```
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">Output (execution list example)</summary>
+
+```json title="Output"
+{
+  "DurableExecutions": [
+    {
+      "DurableExecutionName": "tx-medium-risk-001",
+      "Status": "SUCCEEDED",
+      "StartTimestamp": "2026-03-24T22:51:00.375000+09:00",
+      "EndTimestamp": "2026-03-24T22:52:03.191000+09:00"
+    },
+    {
+      "DurableExecutionName": "tx-high-risk-001",
+      "Status": "SUCCEEDED",
+      "StartTimestamp": "2026-03-24T22:50:34.026000+09:00",
+      "EndTimestamp": "2026-03-24T22:50:34.638000+09:00"
+    },
+    {
+      "DurableExecutionName": "tx-low-risk-001",
+      "Status": "SUCCEEDED",
+      "StartTimestamp": "2026-03-24T22:50:05.834000+09:00",
+      "EndTimestamp": "2026-03-24T22:50:08.570000+09:00"
+    }
+  ]
+}
+```
+
+</details>
+
+Status (`RUNNING`, `SUCCEEDED`, `FAILED`) and timestamps give a clear picture of execution state.
+
+### Detailed Execution History
+
+`get-durable-execution-history` shows step-by-step details chronologically. Add `--include-execution-data` for step input/output data.
+
+```bash title="Terminal"
+aws lambda get-durable-execution-history \
+  --durable-execution-arn "<EXECUTION_ARN>" \
+  --region us-east-2 \
+  --include-execution-data
+```
+
+From the Medium Risk execution history, you can read:
+
+- `fraudCheck` score result (3)
+- `suspend-3` success
+- `human-verification` Parallel structure (2 branches)
+- Each callback's ID and timeout value (86400 seconds = 24 hours)
+- Active processing time (~730ms)
+
+### CloudWatch Logs
+
+Logs from `context.logger` go to CloudWatch Logs with automatic `requestId` and `executionArn` fields for filtering.
+
+```bash title="Terminal"
+aws logs tail /aws/lambda/fn-Fraud-Detection \
+  --region us-east-2 \
+  --follow
+```
+
+```json title="Output (log entry example)"
+{
+  "requestId": "58528d39-1385-45a1-80f1-57213d7afa4b",
+  "timestamp": "2026-03-24T13:51:00.525Z",
+  "level": "INFO",
+  "executionArn": "d0167685-e349-3d67-9031-cdd59577e831",
+  "message": "Transaction Score { score: 3, txId: 3 }"
+}
+```
+
+## About the Bedrock AgentCore Agent
+
+The demo agent (`FraudDetection-Agent/agent.py`) is built with FastAPI + Strands SDK but doesn't use an actual LLM. It returns scores via weighted random based on amount.
+
+```text title="Score determination logic"
+Under $1,000    → Score 1-2 (auto-approve)
+$1,000-$4,999  → Score 1-4 (weighted toward lower)
+$5,000-$9,999  → Score 3-5 (weighted toward higher)
+$6,500 (fixed) → Score 3 (guaranteed Medium Risk)
+$10,000+       → Score 5 (guaranteed fraud department)
+```
+
+For reproducible testing, use \$6,500 (always score 3) or \$10,000 (always score 5). Amounts in the random ranges may produce different paths across runs.
+
+The event also accepts a `score` field to bypass the agent call entirely — the mechanism used by local tests.
+
+## Cleanup
+
+For SAM deployments, `sam delete` removes all resources at once.
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">Resource deletion commands</summary>
+
+```bash title="Terminal"
+# Delete SAM stack (includes Lambda, IAM, AgentCore Runtime)
+sam delete --stack-name fraud-detection-durable-function --region us-east-2
+
+# Delete S3 bucket (if created outside SAM stack)
+aws s3 rb s3://durable-functions-<ACCOUNT_ID> --force --region us-east-2
+
+# Delete ECR repository
+aws ecr delete-repository \
+  --repository-name fraud-risk-scorer \
+  --region us-east-2 \
+  --force
+
+# Delete CloudWatch log group
+aws logs delete-log-group \
+  --log-group-name /aws/lambda/fn-Fraud-Detection \
+  --region us-east-2
+```
+
+Durable Functions checkpoint data is automatically deleted after `RetentionPeriodInDays` (7 days in this demo), so no manual cleanup is needed.
+
+</details>
+
+## Takeaways
+
+- **LocalDurableTestRunner is the key to local development** — Test callback flows without deploying to AWS. The `score` field bypass enables deterministic tests. This directly accelerates the development cycle.
+- **Qualified ARN requirement is the first hurdle** — Forgetting `$LATEST` produces an immediate error. Shell script `$` escaping is another trap. You'll hit this even after reading the docs.
+- **Execution history APIs are valuable for auditing and debugging** — `get-durable-execution-history` tracks each step's input/output, timestamps, and callback IDs chronologically. Well-suited for financial workflow audit requirements.
+- **DurableConfig in SAM templates enables IaC management** — `ExecutionTimeout` and `RetentionPeriodInDays` as CloudFormation parameters make per-environment configuration changes straightforward.

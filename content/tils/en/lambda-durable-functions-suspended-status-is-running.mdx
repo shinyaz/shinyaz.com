@@ -1,0 +1,23 @@
+---
+title: "Lambda Durable Functions show RUNNING status even when suspended"
+description: "A Durable Function waiting for a callback reports RUNNING, not SUSPENDED. Check execution history for CallbackStarted events to determine actual state."
+date: "2026-03-26"
+published: false
+tags: ["aws", "lambda", "durable-functions"]
+---
+
+Expected a Durable Function waiting for a callback to show `SUSPENDED` status, but `get-durable-execution` returns `RUNNING`.
+
+```bash title="Terminal"
+aws lambda get-durable-execution \
+  --durable-execution-arn "<ARN>" \
+  --region us-east-2
+```
+
+```json title="Output"
+{
+  "Status": "RUNNING"
+}
+```
+
+To determine if a function is actually suspended, check `get-durable-execution-history` for a `CallbackStarted` event without a corresponding `CallbackSucceeded` or `CallbackFailed`. The status alone doesn't distinguish "actively processing" from "waiting for a callback with zero compute charges." Worth keeping in mind when building monitoring or dashboards.

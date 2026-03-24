@@ -1,0 +1,23 @@
+---
+title: "Lambda Durable Functions のサスペンド中ステータスは RUNNING"
+description: "コールバック待ちでサスペンドしていても get-durable-execution のステータスは RUNNING。実行履歴の CallbackStarted イベントで判断する。"
+date: "2026-03-26"
+published: false
+tags: ["aws", "lambda", "durable-functions"]
+---
+
+Durable Function がコールバック待ちでサスペンドしているとき、`get-durable-execution` のステータスが `SUSPENDED` になると思っていたが、実際は `RUNNING` だった。
+
+```bash title="Terminal"
+aws lambda get-durable-execution \
+  --durable-execution-arn "<ARN>" \
+  --region us-east-2
+```
+
+```json title="Output"
+{
+  "Status": "RUNNING"
+}
+```
+
+サスペンド中かどうかを判断するには `get-durable-execution-history` で実行履歴を確認し、`CallbackStarted` イベントが存在して対応する `CallbackSucceeded` / `CallbackFailed` がまだないことを見る必要がある。ステータスだけでは「アクティブに処理中」なのか「コールバック待ちで一時停止中」なのか区別できない点は覚えておくとよい。

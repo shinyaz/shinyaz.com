@@ -1,0 +1,25 @@
+---
+title: "Lambda Durable Functions require a qualified ARN for invocation"
+description: "Invoking a Durable Function with an unqualified function name throws InvalidParameterValueException. Append $LATEST or use a published version number."
+date: "2026-03-26"
+published: false
+tags: ["aws", "lambda", "durable-functions"]
+---
+
+Tried invoking a Durable Function with a plain function name and got an immediate error.
+
+```text title="Output"
+An error occurred (InvalidParameterValueException) when calling the Invoke operation: You cannot invoke a durable function using an unqualified ARN.
+```
+
+You need a version qualifier like `fn-Fraud-Detection:$LATEST`, or a version number from `publish-version`.
+
+```bash title="Terminal"
+# Correct (escape $LATEST)
+aws lambda invoke --function-name "fn-Fraud-Detection:\$LATEST" ...
+
+# Wrong ($LATEST expands to empty string in double quotes)
+aws lambda invoke --function-name "fn-Fraud-Detection:$LATEST" ...
+```
+
+In shell scripts, the `$` in `$LATEST` needs escaping inside double quotes — use `\$LATEST`. Single quotes pass it through as-is. Regular Lambda functions work fine without a qualifier, so this is a guaranteed first-time gotcha with Durable Functions.

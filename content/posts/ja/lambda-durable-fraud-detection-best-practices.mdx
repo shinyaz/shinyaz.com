@@ -1,0 +1,244 @@
+---
+title: "Lambda Durable Functions 不正検知実践 — 6つのベストプラクティスを実機検証する"
+description: "冪等性・DurableExecutionName・並行コールバック・タイムアウト設定を実機検証。「リプレイされる前提で設計する」が全BPの共通原則だと分かった。"
+date: 2026-03-26
+published: false
+featured: false
+categories:
+  - infrastructure
+tags: ["aws", "lambda", "serverless", "durable-functions", "bedrock", "agentcore", "fraud-detection"]
+series: "lambda-durable-fraud-detection"
+seriesOrder: 2
+---
+
+## はじめに
+
+[Part 1](/ja/blog/2026/03/26/lambda-durable-fraud-detection-overview) では不正検知デモの全体像と3パターンの基本動作を確認した。本記事では、[AWS Compute Blog の記事](https://aws.amazon.com/blogs/compute/best-practices-for-lambda-durable-functions-using-a-fraud-detection-example/)に記載された6つのベストプラクティスを実機検証する。
+
+6つのベストプラクティスに共通する原則は「リプレイされる前提で設計する」ことだ。Durable Functions はチェックポイント＆リプレイモデルで動作するため、ステップは複数回実行される可能性がある。この前提を理解していないと、重複課金や無限待機といった問題が発生する。
+
+## BP1: ステップを冪等に設計する
+
+Durable Functions は at-least-once 実行がデフォルトだ。障害発生時にステップがリトライされるため、副作用のあるステップは冪等に設計する必要がある。
+
+### 戦略A: 外部APIの冪等キー
+
+デモのコードでは、承認ステップに `idempotency_key` を渡している。
+
+```typescript title="index.ts"
+return await context.step(`authorize-${tx.id}`, async () =>
+  tx.authorize(tx, false, { idempotency_key: `tx-${tx.id}` })
+);
+```
+
+```typescript title="index.ts（finalize ステップ）"
+return await tx.authorize(tx, true, { idempotency_key: `finalize-${tx.id}` });
+```
+
+ステップ名にトランザクション ID を含め（`authorize-${tx.id}`）、さらに外部 API にも冪等キーを渡す二重防御（defense in depth）になっている。Lambda のチェックポイントが失敗しても、外部 API 側で重複を防げる。金融系ワークフローでは「決済が二重に走る」ことが最悪のシナリオなので、単一の防御に頼らず複数レイヤーで保護する設計が重要だ。
+
+### 戦略B: At-Most-Once セマンティクス
+
+冪等性をサポートしないレガシーシステム向けには、`StepSemantics.AtMostOncePerRetry` を使う。
+
+```typescript title="TypeScript"
+await context.step("charge-legacy-system", async () => {
+  return await legacyPaymentSystem.charge(tx.amount);
+}, {
+  semantics: StepSemantics.AtMostOncePerRetry,
+  retryStrategy: createRetryStrategy({ maxAttempts: 0 })
+});
+```
+
+ステップ実行前にチェックポイントを取るため、再実行が防止される。トレードオフとして、ステップが失敗した場合にリトライするか全体を失敗させるかの判断が必要になる。
+
+### 使い分けの判断基準
+
+| 状況 | 推奨戦略 |
+|---|---|
+| 外部 API が冪等キーをサポート | 戦略A（冪等キー） |
+| レガシーシステム、冪等性なし | 戦略B（AtMostOnce） |
+| DB 書き込み（UPSERT 可能） | 戦略A（一意キーで UPSERT） |
+| 通知送信（メール、SMS） | 戦略A（メッセージ ID で重複排除） |
+
+## BP2: DurableExecutionName で重複実行を防ぐ
+
+ステップレベルの冪等性だけでは不十分だ。キューの重複メッセージや UI の二重クリックで、ワークフロー自体が複数回起動される可能性がある。
+
+`DurableExecutionName` を指定すると、同じ名前の実行が既に存在する場合は新規実行を作らず、既存実行の ARN を返す。
+
+```bash title="Terminal（1回目の呼び出し）"
+aws lambda invoke \
+  --function-name "fn-Fraud-Detection:\$LATEST" \
+  --invocation-type Event \
+  --durable-execution-name "tx-medium-risk-001" \
+  --payload '{"id": 3, "amount": 6500, ...}' \
+  --region us-east-2 response.json
+```
+
+```json title="Output"
+{
+  "StatusCode": 202,
+  "DurableExecutionArn": "...tx-medium-risk-001/d0167685-e349-3d67-..."
+}
+```
+
+同じ名前で再度呼び出す。
+
+```bash title="Terminal（2回目の呼び出し — 同じ名前）"
+aws lambda invoke \
+  --function-name "fn-Fraud-Detection:\$LATEST" \
+  --invocation-type Event \
+  --durable-execution-name "tx-medium-risk-001" \
+  --payload '{"id": 3, "amount": 6500, ...}' \
+  --region us-east-2 response.json
+```
+
+```json title="Output"
+{
+  "StatusCode": 202,
+  "DurableExecutionArn": "...tx-medium-risk-001/d0167685-e349-3d67-..."
+}
+```
+
+**同じ `DurableExecutionArn` が返された。** 新しい実行は作られず、既存の実行が参照されている。トランザクション ID のような業務上のユニークキーを `DurableExecutionName` に使うことで、ワークフローレベルの冪等性が実現できる。
+
+## BP3: ESM 経由の場合は中間 Lambda 関数を挟む
+
+SQS・Kinesis・DynamoDB Streams などの Event Source Mapping（ESM）は Lambda を同期呼び出しするため、15分の制限がある。24時間のコールバック待ちを含むワークフローでは、ESM から直接 Durable Function を呼び出せない。
+
+解決策は中間 Lambda 関数を挟むことだ。
+
+```text title="アーキテクチャ"
+SQS → 中間 Lambda（ESM、同期） → Durable Function（Event、非同期）
+```
+
+```typescript title="中間 Lambda 関数"
+export const handler = async (event) => {
+  for (const record of event.Records) {
+    const transaction = JSON.parse(record.body);
+    await lambda.invoke({
+      FunctionName: process.env.FRAUD_DETECTION_FUNCTION,
+      InvocationType: 'Event',
+      DurableExecutionName: `tx-${transaction.id}`,
+      Payload: JSON.stringify(transaction)
+    });
+  }
+};
+```
+
+中間関数自体のリトライ対策として、[Powertools for AWS Lambda](https://aws.amazon.com/powertools-for-aws-lambda/) の冪等性機能を使うことが推奨されている。また、失敗時のハンドリングとして SQS の DLQ や on-failure destinations の設定も必要だ。
+
+今回のデモでは ESM を使っていないため実機検証はしていないが、本番環境では重要なパターンだ。
+
+## BP4: タイムアウトを呼び出しタイプに合わせる
+
+3種類のタイムアウトが存在し、それぞれの関係を正しく理解する必要がある。
+
+| 設定 | デモの値 | 意味 |
+|---|---|---|
+| Lambda `Timeout` | 120秒 | 各アクティブ実行フェーズの最大時間（初回呼び出しやリプレイ1回分の上限。サスペンド中はカウントされない） |
+| `ExecutionTimeout` | 90000秒（25時間） | サスペンド含むワークフロー全体の最大時間 |
+| `InvocationType` | Event（非同期） | 非同期なら最大1年、同期なら15分制限 |
+
+`ExecutionTimeout`（25時間）がコールバックの `timeout: { days: 1 }`（24時間）より長く設定されているのは意図的だ。コールバックタイムアウト後のフォールバック処理（不正部門へのエスカレーション）を実行する余裕を持たせている。
+
+### 同期呼び出しの制限を実機確認
+
+`ExecutionTimeout` が15分を超える Durable Function を同期呼び出しするとどうなるか。
+
+```bash title="Terminal"
+aws lambda invoke \
+  --function-name "fn-Fraud-Detection:\$LATEST" \
+  --invocation-type RequestResponse \
+  --durable-execution-name "tx-sync-test" \
+  --payload '{"id": 4, "amount": 6500, ...}' \
+  --region us-east-2 response.json
+```
+
+```text title="Output"
+An error occurred (InvalidParameterValueException):
+You cannot synchronously invoke a durable function
+with an executionTimeout greater than 15 minutes.
+```
+
+明確なエラーメッセージが返る。呼び出し時に検出されるため、デプロイ後に気づかないということはない。長時間ワークフローでは `InvocationType: 'Event'` が必須だ。
+
+## BP5: context.parallel() で並行処理を実行する
+
+デモでは Email と SMS の通知を `context.parallel()` で同時に送信し、`completionConfig: { minSuccessful: 1 }` で「どちらか1つが成功すれば続行」する first-response-wins パターンを実装している。
+
+### first-response-wins パターンの検証
+
+Part 1 の検証で、Email コールバックだけを送信してワークフローが完了することを確認した。SMS のコールバックは送信していないが、`minSuccessful: 1` により Email の成功だけで parallel 全体が完了する。
+
+このパターンが有効なのは以下のケースだ。
+
+- **通知チャネルの冗長化** — メール不達でも SMS で到達できる
+- **応答速度の最適化** — 先に応答があったチャネルで即座に処理を進められる
+- **ユーザー体験の向上** — どちらのチャネルから応答しても同じ結果になる
+
+注意点として、`context.parallel()` は内部の実行状態を管理するが、外部の共有状態（DB など）への並行アクセスは自分で管理する必要がある。
+
+## BP6: コールバックには必ずタイムアウトを設定する
+
+BP5 の parallel にタイムアウトとエラーハンドリングを加えたのが、デモの実際のコードだ。タイムアウトなしの `waitForCallback` は `ExecutionTimeout` まで無期限に待機する。このデモでは25時間だが、デフォルトの最大値は1年だ。
+
+```typescript title="index.ts（タイムアウト + エラーハンドリング）"
+try {
+  verified = await context.parallel("human-verification", [
+    (ctx) => ctx.waitForCallback("SendVerificationEmail",
+      async (callbackId) => tx.sendCustomerNotification(callbackId, 'email', tx),
+      { timeout: { days: 1 } }  // 24時間タイムアウト
+    ),
+    (ctx) => ctx.waitForCallback("SendVerificationSMS",
+      async (callbackId) => tx.sendCustomerNotification(callbackId, 'sms', tx),
+      { timeout: { days: 1 } }
+    )
+  ], { maxConcurrency: 2, completionConfig: { minSuccessful: 1 } });
+} catch (error) {
+  const isTimeout = (error instanceof Error && error.message?.includes("timeout")) ||
+    (typeof error === 'string' && error.includes("timeout"));
+  context.logger.warn(
+    isTimeout ? "Customer verification timeout" : "Customer verification failed",
+    { error, txId: tx.id }
+  );
+  // フォールバック: 不正部門へエスカレーション
+  return await context.step(`timeout-escalate-${tx.id}`, async () =>
+    tx.sendToFraud(tx, true)
+  );
+}
+```
+
+ポイントは3つ。
+
+1. **タイムアウトの明示的設定** — `timeout: { days: 1 }` で24時間に制限
+2. **try/catch でタイムアウトを検出** — エラーメッセージに "timeout" が含まれるかで判定。`Error` オブジェクトと文字列の両方をチェックしている
+3. **フォールバック処理** — タイムアウト・非タイムアウトを問わず、catch ブロックに入った時点で不正部門へエスカレーションする。タイムアウトの場合はログレベルを `warn` にして区別している
+
+タイムアウトは `minSuccessful` と連携する。1ブランチがタイムアウトしても、もう1つが成功していれば parallel 全体は成功する。両方タイムアウトした場合のみ catch ブロックに入る。
+
+## 6つのベストプラクティスの関係
+
+6つの BP は独立しているように見えるが、実際には連携して動作する。
+
+```text title="BP の連携"
+呼び出し時:  BP2（DurableExecutionName）→ ワークフロー重複防止
+             BP4（InvocationType: Event）→ 15分制限の回避
+             BP3（中間Lambda）→ ESM経由の場合
+
+実行時:      BP1（冪等ステップ）→ リトライ時の副作用防止
+             BP5（parallel）→ 並行通知の実行
+             BP6（タイムアウト）→ 無期限待機の防止
+
+全体を貫く原則: リプレイされる前提で設計する
+```
+
+## まとめ
+
+- **「リプレイされる前提」が全 BP の共通原則** — Durable Functions のチェックポイント＆リプレイモデルを理解すれば、6つの BP はすべて自然に導かれる。冪等性もタイムアウトも、リプレイが起きることを前提にした防御策だ。
+- **defense in depth が金融ワークフローの鍵** — BP1 の冪等キー（外部 API）+ チェックポイント（Lambda）、BP2 の DurableExecutionName + BP1 のステップ冪等性。単一の防御に頼らず、複数レイヤーで保護する設計が重要だ。
+- **タイムアウトの階層設計を意識する** — コールバックタイムアウト（24時間）< ExecutionTimeout（25時間）< 最大実行期間（1年）。各レイヤーのタイムアウトが正しく入れ子になっていることを確認する。
+- **ESM 経由のパターンは本番で頻出する** — SQS や Kinesis からのイベント駆動は金融系で一般的だ。中間 Lambda + Powertools の冪等性 + DLQ の組み合わせを標準パターンとして押さえておくとよい。
+
+次の [Part 3](/ja/blog/2026/03/26/lambda-durable-fraud-detection-operations) では、デプロイ・テスト・運用で得た実践的な知見を共有する。
