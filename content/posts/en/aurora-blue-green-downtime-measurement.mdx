@@ -1,6 +1,6 @@
 ---
 title: "Aurora Blue/Green in Practice — Measuring Actual Downtime During Maintenance"
-description: "Measured real downtime during Aurora PostgreSQL failover vs Blue/Green Switchover. Failover took ~10s, Blue/Green Switchover ~26s but included a PG16→17 major upgrade. DNS TTL of 60s is the key bottleneck."
+description: "Measured real downtime during Aurora PostgreSQL failover vs Blue/Green Switchover. Failover had 12 connection failures in two separate windows, Blue/Green Switchover ~26s with 6 failures. DNS TTL of 60s is the key bottleneck."
 date: "2026-03-24"
 published: true
 featured: true
@@ -210,24 +210,25 @@ Results:
 10:01:37.364  #25  FAIL   54ms
 10:01:38.427  #26  FAIL  742ms
 10:01:40.178  #27  OK    141ms  172.31.37.206  ← Recovery (same IP)
-  ... normal ...
-10:02:16.658  #59  FAIL 3113ms                 ← Second outage (timeout)
+  ... ~36 seconds normal ...
+10:02:16.658  #59  FAIL 3113ms                 ← Second outage (timeouts)
 10:02:20.780  #60  FAIL 3052ms
-10:02:24.839  #61  OK    134ms  172.31.37.206  ← Recovery
+10:02:24.841  #61  FAIL 3099ms
+10:02:28.949  #62  FAIL 3043ms                 ← Test stopped (recovery not captured)
 ```
 
 ### Failover Analysis
 
 | Metric | Value |
 | --- | --- |
-| Failed connections | 10 |
-| First outage | ~10 seconds (10:01:30–10:01:40) |
-| Second outage | ~4 seconds (10:02:16–10:02:20, timeouts) |
+| Failed connections | 12 |
+| First outage | ~10 seconds (10:01:30–10:01:40, 8 connection refusals) |
+| Second outage | ~12+ seconds (10:02:16–10:02:28, 4 timeouts) |
 | Failure pattern | Two separate outage windows |
 
 Two things stand out:
 
-1. **Two distinct outage windows** — The first ~10 seconds saw immediate connection refusals. After recovery, two more 3-second timeouts occurred ~40 seconds later. This aligns with the DNS TTL (60s) expiring and the client attempting to connect to the old IP.
+1. **Two distinct outage windows** — The first ~10 seconds saw immediate connection refusals. After recovery, four consecutive 3-second timeouts occurred ~36 seconds later. This aligns with the DNS TTL (60s) expiring and the new DNS resolution returning the old writer's IP, which was already shutting down.
 2. **Same IP after recovery** — After failover, the cluster endpoint CNAME updates to point to the new writer, but DNS cache keeps resolving to the old IP. Since the old writer was still running, connections succeeded — but a write workload would have hit errors.
 
 ## Step 3: Blue/Green Deployment and Switchover
@@ -321,7 +322,7 @@ aws rds switchover-blue-green-deployment \
 Results:
 
 ```text title="Output (connectivity test during switchover)"
-10:55:55.524  #24  OK    130ms  172.31.26.53   ← Blue Writer (PG 16.9)
+10:55:55.518  #24  OK    134ms  172.31.26.53   ← Blue Writer (PG 16.9)
 10:55:56.658  #25  FAIL 3046ms                 ← Timeouts begin
 10:56:00.713  #26  FAIL 3055ms
 10:56:04.777  #27  FAIL 3050ms
@@ -360,8 +361,8 @@ PostgreSQL 17.6 on aarch64-unknown-linux-gnu
 
 | Metric | Failover | Blue/Green Switchover |
 | --- | --- | --- |
-| Downtime | ~10s + sporadic timeouts | ~26s (continuous) |
-| Failed connections | 10 | 6 |
+| Downtime | ~10s + ~12s (two separate windows) | ~26s (continuous) |
+| Failed connections | 12 | 6 |
 | Failure pattern | Refusals + timeouts mixed | Timeouts only |
 | Version change | None | PG 16.9 → 17.6 |
 | Preparation time | None | ~30 min (Green provisioning) |
@@ -370,7 +371,7 @@ PostgreSQL 17.6 on aarch64-unknown-linux-gnu
 ## Summary
 
 - **DNS TTL of 60s is the biggest bottleneck** — In both failover and switchover, DNS cache returning stale IPs is the primary cause of downtime. Reducing DNS cache TTL on the application side or switching to IP-based routing could help.
-- **Blue/Green Switchover downtime is "longer but predictable"** — At 26 seconds vs failover's 10 seconds, switchover takes longer, but the failure pattern is uniform (all timeouts), making retry logic easier to design.
+- **Blue/Green Switchover downtime is "longer but predictable"** — Failover had connection refusals and timeouts mixed across two separate windows, while switchover showed a continuous 26-second window of uniform timeouts, making retry logic easier to design.
 - **Green environment takes 30 minutes to build** — With a major version upgrade, Green provisioning takes about 30 minutes. The Blue environment stays fully operational during this time, but it needs to be factored into maintenance window planning.
 - **Logical replication must be enabled beforehand** — Blue/Green deployments require `rds.logical_replication = 1`, which needs a custom parameter group and a full instance reboot. Enable this in production environments ahead of time.
 
