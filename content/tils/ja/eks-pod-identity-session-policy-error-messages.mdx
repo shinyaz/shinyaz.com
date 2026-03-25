@@ -1,0 +1,23 @@
+---
+title: "EKS Pod Identity セッションポリシーの AccessDenied は原因が明示される"
+description: "セッションポリシー起因の拒否は「no session policy allows」、IAM ロール起因は「no identity-based policy allows」とエラーメッセージで区別できる。IAM の権限トラブルシューティングが格段にやりやすい。"
+date: "2026-03-26"
+published: true
+tags: ["aws", "eks", "iam", "pod-identity"]
+---
+
+EKS Pod Identity の[セッションポリシー機能](/ja/blog/2026/03/26/eks-pod-identity-session-policy)を検証していて、エラーメッセージの親切さに驚いた。
+
+IAM の AccessDenied エラーは原因特定が難しいことで有名だが、セッションポリシーが絡む場合は原因が明示される。
+
+```text title="Output (セッションポリシーが原因)"
+s3:CreateBucket on resource: "arn:aws:s3:::xxx"
+because no session policy allows the s3:CreateBucket action
+```
+
+```text title="Output (IAM ロール自体が原因)"
+ec2:DescribeInstances
+because no identity-based policy allows the ec2:DescribeInstances action
+```
+
+`no session policy allows` ならセッションポリシーに該当アクションを追加すればよく、`no identity-based policy allows` なら IAM ロール側のポリシーを見直す必要がある。どちらを修正すべきか一目で分かるのは運用上かなり助かる。

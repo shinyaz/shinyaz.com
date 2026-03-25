@@ -1,0 +1,397 @@
+---
+title: "EKS Pod Identity のセッションポリシーで IAM ロールを増やさずに権限を動的に絞る"
+description: "EKS Pod Identity の新機能セッションポリシーを検証。IAM ロールの権限をアソシエーション単位で動的に制限でき、ロール数の爆発を防げる。セッションタグとの排他制約やポリシーサイズ上限など、採用前に知るべきトレードオフも整理した。"
+date: "2026-03-26"
+published: true
+featured: false
+categories: [infrastructure]
+tags: ["aws", "eks", "kubernetes", "iam", "pod-identity", "security"]
+---
+
+## はじめに
+
+2026年3月24日、AWS が [EKS Pod Identity のセッションポリシー機能を発表した](https://aws.amazon.com/blogs/containers/session-policies-for-amazon-eks-pod-identity/)。Pod Identity アソシエーション作成時にインラインの IAM ポリシーを指定することで、IAM ロールの権限を動的に絞り込める機能だ。
+
+EKS Pod Identity は re:Invent 2023 で登場し、IRSA（IAM Roles for Service Accounts）の課題——OIDC プロバイダーの設定、複雑な信頼ポリシー——を解消した。しかし「同じアプリケーションでもテナントや環境ごとに異なる権限が必要」というケースでは、結局 IAM ロールを個別に作る必要があった。アカウントあたり 5,000 ロールの上限を考えると、大規模環境では現実的ではない。
+
+セッションポリシーはこの問題を解決する。この記事では、既存の EKS Auto Mode クラスターで実際にセッションポリシーを検証し、以下の4点を確認した結果と採用時のトレードオフを整理する。
+
+1. セッションポリシーなしの状態（ベースライン）
+2. セッションポリシーによる権限制限の動作とエラーメッセージ
+3. セッションポリシーで権限昇格が不可能であることの実証
+4. セッションポリシーの動的更新による権限スコープの変更
+
+[公式ドキュメント](https://docs.aws.amazon.com/eks/latest/userguide/pod-id-association.html#pod-id-association-create)も参照してほしい。
+
+## セッションポリシーの仕組み
+
+セッションポリシーの核心は「権限の交差（intersection）」モデルだ。
+
+```text title="権限の評価"
+有効な権限 = IAM ロールのポリシー ∩ セッションポリシー
+```
+
+IAM ロールが `s3:*` を許可していても、セッションポリシーで `s3:ListAllMyBuckets` だけを許可すれば、Pod は一覧取得しかできない。**セッションポリシーで権限を拡大することは不可能**で、常に IAM ロールの範囲内でしか動作しない。
+
+これにより、1つの IAM ロールを複数のアソシエーションで共有しつつ、アソシエーションごとに異なる権限スコープを設定できる。
+
+## 検証環境
+
+前提条件:
+
+- EKS クラスター（Kubernetes 1.35、eks-pod-identity-agent アドオン導入済み）
+- AWS CLI、kubectl 設定済み
+
+以降のコマンドでは次の環境変数を使用する。自身の環境に合わせて変更してほしい。
+
+```bash title="Terminal"
+export AWS_REGION=ap-northeast-1
+export CLUSTER_NAME=eks-sandbox
+export NAMESPACE=session-policy-demo
+export SERVICE_ACCOUNT=s3-demo-sa
+export AWS_ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
+```
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">環境セットアップ手順（EKS クラスターが既にある場合）</summary>
+
+### eks-pod-identity-agent アドオンのインストール
+
+```bash title="Terminal"
+aws eks create-addon \
+  --addon-name eks-pod-identity-agent \
+  --cluster-name ${CLUSTER_NAME} \
+  --region ${AWS_REGION}
+```
+
+### IAM ロールの作成
+
+S3 の複数操作を許可する広い権限を持つロールを作成する。
+
+```bash title="Terminal"
+aws iam create-role --role-name eks-session-policy-demo \
+  --assume-role-policy-document '{
+    "Version": "2012-10-17",
+    "Statement": [{
+      "Effect": "Allow",
+      "Principal": {"Service": "pods.eks.amazonaws.com"},
+      "Action": ["sts:AssumeRole", "sts:TagSession"]
+    }]
+  }'
+
+aws iam put-role-policy --role-name eks-session-policy-demo \
+  --policy-name S3BroadAccess \
+  --policy-document '{
+    "Version": "2012-10-17",
+    "Statement": [{
+      "Effect": "Allow",
+      "Action": [
+        "s3:ListAllMyBuckets",
+        "s3:CreateBucket",
+        "s3:DeleteBucket",
+        "s3:GetObject",
+        "s3:PutObject"
+      ],
+      "Resource": "*"
+    }]
+  }'
+```
+
+### Namespace・ServiceAccount・Pod Identity アソシエーションの作成
+
+```bash title="Terminal"
+kubectl create namespace ${NAMESPACE}
+kubectl create serviceaccount ${SERVICE_ACCOUNT} -n ${NAMESPACE}
+
+aws eks create-pod-identity-association \
+  --cluster-name ${CLUSTER_NAME} \
+  --namespace ${NAMESPACE} \
+  --service-account ${SERVICE_ACCOUNT} \
+  --role-arn arn:aws:iam::${AWS_ACCOUNT}:role/eks-session-policy-demo \
+  --region ${AWS_REGION}
+```
+
+レスポンスに含まれる `associationId` を控えておく。以降の検証で使用する。
+
+```bash title="Terminal"
+export ASSOCIATION_ID=$(aws eks list-pod-identity-associations \
+  --cluster-name ${CLUSTER_NAME} \
+  --namespace ${NAMESPACE} \
+  --service-account ${SERVICE_ACCOUNT} \
+  --region ${AWS_REGION} \
+  --query 'associations[0].associationId' \
+  --output text)
+echo ${ASSOCIATION_ID}
+```
+
+</details>
+
+結果だけ知りたい場合は[検証1: セッションポリシーなしの動作](#検証1-セッションポリシーなしの動作)に進んでほしい。
+
+検証では Pod から AWS CLI を実行するために以下のパターンを繰り返し使う。
+
+```bash title="Terminal (共通パターン)"
+kubectl run test --image=amazon/aws-cli:latest \
+  --namespace=${NAMESPACE} --rm -it --restart=Never \
+  --overrides='{"spec":{"serviceAccountName":"'${SERVICE_ACCOUNT}'"}}' \
+  -- <AWS CLI コマンド>
+```
+
+## 検証1: セッションポリシーなしの動作
+
+まずベースラインとして、セッションポリシーを設定しない状態で Pod から S3 操作を実行する。
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">実行コマンド（検証1）</summary>
+
+```bash title="Terminal"
+# S3 バケット一覧
+kubectl run s3-list-test --image=amazon/aws-cli:latest \
+  --namespace=${NAMESPACE} --rm -it --restart=Never \
+  --overrides='{"spec":{"serviceAccountName":"'${SERVICE_ACCOUNT}'"}}' \
+  -- s3 ls
+
+# S3 バケット作成
+kubectl run s3-create-test --image=amazon/aws-cli:latest \
+  --namespace=${NAMESPACE} --rm -it --restart=Never \
+  --overrides='{"spec":{"serviceAccountName":"'${SERVICE_ACCOUNT}'"}}' \
+  -- s3 mb s3://session-policy-demo-$(date +%s) --region ${AWS_REGION}
+```
+
+</details>
+
+```text title="Output (ListBuckets)"
+2025-03-13 05:27:28 amazon-sagemaker-xxxxx-us-east-1-xxxxx
+2026-03-24 13:48:11 durable-functions-xxxxx
+...
+```
+
+```text title="Output (CreateBucket)"
+make_bucket: session-policy-demo-1774421981
+```
+
+IAM ロールに付与された全権限が使える。ListBuckets も CreateBucket も成功する。
+
+## 検証2: セッションポリシーで権限を制限
+
+Pod Identity アソシエーションを更新し、`s3:ListAllMyBuckets` のみを許可するセッションポリシーを追加する。
+
+```bash title="Terminal"
+aws eks update-pod-identity-association \
+  --cluster-name ${CLUSTER_NAME} \
+  --association-id ${ASSOCIATION_ID} \
+  --policy '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"s3:ListAllMyBuckets","Resource":"*"}]}' \
+  --disable-session-tags \
+  --region ${AWS_REGION}
+```
+
+`--disable-session-tags` フラグが**必須**である点に注意。理由は後述する。
+
+公式ブログによると伝播には最大10秒程度かかるとされている。安全マージンを取って15秒ほど待ってから同じ操作を実行する。
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">実行コマンド（検証2）</summary>
+
+```bash title="Terminal"
+sleep 15
+
+# ListBuckets → 成功するはず
+kubectl run s3-list-test --image=amazon/aws-cli:latest \
+  --namespace=${NAMESPACE} --rm -it --restart=Never \
+  --overrides='{"spec":{"serviceAccountName":"'${SERVICE_ACCOUNT}'"}}' \
+  -- s3 ls
+
+# CreateBucket → 拒否されるはず
+kubectl run s3-create-test --image=amazon/aws-cli:latest \
+  --namespace=${NAMESPACE} --rm -it --restart=Never \
+  --overrides='{"spec":{"serviceAccountName":"'${SERVICE_ACCOUNT}'"}}' \
+  -- s3 mb s3://session-policy-demo-blocked-$(date +%s) --region ${AWS_REGION}
+```
+
+</details>
+
+ListBuckets は引き続き成功する。一方、CreateBucket は以下のエラーで拒否される。
+
+```text title="Output (CreateBucket → AccessDenied)"
+make_bucket failed: s3://session-policy-demo-blocked-xxxxx An error occurred
+(AccessDenied) when calling the CreateBucket operation: User: arn:aws:sts::xxxxx:
+assumed-role/eks-session-policy-demo/eks-eks-sandbo-s3-create-... is not authorized
+to perform: s3:CreateBucket on resource: "arn:aws:s3:::session-policy-demo-blocked-xxxxx"
+because no session policy allows the s3:CreateBucket action
+```
+
+注目すべきは**エラーメッセージの明確さ**だ。`because no session policy allows the s3:CreateBucket action` と、セッションポリシーが原因であることが明示される。IAM のアクセス拒否エラーは原因特定が難しいことで知られるが、セッションポリシー起因の場合はデバッグしやすい。
+
+## 検証3: セッションポリシーによる権限昇格の不可を確認
+
+セッションポリシーで IAM ロールにない権限（`ec2:DescribeInstances`）を許可しようとするとどうなるか。
+
+```bash title="Terminal"
+aws eks update-pod-identity-association \
+  --cluster-name ${CLUSTER_NAME} \
+  --association-id ${ASSOCIATION_ID} \
+  --policy '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["s3:ListAllMyBuckets","ec2:DescribeInstances"],"Resource":"*"}]}' \
+  --region ${AWS_REGION}
+```
+
+API 自体は成功する。ポリシーの構文が正しければバリデーションは通る。しかし実際に Pod から EC2 API を呼ぶと拒否される。
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">実行コマンド（検証3）</summary>
+
+```bash title="Terminal"
+sleep 15
+
+kubectl run ec2-test --image=amazon/aws-cli:latest \
+  --namespace=${NAMESPACE} --rm -it --restart=Never \
+  --overrides='{"spec":{"serviceAccountName":"'${SERVICE_ACCOUNT}'"}}' \
+  -- ec2 describe-instances --region ${AWS_REGION} \
+     --query 'Reservations[0].Instances[0].InstanceId'
+```
+
+</details>
+
+```text title="Output (DescribeInstances → UnauthorizedOperation)"
+An error occurred (UnauthorizedOperation) when calling the DescribeInstances
+operation: You are not authorized to perform this operation. User: arn:aws:sts::xxxxx:
+assumed-role/eks-session-policy-demo/eks-eks-sandbo-ec2-test-... is not authorized
+to perform: ec2:DescribeInstances
+because no identity-based policy allows the ec2:DescribeInstances action
+```
+
+エラーメッセージが `no identity-based policy allows` となっている。セッションポリシーで許可しても、IAM ロール側に権限がなければ拒否される。**交差モデルが正しく機能しており、権限昇格は不可能**だ。
+
+この2つのエラーメッセージの違いは運用上重要だ：
+
+| エラーメッセージ | 原因 |
+|---|---|
+| `no session policy allows the xxx action` | IAM ロールは許可しているが、セッションポリシーが許可していない |
+| `no identity-based policy allows the xxx action` | IAM ロール自体が許可していない |
+
+## 検証4: セッションポリシーの動的更新
+
+検証2で `s3:ListAllMyBuckets` のみに絞った権限を、IAM ロールの再作成なしに拡張できることを確認する。セッションポリシーは `update-pod-identity-association` でいつでも変更できる。
+
+```bash title="Terminal"
+aws eks update-pod-identity-association \
+  --cluster-name ${CLUSTER_NAME} \
+  --association-id ${ASSOCIATION_ID} \
+  --policy '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["s3:ListAllMyBuckets","s3:CreateBucket"],"Resource":"*"}]}' \
+  --region ${AWS_REGION}
+```
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">実行コマンド（検証4）</summary>
+
+```bash title="Terminal"
+sleep 15
+
+kubectl run s3-create-test --image=amazon/aws-cli:latest \
+  --namespace=${NAMESPACE} --rm -it --restart=Never \
+  --overrides='{"spec":{"serviceAccountName":"'${SERVICE_ACCOUNT}'"}}' \
+  -- s3 mb s3://session-policy-demo-expanded-$(date +%s) --region ${AWS_REGION}
+```
+
+</details>
+
+```text title="Output (CreateBucket → 成功)"
+make_bucket: session-policy-demo-expanded-1774422091
+```
+
+更新後、数秒〜十数秒で新しいポリシーが反映され、CreateBucket が再び成功するようになった。IAM ロールの変更やアソシエーションの再作成は不要で、ポリシーの JSON を差し替えるだけで権限スコープを変更できる。
+
+ただし、**結果整合性による伝播遅延がある**点は認識しておく必要がある。公式ブログでは最大10秒程度とされているが、今回の検証では安全マージンを取って15秒待機した。この間、Pod は以前の権限で動作し続ける可能性がある。
+
+## 制約とトレードオフ
+
+### セッションタグとの排他制約
+
+セッションポリシーとセッションタグは併用できない。セッションポリシーを指定する場合、`--disable-session-tags` を `true` に設定する必要がある。実際にセッションタグを有効にしたままセッションポリシーを設定しようとすると、以下のエラーになる。
+
+```text title="Output"
+An error occurred (InvalidParameterException) when calling the
+UpdatePodIdentityAssociation operation: When policy is specified,
+disableSessionTags must be set to true
+```
+
+これは STS のパックドポリシーサイズの制限に起因する制約だ。公式ブログによると、セッションタグとセッションポリシーを同時に使用すると STS の `PackedPolicyTooLarge` バリデーションエラーが発生するため、EKS Pod Identity では両者の併用を一律で禁止している。これはオプションの最適化ではなく、必須の要件だ。
+
+つまり、**セッションタグベースの ABAC（属性ベースアクセス制御）とセッションポリシーは二者択一**になる。既にセッションタグを活用している環境では、移行の判断が必要だ。
+
+### ポリシーサイズ上限
+
+セッションポリシーの上限は **2,048文字**だ。上限を超えるポリシーを指定すると、以下のエラーで即座に拒否される。
+
+```text title="Output"
+An error occurred (InvalidParameterException) when calling the
+UpdatePodIdentityAssociation operation: The parameter policy should
+not be greater than 2048 characters.
+```
+
+2,048文字は JSON 形式で記述するため、実質的に書ける権限の数は限られる。複雑な条件付きポリシーや多数のリソース ARN を列挙するケースでは不足する可能性がある。
+
+### その他の考慮事項
+
+- **クロスアカウント**: `targetRoleArn` を指定した場合、セッションポリシーはターゲットロール側に適用される（ソースロールではない）
+- **1対1制約**: 1つの ServiceAccount に対して Pod Identity アソシエーションは1つだけ。ただしセッションポリシーは後から更新可能
+- **バリデーション**: ポリシーの JSON 形式、文字種、サイズ（2,048文字）、IAM ポリシースキーマ（STS への dry-run）、パックドポリシーサイズの5段階で API 呼び出し時に検証される。ただし、IAM ロールに実際に存在するアクションかどうかは検証されない（検証3で実証済み）
+
+## まとめ
+
+- **エラーメッセージが明確** — セッションポリシー起因の拒否は `no session policy allows` と表示され、IAM ロール起因の `no identity-based policy allows` と区別できる。権限トラブルシューティングが格段にやりやすい
+- **交差モデルは安全** — セッションポリシーで IAM ロールにない権限を指定しても昇格は起きない。API バリデーションは通るが実行時に拒否される設計のため、ポリシーの記述ミスが権限昇格につながるリスクはない
+- **セッションタグとの二者択一が最大のトレードオフ** — ABAC を活用中の環境では、セッションポリシーへの移行コストを慎重に評価する必要がある。新規構築であればセッションポリシーの方がシンプルだ
+- **2,048文字制限は実用上の壁になりうる** — 単純な権限制限には十分だが、リソース ARN を多数列挙するマルチテナント構成では不足する可能性がある。その場合は IAM ロールの分割と組み合わせる設計が必要だ
+
+### どういう場面で採用すべきか
+
+セッションポリシーが最も効果を発揮するのは、「1つの IAM ロールを共有しつつ、アソシエーションごとに権限を絞りたい」ケースだ。具体的には：
+
+- **マルチテナント SaaS** — テナントごとにアクセスできる S3 バケットや DynamoDB テーブルを制限する
+- **環境分離** — dev/staging/prod が同一クラスタにあり、環境ごとに権限スコープを変えたい
+- **IAM ロール数が上限に近い** — 5,000 ロール制限を回避しつつ最小権限を維持したい
+
+一方、以下のケースではセッションタグや IAM ロール分割の方が適している：
+
+- **セッションタグベースの ABAC を既に運用中** — 併用不可のため移行コストが大きい
+- **ポリシーが複雑で 2,048文字に収まらない** — リソース ARN の列挙が多い場合は IAM ロール分割が現実的
+- **全 AWS サービスでタグベースの条件制御が必要** — セッションタグの方が柔軟性が高い
+
+## クリーンアップ
+
+検証が終わったら、作成したリソースを逆順で削除する。検証で作成した S3 バケットも忘れずに削除すること。
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">リソース削除コマンド</summary>
+
+```bash title="Terminal"
+# 検証で作成した S3 バケットの削除
+aws s3api list-buckets --query "Buckets[?starts_with(Name, 'session-policy-demo')].Name" \
+  --output text | tr '\t' '\n' | while read bucket; do
+  aws s3 rb s3://${bucket}
+done
+
+# Pod Identity アソシエーションの削除
+aws eks delete-pod-identity-association \
+  --cluster-name ${CLUSTER_NAME} \
+  --association-id ${ASSOCIATION_ID} \
+  --region ${AWS_REGION}
+
+# Kubernetes リソースの削除
+kubectl delete serviceaccount ${SERVICE_ACCOUNT} -n ${NAMESPACE}
+kubectl delete namespace ${NAMESPACE}
+
+# アドオンの削除（不要な場合）
+aws eks delete-addon \
+  --addon-name eks-pod-identity-agent \
+  --cluster-name ${CLUSTER_NAME} \
+  --region ${AWS_REGION}
+
+# IAM リソースの削除
+aws iam delete-role-policy \
+  --role-name eks-session-policy-demo \
+  --policy-name S3BroadAccess
+aws iam delete-role --role-name eks-session-policy-demo
+```
+
+</details>

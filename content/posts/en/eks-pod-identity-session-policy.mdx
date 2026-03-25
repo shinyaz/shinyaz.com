@@ -1,0 +1,397 @@
+---
+title: "Dynamically scope down IAM permissions with EKS Pod Identity session policies"
+description: "Hands-on verification of EKS Pod Identity session policies. Restrict IAM role permissions per association without creating additional roles. Covers session tag exclusivity, policy size limits, and trade-offs to evaluate before adoption."
+date: "2026-03-26"
+published: true
+featured: false
+categories: [infrastructure]
+tags: ["aws", "eks", "kubernetes", "iam", "pod-identity", "security"]
+---
+
+## Introduction
+
+On March 24, 2026, AWS [announced session policies for EKS Pod Identity](https://aws.amazon.com/blogs/containers/session-policies-for-amazon-eks-pod-identity/). This feature lets you specify an inline IAM policy when creating a Pod Identity association, dynamically scoping down the IAM role's permissions.
+
+EKS Pod Identity launched at re:Invent 2023, addressing IRSA (IAM Roles for Service Accounts) pain points — no more OIDC providers or complex trust policies. However, when pods running the same application needed different permission levels, you still had to create separate IAM roles. With the 5,000 roles per account quota, this doesn't scale.
+
+Session policies solve this. In this post, I verified the feature on an existing EKS Auto Mode cluster and documented the results along with trade-offs to consider before adoption:
+
+1. Baseline behavior without session policies
+2. Permission restriction and error messages with session policies
+3. Proof that privilege escalation via session policies is impossible
+4. Dynamic policy updates without role recreation
+
+See the [official documentation](https://docs.aws.amazon.com/eks/latest/userguide/pod-id-association.html#pod-id-association-create) for reference.
+
+## How session policies work
+
+The core concept is the permission intersection model.
+
+```text title="Permission evaluation"
+Effective permissions = IAM role policy ∩ Session policy
+```
+
+Even if the IAM role allows `s3:*`, a session policy permitting only `s3:ListAllMyBuckets` restricts the pod to listing buckets. **Session policies can never expand permissions** — they always operate within the IAM role's boundaries.
+
+This means you can share a single IAM role across multiple associations while setting different permission scopes per association.
+
+## Test environment
+
+Prerequisites:
+
+- EKS cluster (Kubernetes 1.35, eks-pod-identity-agent addon installed)
+- AWS CLI and kubectl configured
+
+The following commands use these environment variables. Adjust for your environment.
+
+```bash title="Terminal"
+export AWS_REGION=ap-northeast-1
+export CLUSTER_NAME=eks-sandbox
+export NAMESPACE=session-policy-demo
+export SERVICE_ACCOUNT=s3-demo-sa
+export AWS_ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
+```
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">Environment setup (if you already have an EKS cluster)</summary>
+
+### Install the eks-pod-identity-agent addon
+
+```bash title="Terminal"
+aws eks create-addon \
+  --addon-name eks-pod-identity-agent \
+  --cluster-name ${CLUSTER_NAME} \
+  --region ${AWS_REGION}
+```
+
+### Create the IAM role
+
+Create a role with broad S3 permissions.
+
+```bash title="Terminal"
+aws iam create-role --role-name eks-session-policy-demo \
+  --assume-role-policy-document '{
+    "Version": "2012-10-17",
+    "Statement": [{
+      "Effect": "Allow",
+      "Principal": {"Service": "pods.eks.amazonaws.com"},
+      "Action": ["sts:AssumeRole", "sts:TagSession"]
+    }]
+  }'
+
+aws iam put-role-policy --role-name eks-session-policy-demo \
+  --policy-name S3BroadAccess \
+  --policy-document '{
+    "Version": "2012-10-17",
+    "Statement": [{
+      "Effect": "Allow",
+      "Action": [
+        "s3:ListAllMyBuckets",
+        "s3:CreateBucket",
+        "s3:DeleteBucket",
+        "s3:GetObject",
+        "s3:PutObject"
+      ],
+      "Resource": "*"
+    }]
+  }'
+```
+
+### Create namespace, ServiceAccount, and Pod Identity association
+
+```bash title="Terminal"
+kubectl create namespace ${NAMESPACE}
+kubectl create serviceaccount ${SERVICE_ACCOUNT} -n ${NAMESPACE}
+
+aws eks create-pod-identity-association \
+  --cluster-name ${CLUSTER_NAME} \
+  --namespace ${NAMESPACE} \
+  --service-account ${SERVICE_ACCOUNT} \
+  --role-arn arn:aws:iam::${AWS_ACCOUNT}:role/eks-session-policy-demo \
+  --region ${AWS_REGION}
+```
+
+Save the `associationId` from the response — you'll need it for the tests.
+
+```bash title="Terminal"
+export ASSOCIATION_ID=$(aws eks list-pod-identity-associations \
+  --cluster-name ${CLUSTER_NAME} \
+  --namespace ${NAMESPACE} \
+  --service-account ${SERVICE_ACCOUNT} \
+  --region ${AWS_REGION} \
+  --query 'associations[0].associationId' \
+  --output text)
+echo ${ASSOCIATION_ID}
+```
+
+</details>
+
+Skip to [Test 1: Without session policies](#test-1-without-session-policies) if you just want the results.
+
+All tests use this pattern to run AWS CLI from a pod:
+
+```bash title="Terminal (common pattern)"
+kubectl run test --image=amazon/aws-cli:latest \
+  --namespace=${NAMESPACE} --rm -it --restart=Never \
+  --overrides='{"spec":{"serviceAccountName":"'${SERVICE_ACCOUNT}'"}}' \
+  -- <AWS CLI command>
+```
+
+## Test 1: Without session policies
+
+First, establish a baseline by running S3 operations without any session policy.
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">Commands (Test 1)</summary>
+
+```bash title="Terminal"
+# List S3 buckets
+kubectl run s3-list-test --image=amazon/aws-cli:latest \
+  --namespace=${NAMESPACE} --rm -it --restart=Never \
+  --overrides='{"spec":{"serviceAccountName":"'${SERVICE_ACCOUNT}'"}}' \
+  -- s3 ls
+
+# Create S3 bucket
+kubectl run s3-create-test --image=amazon/aws-cli:latest \
+  --namespace=${NAMESPACE} --rm -it --restart=Never \
+  --overrides='{"spec":{"serviceAccountName":"'${SERVICE_ACCOUNT}'"}}' \
+  -- s3 mb s3://session-policy-demo-$(date +%s) --region ${AWS_REGION}
+```
+
+</details>
+
+```text title="Output (ListBuckets)"
+2025-03-13 05:27:28 amazon-sagemaker-xxxxx-us-east-1-xxxxx
+2026-03-24 13:48:11 durable-functions-xxxxx
+...
+```
+
+```text title="Output (CreateBucket)"
+make_bucket: session-policy-demo-1774421981
+```
+
+Both ListBuckets and CreateBucket succeed — the pod has the full permissions granted by the IAM role.
+
+## Test 2: Restricting permissions with a session policy
+
+Update the Pod Identity association to add a session policy that only allows `s3:ListAllMyBuckets`.
+
+```bash title="Terminal"
+aws eks update-pod-identity-association \
+  --cluster-name ${CLUSTER_NAME} \
+  --association-id ${ASSOCIATION_ID} \
+  --policy '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"s3:ListAllMyBuckets","Resource":"*"}]}' \
+  --disable-session-tags \
+  --region ${AWS_REGION}
+```
+
+Note that the `--disable-session-tags` flag is **required**. More on this later.
+
+The official blog states propagation takes up to 10 seconds. I waited 15 seconds for a safety margin before re-running the same operations.
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">Commands (Test 2)</summary>
+
+```bash title="Terminal"
+sleep 15
+
+# ListBuckets — should succeed
+kubectl run s3-list-test --image=amazon/aws-cli:latest \
+  --namespace=${NAMESPACE} --rm -it --restart=Never \
+  --overrides='{"spec":{"serviceAccountName":"'${SERVICE_ACCOUNT}'"}}' \
+  -- s3 ls
+
+# CreateBucket — should be denied
+kubectl run s3-create-test --image=amazon/aws-cli:latest \
+  --namespace=${NAMESPACE} --rm -it --restart=Never \
+  --overrides='{"spec":{"serviceAccountName":"'${SERVICE_ACCOUNT}'"}}' \
+  -- s3 mb s3://session-policy-demo-blocked-$(date +%s) --region ${AWS_REGION}
+```
+
+</details>
+
+ListBuckets still succeeds. CreateBucket, however, is denied:
+
+```text title="Output (CreateBucket → AccessDenied)"
+make_bucket failed: s3://session-policy-demo-blocked-xxxxx An error occurred
+(AccessDenied) when calling the CreateBucket operation: User: arn:aws:sts::xxxxx:
+assumed-role/eks-session-policy-demo/eks-eks-sandbo-s3-create-... is not authorized
+to perform: s3:CreateBucket on resource: "arn:aws:s3:::session-policy-demo-blocked-xxxxx"
+because no session policy allows the s3:CreateBucket action
+```
+
+The standout here is **how clear the error message is**. `because no session policy allows the s3:CreateBucket action` explicitly identifies the session policy as the cause. IAM access denied errors are notoriously hard to debug, but session policy denials are straightforward.
+
+## Test 3: Proving privilege escalation is impossible
+
+What happens if you add an action to the session policy that the IAM role doesn't have (`ec2:DescribeInstances`)?
+
+```bash title="Terminal"
+aws eks update-pod-identity-association \
+  --cluster-name ${CLUSTER_NAME} \
+  --association-id ${ASSOCIATION_ID} \
+  --policy '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["s3:ListAllMyBuckets","ec2:DescribeInstances"],"Resource":"*"}]}' \
+  --region ${AWS_REGION}
+```
+
+The API call succeeds — validation only checks policy syntax. But when the pod actually calls the EC2 API:
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">Commands (Test 3)</summary>
+
+```bash title="Terminal"
+sleep 15
+
+kubectl run ec2-test --image=amazon/aws-cli:latest \
+  --namespace=${NAMESPACE} --rm -it --restart=Never \
+  --overrides='{"spec":{"serviceAccountName":"'${SERVICE_ACCOUNT}'"}}' \
+  -- ec2 describe-instances --region ${AWS_REGION} \
+     --query 'Reservations[0].Instances[0].InstanceId'
+```
+
+</details>
+
+```text title="Output (DescribeInstances → UnauthorizedOperation)"
+An error occurred (UnauthorizedOperation) when calling the DescribeInstances
+operation: You are not authorized to perform this operation. User: arn:aws:sts::xxxxx:
+assumed-role/eks-session-policy-demo/eks-eks-sandbo-ec2-test-... is not authorized
+to perform: ec2:DescribeInstances
+because no identity-based policy allows the ec2:DescribeInstances action
+```
+
+The error message says `no identity-based policy allows` — the IAM role itself doesn't have this permission. **The intersection model works correctly, and privilege escalation is impossible.**
+
+The difference between these two error messages matters operationally:
+
+| Error message | Cause |
+|---|---|
+| `no session policy allows the xxx action` | IAM role allows it, but session policy doesn't |
+| `no identity-based policy allows the xxx action` | IAM role itself doesn't allow it |
+
+## Test 4: Dynamic policy updates
+
+Verify that permissions restricted in Test 2 can be expanded without recreating the IAM role. Session policies can be changed anytime via `update-pod-identity-association`.
+
+```bash title="Terminal"
+aws eks update-pod-identity-association \
+  --cluster-name ${CLUSTER_NAME} \
+  --association-id ${ASSOCIATION_ID} \
+  --policy '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["s3:ListAllMyBuckets","s3:CreateBucket"],"Resource":"*"}]}' \
+  --region ${AWS_REGION}
+```
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">Commands (Test 4)</summary>
+
+```bash title="Terminal"
+sleep 15
+
+kubectl run s3-create-test --image=amazon/aws-cli:latest \
+  --namespace=${NAMESPACE} --rm -it --restart=Never \
+  --overrides='{"spec":{"serviceAccountName":"'${SERVICE_ACCOUNT}'"}}' \
+  -- s3 mb s3://session-policy-demo-expanded-$(date +%s) --region ${AWS_REGION}
+```
+
+</details>
+
+```text title="Output (CreateBucket → success)"
+make_bucket: session-policy-demo-expanded-1774422091
+```
+
+The updated policy took effect within seconds, and CreateBucket succeeded again. No IAM role changes or association recreation needed — just swap the policy JSON.
+
+Note that **eventual consistency causes a propagation delay**. The official blog states up to 10 seconds; I waited 15 seconds in testing. During this window, pods may continue operating with previous permissions.
+
+## Constraints and trade-offs
+
+### Session tags are mutually exclusive
+
+Session policies and session tags cannot be used together. When specifying a session policy, you must set `--disable-session-tags` to `true`. Attempting to keep session tags enabled with a session policy produces this error:
+
+```text title="Output"
+An error occurred (InvalidParameterException) when calling the
+UpdatePodIdentityAssociation operation: When policy is specified,
+disableSessionTags must be set to true
+```
+
+This is due to STS packed policy size limitations. According to the official blog, combining session tags and session policies triggers a `PackedPolicyTooLarge` validation error, so EKS Pod Identity prohibits the combination entirely. This is a requirement, not an optional optimization.
+
+In practice, **session tag-based ABAC and session policies are mutually exclusive**. If you're already using session tags, evaluate the migration cost carefully.
+
+### Policy size limit
+
+Session policies are capped at **2,048 characters**. Exceeding this limit is rejected immediately:
+
+```text title="Output"
+An error occurred (InvalidParameterException) when calling the
+UpdatePodIdentityAssociation operation: The parameter policy should
+not be greater than 2048 characters.
+```
+
+Since policies are written in JSON, the practical number of permissions you can express is limited. Complex conditional policies or policies listing many resource ARNs may not fit.
+
+### Other considerations
+
+- **Cross-account**: When `targetRoleArn` is specified, the session policy is applied to the target role, not the source role
+- **One-to-one constraint**: Only one Pod Identity association per ServiceAccount, though the session policy can be updated later
+- **Validation**: Policies are validated in 5 stages at API call time — JSON format, character set, size (2,048 chars), IAM policy schema (STS dry-run), and packed policy size. However, whether the actions actually exist in the IAM role is not validated (proven in Test 3)
+
+## Summary
+
+- **Clear error messages** — Session policy denials show `no session policy allows`, distinct from IAM role denials (`no identity-based policy allows`). This makes permission troubleshooting significantly easier
+- **The intersection model is safe** — Specifying actions not in the IAM role doesn't cause privilege escalation. API validation passes but runtime denies, so policy typos can't lead to unintended access
+- **Session tag exclusivity is the biggest trade-off** — If you're using ABAC with session tags, evaluate migration costs carefully. For greenfield deployments, session policies are simpler
+- **The 2,048-character limit can be a practical barrier** — Sufficient for simple restrictions, but multi-tenant configurations listing many resource ARNs may exceed it. Combine with IAM role splitting in those cases
+
+### When to adopt session policies
+
+Session policies work best when you want to share a single IAM role while scoping down permissions per association:
+
+- **Multi-tenant SaaS** — Restrict which S3 buckets or DynamoDB tables each tenant can access
+- **Environment isolation** — dev/staging/prod in the same cluster with different permission scopes
+- **Approaching IAM role limits** — Avoid the 5,000 role quota while maintaining least privilege
+
+Session tags or IAM role splitting may be better when:
+
+- **Already using session tag-based ABAC** — Migration cost is high since the two are mutually exclusive
+- **Policies are too complex for 2,048 characters** — IAM role splitting is more practical when listing many resource ARNs
+- **Tag-based conditional access across all AWS services is needed** — Session tags offer more flexibility
+
+## Cleanup
+
+Delete resources in reverse creation order after testing. Don't forget to remove S3 buckets created during verification.
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">Resource deletion commands</summary>
+
+```bash title="Terminal"
+# Delete S3 buckets created during testing
+aws s3api list-buckets --query "Buckets[?starts_with(Name, 'session-policy-demo')].Name" \
+  --output text | tr '\t' '\n' | while read bucket; do
+  aws s3 rb s3://${bucket}
+done
+
+# Delete Pod Identity association
+aws eks delete-pod-identity-association \
+  --cluster-name ${CLUSTER_NAME} \
+  --association-id ${ASSOCIATION_ID} \
+  --region ${AWS_REGION}
+
+# Delete Kubernetes resources
+kubectl delete serviceaccount ${SERVICE_ACCOUNT} -n ${NAMESPACE}
+kubectl delete namespace ${NAMESPACE}
+
+# Delete addon (if no longer needed)
+aws eks delete-addon \
+  --addon-name eks-pod-identity-agent \
+  --cluster-name ${CLUSTER_NAME} \
+  --region ${AWS_REGION}
+
+# Delete IAM resources
+aws iam delete-role-policy \
+  --role-name eks-session-policy-demo \
+  --policy-name S3BroadAccess
+aws iam delete-role --role-name eks-session-policy-demo
+```
+
+</details>

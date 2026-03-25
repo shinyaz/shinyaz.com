@@ -1,0 +1,23 @@
+---
+title: "EKS Pod Identity session policy AccessDenied errors clearly state the cause"
+description: "Session policy denials say 'no session policy allows', while IAM role denials say 'no identity-based policy allows'. Knowing the difference makes IAM troubleshooting much easier."
+date: "2026-03-26"
+published: true
+tags: ["aws", "eks", "iam", "pod-identity"]
+---
+
+While testing EKS Pod Identity [session policies](/en/blog/2026/03/26/eks-pod-identity-session-policy), I was surprised by how helpful the error messages are.
+
+IAM AccessDenied errors are notoriously vague, but session policy denials explicitly state the cause:
+
+```text title="Output (session policy is the cause)"
+s3:CreateBucket on resource: "arn:aws:s3:::xxx"
+because no session policy allows the s3:CreateBucket action
+```
+
+```text title="Output (IAM role itself is the cause)"
+ec2:DescribeInstances
+because no identity-based policy allows the ec2:DescribeInstances action
+```
+
+`no session policy allows` means you need to add the action to the session policy. `no identity-based policy allows` means the IAM role's own policy needs updating. Knowing which one to fix at a glance is a huge win for operations.
