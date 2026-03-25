@@ -295,18 +295,24 @@ print(r["stdout"])
 
 </details>
 
-```bash title="Before stop"
-/mnt/workspace/project/README.md
-/mnt/workspace/project/link-to-readme -> /mnt/workspace/project/README.md
-/mnt/workspace/project/src/main.py  (permissions: 755)
-```
+Files created before stop:
+
+- `/mnt/workspace/project/README.md` — content: `hello from session storage`
+- `/mnt/workspace/project/link-to-readme` — symlink to `/mnt/workspace/project/README.md`
+- `/mnt/workspace/project/src/main.py` — permissions: 755
 
 After resuming (15-second wait):
 
-```bash title="After resume"
-/mnt/workspace/project/README.md          # ✅ Content matches
-/mnt/workspace/project/link-to-readme     # ✅ Symlink restored
-/mnt/workspace/project/src/main.py        # ✅ Permissions 755 preserved
+```text title="Output"
+/mnt/workspace/project/README.md
+/mnt/workspace/project/link-to-readme
+/mnt/workspace/project/src/main.py
+---README---
+hello from session storage
+---SYMLINK---
+/mnt/workspace/project/README.md
+---PERMS---
+755 /mnt/workspace/project/src/main.py
 ```
 
 File contents, directory structure, symlink targets, and permissions all fully restored.
@@ -351,9 +357,12 @@ time.sleep(20)
 
 # Verify restoration
 r = run_command(
-    'PYTHONPATH=/mnt/workspace/pylibs python3 -c "import requests; print(f\'requests {requests.__version__}\')" && '
-    'cd /mnt/workspace/myproject && git log --oneline && git status && '
-    'cat src/app.py && du -sh /mnt/workspace/*',
+    'echo "=== requests import ===" && '
+    'PYTHONPATH=/mnt/workspace/pylibs python3 -c "import requests; print(f\'requests {requests.__version__} - OK\')" && '
+    'echo "=== git log ===" && cd /mnt/workspace/myproject && git log --oneline && '
+    'echo "=== git status ===" && git status && '
+    'echo "=== file content ===" && cat src/app.py && '
+    'echo "=== workspace du ===" && du -sh /mnt/workspace/*',
     session_id=session
 )
 print(r["stdout"])
@@ -460,21 +469,36 @@ The documentation states "always wait for `StopRuntimeSession` to complete befor
 ```python title="Python"
 from test_helper import *
 
-session = make_session_id()
+# --- Small file (100-line text) ---
+session_small = make_session_id()
 
-# Create 50MB random binary
+run_command(
+    'for i in $(seq 1 100); do echo "line $i" >> /mnt/workspace/bigfile.txt; done && '
+    'wc -l /mnt/workspace/bigfile.txt',
+    session_id=session_small
+)
+
+stop_session(session_small)
+time.sleep(2)
+
+r = run_command('wc -l /mnt/workspace/bigfile.txt', session_id=session_small)
+print(r["stdout"])
+
+# --- Large file (50MB) ---
+session_large = make_session_id()
+
 run_command(
     'dd if=/dev/urandom of=/mnt/workspace/random.bin bs=1M count=50 2>&1 && '
     'md5sum /mnt/workspace/random.bin',
-    session_id=session, timeout=120
+    session_id=session_large, timeout=120
 )
 
 # Stop immediately → resume with no wait
-stop_session(session)
+stop_session(session_large)
 
 r = run_command(
     'md5sum /mnt/workspace/random.bin && du -sh /mnt/workspace/random.bin',
-    session_id=session
+    session_id=session_large
 )
 print(r["stdout"])  # Check if md5sum matches
 ```
