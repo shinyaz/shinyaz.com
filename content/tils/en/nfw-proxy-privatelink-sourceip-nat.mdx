@@ -1,0 +1,19 @@
+---
+title: "Network Firewall Proxy SourceIp is NATed when accessed via PrivateLink"
+description: "Cross-VPC access through PrivateLink endpoints NATs the source IP to the endpoint's ENI IP. Use SourceVpc or SourceVpce instead of SourceIp for cross-VPC source identification."
+date: "2026-03-26"
+published: true
+tags: ["aws", "network-firewall", "networking", "vpc"]
+---
+
+In a multi-VPC setup with Network Firewall Proxy, I created a `request:SourceIp` rule targeting the App VPC EC2's IP (`10.2.1.52/32`). It didn't match.
+
+```text title="Output"
+curl http://google.com/  → 403 (SourceIp rule not matched, default DENY)
+```
+
+PrivateLink endpoint traffic is NATed to the endpoint's ENI IP, so the original client IP never reaches the proxy. The [official blog](https://aws.amazon.com/blogs/networking-and-content-delivery/securing-egress-architectures-with-network-firewall-proxy/) documents this for VPC Lattice / NLB integrations ("source traffic is NATed"), but the same applies to direct PrivateLink endpoints.
+
+`request:SourceVpc` worked correctly across VPCs though. For cross-VPC source identification, use `SourceVpc` or `SourceVpce` instead.
+
+See [Network Firewall Proxy Hands-On — Multi-VPC Architecture with PrivateLink](/en/blog/2026/03/26/nfw-proxy-multi-vpc-privatelink) for details.

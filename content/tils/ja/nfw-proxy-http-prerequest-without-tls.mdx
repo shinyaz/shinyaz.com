@@ -1,0 +1,20 @@
+---
+title: "Network Firewall Proxy は HTTP でも PreRequest フェーズのルールが効く"
+description: "TLS インターセプトなしでも HTTP の absolute-form リクエストに対しては PreRequest フェーズの HTTP メソッドやヘッダーの検査が可能。ドキュメントの記述は HTTPS に限定した話だった。"
+date: "2026-03-26"
+published: true
+tags: ["aws", "network-firewall", "networking", "security"]
+---
+
+Network Firewall Proxy のドキュメントに「Without TLS decryption, you can only filter based on IP in the pre-request phase」とある。これを読んで、TLS インターセプトなしでは HTTP メソッドのフィルタリングは一切できないと思っていた。
+
+実際に試すと、**HTTP（非 TLS）の POST リクエストは TLS インターセプトなしでもブロックされた**。
+
+```text title="Output"
+curl -X POST http://httpbin.org/post  → 403
+curl -X POST https://httpbin.org/post → 403（TLS インターセプト有効時）
+```
+
+理由は、HTTP の場合クライアントが absolute-form（`GET http://example.com/ HTTP/1.1`）でリクエストを送信するため、プロキシがリクエスト内容を直接検査できるから。ドキュメントの記述は **HTTPS** に限定した話で、HTTP には当てはまらない。
+
+詳細は [Network Firewall Proxy 検証 — ACM PCA で TLS インターセプトを有効化する](/ja/blog/2026/03/26/nfw-proxy-tls-interception) を参照。

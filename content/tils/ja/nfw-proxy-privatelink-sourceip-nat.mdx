@@ -1,0 +1,19 @@
+---
+title: "Network Firewall Proxy の PrivateLink 経由アクセスでは SourceIp が NAT される"
+description: "PrivateLink エンドポイント経由のクロス VPC アクセスでは request:SourceIp がエンドポイントの ENI IP に NAT される。SourceVpc や SourceVpce で代替する必要がある。"
+date: "2026-03-26"
+published: true
+tags: ["aws", "network-firewall", "networking", "vpc"]
+---
+
+Network Firewall Proxy のマルチ VPC 構成で、App VPC の EC2（`10.2.1.52`）から PrivateLink エンドポイント経由でプロキシにアクセスした。`request:SourceIp` に `10.2.1.52/32` を指定したルールを作成したが、マッチしなかった。
+
+```text title="Output"
+curl http://google.com/  → 403（SourceIp ルールにマッチせずデフォルト DENY）
+```
+
+PrivateLink エンドポイント経由のトラフィックは、エンドポイントの ENI IP に NAT されるため、元のクライアント IP がプロキシに届かない。[公式ブログ](https://aws.amazon.com/blogs/networking-and-content-delivery/securing-egress-architectures-with-network-firewall-proxy/)では VPC Lattice / NLB 統合の文脈で「source traffic is NATed」と記載されているが、直接の PrivateLink エンドポイントでも同様だった。
+
+一方、`request:SourceVpc` はクロス VPC でも正しく識別された。マルチ VPC 構成でソースを識別するには `SourceVpc` か `SourceVpce` を使う。
+
+詳細は [Network Firewall Proxy 検証 — PrivateLink でマルチ VPC 構成を組む](/ja/blog/2026/03/26/nfw-proxy-multi-vpc-privatelink) を参照。

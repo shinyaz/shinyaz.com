@@ -1,0 +1,20 @@
+---
+title: "Network Firewall Proxy PreRequest rules work for HTTP even without TLS intercept"
+description: "HTTP absolute-form requests expose headers to the proxy without TLS decryption. The documentation's 'only filter based on IP' statement applies to HTTPS only."
+date: "2026-03-26"
+published: true
+tags: ["aws", "network-firewall", "networking", "security"]
+---
+
+The Network Firewall Proxy docs say "Without TLS decryption, you can only filter based on IP in the pre-request phase." I assumed this meant no HTTP method filtering at all without TLS intercept.
+
+Turns out, **HTTP (non-TLS) POST requests are blocked even without TLS intercept**.
+
+```text title="Output"
+curl -X POST http://httpbin.org/post  → 403
+curl -X POST https://httpbin.org/post → 403 (with TLS intercept)
+```
+
+The reason: HTTP clients send absolute-form requests (`GET http://example.com/ HTTP/1.1`) to the proxy, so the proxy can inspect request content directly. The docs statement only applies to **HTTPS** — HTTP headers are always visible to an explicit proxy.
+
+See [Network Firewall Proxy Hands-On — Enabling TLS Intercept with ACM PCA](/en/blog/2026/03/26/nfw-proxy-tls-interception) for details.
