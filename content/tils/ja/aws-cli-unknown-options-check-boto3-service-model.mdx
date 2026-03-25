@@ -1,0 +1,30 @@
+---
+title: "AWS CLI が Unknown options を返すプレビュー機能のパラメータは boto3 の service_model で対応状況を確認できる"
+description: "AgentCore の --filesystem-configurations が CLI で認識されなかったが、boto3 の service_model.operation_model で入力パラメータを確認したら対応済みだった。CLI と SDK でサービスモデルの反映タイミングが異なる。"
+date: "2026-03-26"
+published: true
+tags: ["aws-cli", "boto3", "agentcore", "bedrock"]
+---
+
+AgentCore Runtime にセッションストレージを設定しようとして `--filesystem-configurations` を渡したら、CLI が `Unknown options` で拒否した。
+
+```text title="Output"
+aws: [ERROR]: Unknown options: --filesystem-configurations, [{"sessionStorage": ...}]
+```
+
+`aws bedrock-agentcore-control create-agent-runtime help` を見ても該当パラメータが出てこない。しかし[公式ドキュメント](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/runtime-persistent-filesystems.html)には CLI 例が載っている。CLI バージョンのサービスモデルが追いついていない可能性を疑い、boto3 側を確認した。
+
+```python title="Python"
+import boto3
+
+client = boto3.client("bedrock-agentcore-control", region_name="us-west-2")
+op = client._service_model.operation_model("CreateAgentRuntime")
+print(list(op.input_shape.members.keys()))
+```
+
+```text title="Output"
+['agentRuntimeName', 'agentRuntimeArtifact', 'roleArn', 'networkConfiguration',
+ 'clientToken', 'description', ..., 'filesystemConfigurations', 'tags']
+```
+
+`filesystemConfigurations` がちゃんとある。boto3 経由なら問題なく使えた。プレビュー機能では CLI と SDK でサービスモデルの反映タイミングにズレがあることがある。CLI で `Unknown options` が出たら `_service_model.operation_model` で SDK 側の対応状況を確認するのが早い。

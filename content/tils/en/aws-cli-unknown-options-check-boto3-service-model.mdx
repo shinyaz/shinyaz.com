@@ -1,0 +1,30 @@
+---
+title: "When AWS CLI returns Unknown options for a preview feature, check boto3's service_model for parameter support"
+description: "AgentCore's --filesystem-configurations was rejected by the CLI, but boto3's service_model.operation_model confirmed the parameter was already supported. CLI and SDK service model updates can be out of sync."
+date: "2026-03-26"
+published: true
+tags: ["aws-cli", "boto3", "agentcore", "bedrock"]
+---
+
+Tried to pass `--filesystem-configurations` to create an AgentCore Runtime with session storage, and the CLI rejected it outright.
+
+```text title="Output"
+aws: [ERROR]: Unknown options: --filesystem-configurations, [{"sessionStorage": ...}]
+```
+
+The parameter didn't show up in `aws bedrock-agentcore-control create-agent-runtime help` either. But the [official documentation](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/runtime-persistent-filesystems.html) includes a CLI example. Suspected the CLI's service model hadn't caught up yet, so I checked boto3.
+
+```python title="Python"
+import boto3
+
+client = boto3.client("bedrock-agentcore-control", region_name="us-west-2")
+op = client._service_model.operation_model("CreateAgentRuntime")
+print(list(op.input_shape.members.keys()))
+```
+
+```text title="Output"
+['agentRuntimeName', 'agentRuntimeArtifact', 'roleArn', 'networkConfiguration',
+ 'clientToken', 'description', ..., 'filesystemConfigurations', 'tags']
+```
+
+There it is. boto3 worked fine. CLI and SDK service model updates can be out of sync for preview features. When the CLI gives you `Unknown options`, check `_service_model.operation_model` on the SDK side — it's the fastest way to confirm support.
