@@ -1,0 +1,626 @@
+---
+title: "Persist agent workspace across stop/resume with Bedrock AgentCore Runtime managed session storage"
+description: "Hands-on verification of AgentCore Runtime's new managed session storage. Tested file restoration after stop/resume, pip/git workspace persistence, session isolation, and graceful shutdown behavior with real measurement data."
+date: "2026-03-26"
+published: true
+featured: false
+categories: [ai-agents]
+tags: ["bedrock", "agentcore", "session-storage", "ai-agents"]
+---
+
+## Introduction
+
+On March 25, 2026, AWS [announced managed session storage for Amazon Bedrock AgentCore Runtime](https://aws.amazon.com/about-aws/whats-new/2026/03/bedrock-agentcore-runtime-session-storage/) (public preview). This feature automatically persists an agent's filesystem state across session stop/resume cycles.
+
+In a [previous article](/en/blog/2026/03/17/bedrock-agentcore-runtime-shell-command), I verified the `InvokeAgentRuntimeCommand` API and confirmed filesystem sharing within a session. However, when a session stopped, the microVM was destroyed along with all files. A coding agent could build an entire project overnight, only to start from scratch the next morning. Managed session storage solves this problem.
+
+This article shares the results of verifying session storage behavior from five perspectives using a minimal runtime built with code configuration (S3 ZIP). See the official documentation at [Persist session state across stop/resume](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/runtime-persistent-filesystems.html).
+
+## How session storage works
+
+When you specify a mount path via `filesystemConfigurations` at runtime creation, each session gets a dedicated persistent directory.
+
+| Property | Details |
+|---|---|
+| Mount path | Configurable (e.g., `/mnt/workspace`) |
+| Max capacity | 1 GB per session |
+| Data retention | 14 days of idle time |
+| Session isolation | Each session can only access its own storage |
+| Supported ops | Regular files, directories, symlinks, standard POSIX operations |
+| Unsupported | Hard links, device files, FIFOs, UNIX sockets, xattr, fallocate |
+| Reset triggers | 14 days unused, or runtime version update |
+
+The lifecycle:
+
+1. First invoke — empty directory at the mount path
+2. Agent reads/writes files — data asynchronously replicated to durable storage
+3. Session stops — unflushed data written during graceful shutdown
+4. Resume — new microVM mounts the same storage, filesystem restored
+
+No checkpoint logic or save/restore code needed in the agent.
+
+Note that the mounted path is available only at the time of agent invocation, not during container initialization.
+
+## Test environment setup
+
+Prerequisites:
+
+- AWS CLI configured (`bedrock-agentcore:*`, `iam:*`, `s3:*` permissions)
+- boto3 1.42.76+ (requires `filesystemConfigurations` parameter support)
+- Test region: us-west-2
+
+Skip to [Verification 1](#verification-1-file-restoration-across-stopresume) if you only want the results.
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">Deploy steps (reproduce the test environment)</summary>
+
+### Agent code
+
+A minimal agent — session storage verification uses `InvokeAgentRuntimeCommand` for shell commands, so the agent itself needs minimal implementation.
+
+```python title="main.py"
+import json
+import sys
+
+def handle_invoke(event):
+    user_input = event.get("input", {}).get("text", "")
+    return {
+        "output": {
+            "text": f"Received: {user_input}. This is a minimal test agent."
+        }
+    }
+
+def main():
+    for line in sys.stdin:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            request = json.loads(line)
+            response = handle_invoke(request)
+            print(json.dumps(response), flush=True)
+        except json.JSONDecodeError:
+            print(json.dumps({"error": "Invalid JSON"}), flush=True)
+
+if __name__ == "__main__":
+    main()
+```
+
+### S3 upload and IAM role
+
+```bash title="Terminal"
+ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+BUCKET_NAME="agentcore-session-storage-test-${ACCOUNT_ID}"
+REGION="us-west-2"
+
+zip agent.zip main.py
+aws s3 mb "s3://${BUCKET_NAME}" --region "$REGION"
+aws s3 cp agent.zip "s3://${BUCKET_NAME}/agent.zip"
+
+aws iam create-role \
+  --role-name AgentCoreSessionStorageTestRole \
+  --assume-role-policy-document '{
+    "Version": "2012-10-17",
+    "Statement": [{
+      "Effect": "Allow",
+      "Principal": {"Service": "bedrock-agentcore.amazonaws.com"},
+      "Action": "sts:AssumeRole"
+    }]
+  }'
+
+aws iam attach-role-policy \
+  --role-name AgentCoreSessionStorageTestRole \
+  --policy-arn arn:aws:iam::aws:policy/AmazonBedrockFullAccess
+
+aws iam put-role-policy \
+  --role-name AgentCoreSessionStorageTestRole \
+  --policy-name S3Access \
+  --policy-document "{
+    \"Version\": \"2012-10-17\",
+    \"Statement\": [{
+      \"Effect\": \"Allow\",
+      \"Action\": [\"s3:GetObject\", \"s3:ListBucket\"],
+      \"Resource\": [
+        \"arn:aws:s3:::${BUCKET_NAME}\",
+        \"arn:aws:s3:::${BUCKET_NAME}/*\"
+      ]
+    }]
+  }"
+```
+
+### Runtime creation (with session storage)
+
+As of March 2026, `--filesystem-configurations` was not recognized by the installed AWS CLI version (`Unknown options` error). The official documentation includes a CLI example, so it may work with newer CLI versions. This article uses boto3.
+
+```python title="Python"
+import boto3
+
+ACCOUNT_ID = "111122223333"
+BUCKET_NAME = f"agentcore-session-storage-test-{ACCOUNT_ID}"
+
+client = boto3.client("bedrock-agentcore-control", region_name="us-west-2")
+
+response = client.create_agent_runtime(
+    agentRuntimeName="session_storage_test_agent",
+    roleArn=f"arn:aws:iam::{ACCOUNT_ID}:role/AgentCoreSessionStorageTestRole",
+    agentRuntimeArtifact={
+        "codeConfiguration": {
+            "code": {"s3": {"bucket": BUCKET_NAME, "prefix": "agent.zip"}},
+            "runtime": "PYTHON_3_13",
+            "entryPoint": ["main.py"],
+        }
+    },
+    networkConfiguration={"networkMode": "PUBLIC"},
+    filesystemConfigurations=[
+        {"sessionStorage": {"mountPath": "/mnt/workspace"}}
+    ],
+)
+```
+
+### Endpoint creation
+
+```bash title="Terminal"
+RUNTIME_ID="session_storage_test_agent-XXXXXXXXXX"
+
+aws bedrock-agentcore-control create-agent-runtime-endpoint \
+  --region us-west-2 \
+  --agent-runtime-id "$RUNTIME_ID" \
+  --name session_storage_test_endpoint
+
+while true; do
+  STATUS=$(aws bedrock-agentcore-control get-agent-runtime-endpoint \
+    --region us-west-2 \
+    --agent-runtime-id "$RUNTIME_ID" \
+    --endpoint-name session_storage_test_endpoint \
+    --query 'status' --output text)
+  echo "Endpoint status: $STATUS"
+  [ "$STATUS" = "READY" ] && break
+  sleep 10
+done
+```
+
+</details>
+
+All tests use the following Python helper. `InvokeAgentRuntimeCommand` executes shell commands, and `StopRuntimeSession` (data plane API) stops sessions.
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">Test helper code (test_helper.py)</summary>
+
+```python title="test_helper.py"
+import boto3, uuid, json, time
+
+REGION = "us-west-2"
+RUNTIME_ARN = "arn:aws:bedrock-agentcore:us-west-2:111122223333:runtime/RUNTIME_ID"
+
+client = boto3.client("bedrock-agentcore", region_name=REGION)
+
+def make_session_id():
+    """Session IDs must be 33+ characters — concatenate UUIDs."""
+    return str(uuid.uuid4()) + "-" + str(uuid.uuid4())[:8]
+
+def run_command(command, timeout=60, session_id=None):
+    """Execute a command via /bin/bash -c and process the EventStream."""
+    response = client.invoke_agent_runtime_command(
+        agentRuntimeArn=RUNTIME_ARN,
+        runtimeSessionId=session_id,
+        qualifier="DEFAULT",
+        contentType="application/json",
+        accept="application/vnd.amazon.eventstream",
+        body={"command": f'/bin/bash -c {json.dumps(command)}', "timeout": timeout},
+    )
+    stdout, stderr, exit_code, status = [], [], None, None
+    for event in response.get("stream", []):
+        if "chunk" in event:
+            chunk = event["chunk"]
+            if "contentDelta" in chunk:
+                d = chunk["contentDelta"]
+                if d.get("stdout"): stdout.append(d["stdout"])
+                if d.get("stderr"): stderr.append(d["stderr"])
+            if "contentStop" in chunk:
+                exit_code = chunk["contentStop"].get("exitCode")
+                status = chunk["contentStop"].get("status")
+    return {"stdout": "".join(stdout), "stderr": "".join(stderr),
+            "exit_code": exit_code, "status": status}
+
+def stop_session(session_id):
+    """Stop a session via the data plane API."""
+    return client.stop_runtime_session(
+        agentRuntimeArn=RUNTIME_ARN, runtimeSessionId=session_id
+    )
+```
+
+</details>
+
+## Verification 1: File restoration across stop/resume
+
+The most fundamental test — do files, directories, symlinks, and permissions survive a stop/resume cycle?
+
+### Mount point internals
+
+First, `df -h` reveals the mount point details:
+
+```text title="Output"
+Filesystem         Size  Used Avail Use% Mounted on
+127.0.0.1:/export  1.0G     0  1.0G   0% /mnt/workspace
+```
+
+The `mount` command output:
+
+```text title="Output"
+127.0.0.1:/export on /mnt/workspace type nfs4
+  (rw,relatime,vers=4.0,rsize=1048576,wsize=1048576,namlen=255,
+   acregmin=3600,acregmax=3600,acdirmin=3600,acdirmax=3600,
+   hard,nocto,proto=tcp,timeo=600,retrans=2,sec=sys,
+   clientaddr=127.0.0.1,local_lock=none,addr=127.0.0.1)
+```
+
+Session storage is implemented as **NFS v4 over localhost**. An NFS server runs inside the microVM, and AgentCore Runtime manages replication to durable storage in the background.
+
+### File restoration test
+
+Created files, directories, and symlinks with specific permissions, then stopped and resumed:
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">Reproduction code for Verification 1</summary>
+
+```python title="Python"
+from test_helper import *
+
+session = make_session_id()
+
+# Create files, directories, symlinks
+run_command(
+    'mkdir -p /mnt/workspace/project/src && '
+    'echo "hello from session storage" > /mnt/workspace/project/README.md && '
+    'echo "print(\'hello\')" > /mnt/workspace/project/src/main.py && '
+    'chmod 755 /mnt/workspace/project/src/main.py && '
+    'ln -s /mnt/workspace/project/README.md /mnt/workspace/project/link-to-readme',
+    session_id=session
+)
+
+# Stop → wait 15s → resume
+stop_session(session)
+time.sleep(15)
+
+# Verify restoration
+r = run_command(
+    'find /mnt/workspace -type f -o -type l | sort && '
+    'echo "---README---" && cat /mnt/workspace/project/README.md && '
+    'echo "---SYMLINK---" && readlink /mnt/workspace/project/link-to-readme && '
+    'echo "---PERMS---" && stat -c "%a %n" /mnt/workspace/project/src/main.py',
+    session_id=session
+)
+print(r["stdout"])
+```
+
+</details>
+
+```bash title="Before stop"
+/mnt/workspace/project/README.md
+/mnt/workspace/project/link-to-readme -> /mnt/workspace/project/README.md
+/mnt/workspace/project/src/main.py  (permissions: 755)
+```
+
+After resuming (15-second wait):
+
+```bash title="After resume"
+/mnt/workspace/project/README.md          # ✅ Content matches
+/mnt/workspace/project/link-to-readme     # ✅ Symlink restored
+/mnt/workspace/project/src/main.py        # ✅ Permissions 755 preserved
+```
+
+File contents, directory structure, symlink targets, and permissions all fully restored.
+
+Note that according to the documentation, permissions are "stored but not enforced" within the session. `chmod` and `stat` work correctly, but access checks always succeed because the agent runs as the only user in the microVM.
+
+## Verification 2: Coding agent workspace persistence
+
+Simulating a real coding agent workflow — pip package installation and git repository creation, then verifying everything survives stop/resume.
+
+### Setup
+
+Code configuration (PYTHON_3_13) doesn't have `pip` directly, but `python3 -m pip` works. Installing packages to the mount path makes them persistent.
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">Reproduction code for Verification 2</summary>
+
+```python title="Python"
+from test_helper import *
+
+session = make_session_id()
+
+# Install pip packages to workspace
+run_command(
+    'python3 -m pip install --target=/mnt/workspace/pylibs requests',
+    session_id=session, timeout=120
+)
+
+# Create git repository
+run_command(
+    'cd /mnt/workspace && git init myproject && cd myproject && '
+    'echo "# Session Storage Test" > README.md && '
+    'mkdir src && echo "print(\'hello\')" > src/app.py && '
+    'git add -A && '
+    'git -c user.email="test@example.com" -c user.name="Test" commit -m "initial commit"',
+    session_id=session
+)
+
+# Stop → wait 20s → resume
+stop_session(session)
+time.sleep(20)
+
+# Verify restoration
+r = run_command(
+    'PYTHONPATH=/mnt/workspace/pylibs python3 -c "import requests; print(f\'requests {requests.__version__}\')" && '
+    'cd /mnt/workspace/myproject && git log --oneline && git status && '
+    'cat src/app.py && du -sh /mnt/workspace/*',
+    session_id=session
+)
+print(r["stdout"])
+```
+
+</details>
+
+The following commands were executed inside the agent session.
+
+```bash title="Terminal"
+python3 -m pip install --target=/mnt/workspace/pylibs requests
+
+cd /mnt/workspace && git init myproject
+cd myproject
+echo "# Session Storage Test" > README.md
+mkdir src && echo "print('hello')" > src/app.py
+git add -A
+git commit -m "initial commit"
+```
+
+State before stop:
+
+```text title="Output"
+requests 2.33.0  (PYTHONPATH=/mnt/workspace/pylibs)
+d34e531 initial commit
+37K   /mnt/workspace/myproject
+3.4M  /mnt/workspace/pylibs
+```
+
+### After resume
+
+Resumed after 20-second wait:
+
+```text title="Output"
+=== requests import ===
+requests 2.33.0 - OK
+=== git log ===
+d34e531 initial commit
+=== git status ===
+On branch master
+nothing to commit, working tree clean
+=== file content ===
+print('hello')
+=== workspace du ===
+37K   /mnt/workspace/myproject
+3.4M  /mnt/workspace/pylibs
+```
+
+pip packages (requests + dependencies, 3.4MB), git repository (commit history, branch info, working tree), and source code all fully restored. The fact that `git status` returns `nothing to commit, working tree clean` confirms the `.git` directory index was correctly restored.
+
+The documentation notes that advisory locks work within a running session but are not persisted across stop/resume. However, tools that use file-based locking (such as `git`) are unaffected, which aligns with our test results.
+
+## Verification 3: Session isolation
+
+Confirmed that different session IDs have completely isolated storage.
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">Reproduction code for Verification 3</summary>
+
+```python title="Python"
+from test_helper import *
+
+session_x = make_session_id()
+session_y = make_session_id()
+
+# Session X creates a file
+run_command(
+    'echo "secret from session X" > /mnt/workspace/secret.txt',
+    session_id=session_x
+)
+
+# Session Y tries to read it
+r = run_command(
+    'ls -la /mnt/workspace/ && '
+    'cat /mnt/workspace/secret.txt 2>&1 || echo "FILE NOT FOUND"',
+    session_id=session_y
+)
+print(r["stdout"])
+```
+
+</details>
+
+Session X created a file, then Session Y tried to read the same path.
+
+```text title="Output (Session Y reading Session X's path)"
+ls -la /mnt/workspace/
+total 4
+drwxr-xr-x 2 root root    0 .
+drwxr-xr-x 1 root root 4096 ..
+
+cat /mnt/workspace/secret.txt
+cat: /mnt/workspace/secret.txt: No such file or directory
+```
+
+Session Y's workspace is empty — Session X's `secret.txt` is invisible. The reverse is also true: Session X cannot access files created by Session Y. Storage is fully isolated per session, even on the same runtime.
+
+## Verification 4: Graceful shutdown behavior
+
+The documentation states "always wait for `StopRuntimeSession` to complete before resuming." What happens if you don't wait?
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">Reproduction code for Verification 4</summary>
+
+```python title="Python"
+from test_helper import *
+
+session = make_session_id()
+
+# Create 50MB random binary
+run_command(
+    'dd if=/dev/urandom of=/mnt/workspace/random.bin bs=1M count=50 2>&1 && '
+    'md5sum /mnt/workspace/random.bin',
+    session_id=session, timeout=120
+)
+
+# Stop immediately → resume with no wait
+stop_session(session)
+
+r = run_command(
+    'md5sum /mnt/workspace/random.bin && du -sh /mnt/workspace/random.bin',
+    session_id=session
+)
+print(r["stdout"])  # Check if md5sum matches
+```
+
+</details>
+
+### Small file (100-line text)
+
+Created a 100-line text file, stopped immediately, and resumed after 2 seconds.
+
+```text title="Output"
+# Before stop
+wc -l /mnt/workspace/bigfile.txt → 100
+
+# After resume (2s wait)
+wc -l /mnt/workspace/bigfile.txt → 100  # ✅ All lines restored
+```
+
+### Large file (50MB)
+
+```text title="Output"
+# Create 50MB random binary
+dd if=/dev/urandom of=/mnt/workspace/random.bin bs=1M count=50
+md5sum: 4061cd0be8bf6f4619986721533f7669
+
+# Stop immediately → resume with 0 seconds wait
+md5sum: 4061cd0be8bf6f4619986721533f7669  # ✅ Exact match
+size: 50M                                  # ✅ Size matches
+```
+
+Even with a 50MB file and zero wait time after stop, the md5sum matched perfectly. The NFS v4 async replication appears to persist data in near real-time during the session.
+
+That said, this was tested under specific conditions (50MB, stop after write completion). Behavior may differ when stopping mid-write or with data approaching the 1GB limit. Follow the documentation's recommendation and wait for `StopRuntimeSession` to complete in production.
+
+## Verification 5: Edge cases and unsupported operations
+
+### Unsupported operation error messages
+
+Tested each documented unsupported operation and recorded the actual error messages.
+
+| Operation | Command | Error message |
+|---|---|---|
+| Hard link | `ln file hardlink` | `Unknown error 524` |
+| FIFO | `mkfifo testfifo` | `Unknown error 527` |
+| Device file | `mknod testdev c 1 3` | `Input/output error` |
+| fallocate | `fallocate -l 1M file` | `Operation not supported` |
+
+Hard links and FIFOs return NFS-specific error codes (524, 527) rather than standard errno values. If your agent handles these errors, string matching on the error message is necessary.
+
+The documentation also lists **UNIX sockets** and **extended attributes (xattr)** as unsupported. xattr could not be tested because `setfattr` was not pre-installed in the code configuration environment. Additionally, **advisory locks** work within a running session but are not persisted across stop/resume.
+
+### Runtime version update resets storage
+
+The documentation states that a version update provisions a fresh filesystem. After running `UpdateAgentRuntime` with identical code (version 1 → 2) and resuming the same session:
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">Reproduction code for Verification 5 (version update)</summary>
+
+```python title="Python"
+from test_helper import *
+
+session = make_session_id()
+
+# Create file → stop
+run_command(
+    'echo "version 1 data" > /mnt/workspace/version-test.txt',
+    session_id=session
+)
+stop_session(session)
+time.sleep(10)
+
+# Update runtime (same code, but creates a new version)
+control = boto3.client("bedrock-agentcore-control", region_name=REGION)
+control.update_agent_runtime(
+    agentRuntimeId="RUNTIME_ID",
+    roleArn="arn:aws:iam::111122223333:role/AgentCoreSessionStorageTestRole",
+    agentRuntimeArtifact={...},  # Same config as creation
+    networkConfiguration={"networkMode": "PUBLIC"},
+    filesystemConfigurations=[{"sessionStorage": {"mountPath": "/mnt/workspace"}}],
+)
+
+# Wait for READY, then resume with same session ID
+time.sleep(15)
+r = run_command(
+    'cat /mnt/workspace/version-test.txt 2>&1 || echo "FILE NOT FOUND (storage was reset)"',
+    session_id=session
+)
+print(r["stdout"])
+```
+
+</details>
+
+```text title="Output"
+ls -la /mnt/workspace/
+total 4
+drwxr-xr-x 2 root root    0 .
+drwxr-xr-x 1 root root 4096 ..
+
+cat /mnt/workspace/version-test.txt
+cat: No such file or directory
+FILE NOT FOUND (storage was reset)
+```
+
+Even with identical code, a version change completely resets storage. Back up necessary data to S3 before updating runtimes in production.
+
+## Summary
+
+The problem posed in the introduction — "agent work is lost when a session stops" — is fully addressed by managed session storage. An entire workspace including pip packages, git repositories, and source code restores completely across stop/resume cycles, with zero code changes required in the agent.
+
+Beyond confirming the feature works as documented, the verification revealed implementation details not covered in the documentation.
+
+- **NFS v4 over localhost is the implementation** — `df -h` shows `127.0.0.1:/export`, `mount` confirms NFS v4 options. An NFS server inside the microVM handles replication to AgentCore Runtime's durable storage. This is why standard Linux file operations work transparently.
+- **Async replication is effectively real-time** — A 50MB file survived stop/resume with zero wait time and matching md5sums. While the documentation recommends waiting for stop completion, data loss risk appears low under normal usage. Still, follow the recommendation in production.
+- **pip + git workspaces fully restore with code configuration** — Install packages to the mount path with `--target` and use `PYTHONPATH`. Git's `.git` directory (index, commit history) restores correctly.
+- **Version updates reset all session storage** — Even identical code triggers a full reset via `UpdateAgentRuntime`. Plan data evacuation in CI/CD pipelines.
+
+## Cleanup
+
+Delete resources in reverse creation order after verification. The safe order is: endpoint → runtime → S3 → IAM.
+
+```bash title="Terminal"
+REGION="us-west-2"
+RUNTIME_ID="session_storage_test_agent-XXXXXXXXXX"
+BUCKET_NAME="agentcore-session-storage-test-111122223333"
+
+# Delete endpoint
+aws bedrock-agentcore-control delete-agent-runtime-endpoint \
+  --region "$REGION" \
+  --agent-runtime-id "$RUNTIME_ID" \
+  --endpoint-name session_storage_test_endpoint
+
+sleep 15
+
+# Delete runtime
+aws bedrock-agentcore-control delete-agent-runtime \
+  --region "$REGION" \
+  --agent-runtime-id "$RUNTIME_ID"
+
+# Delete S3 bucket (including contents)
+aws s3 rb "s3://${BUCKET_NAME}" --force --region "$REGION"
+
+# Delete IAM role (detach policies first)
+aws iam delete-role-policy \
+  --role-name AgentCoreSessionStorageTestRole --policy-name S3Access
+aws iam detach-role-policy \
+  --role-name AgentCoreSessionStorageTestRole \
+  --policy-arn arn:aws:iam::aws:policy/AmazonBedrockFullAccess
+aws iam delete-role --role-name AgentCoreSessionStorageTestRole
+```
