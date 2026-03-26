@@ -103,7 +103,7 @@ Key fields from `describe-db-clusters` and `describe-db-instances`, summarized:
 | DBInstanceClass | db.serverless | Serverless v2 instance |
 | PubliclyAccessible | false | Connectivity via Internet Access Gateway, not traditional "public access" |
 
-`StorageEncrypted: false` looks like encryption is disabled, but per the official documentation, Express Configuration clusters are encrypted with AWS/RDS service-owned keys. The `StorageEncrypted` field indicates whether a customer-managed KMS key is used, while `sse-rds` (RDS service-owned key) encryption is handled separately. You cannot switch to a customer-managed key.
+`StorageEncrypted: false` looks like encryption is disabled, but per the official documentation, Express Configuration clusters are encrypted with AWS/RDS service-owned keys. The API documentation defines `StorageEncrypted` as "whether the DB cluster is encrypted," so this appears contradictory. It seems that `sse-rds` (RDS service-owned key) encryption introduced with Express Configuration is not reflected in the traditional `StorageEncrypted` field. You cannot switch to a customer-managed key.
 
 <details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
 <summary className="cursor-pointer font-medium">Raw describe-db-clusters output (key fields)</summary>

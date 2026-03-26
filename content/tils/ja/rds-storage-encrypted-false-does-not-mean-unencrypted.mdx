@@ -1,0 +1,18 @@
+---
+title: "RDS の StorageEncrypted: false は「暗号化されていない」を意味しない"
+description: "Aurora Express Configuration のクラスターで StorageEncrypted: false が返るが、公式ドキュメントには RDS サービス所有キーで暗号化されていると明記されている。API レスポンスとドキュメントの記述が矛盾する例。"
+date: "2026-03-27"
+published: true
+tags: ["aws", "aurora", "rds", "security"]
+---
+
+[Aurora PostgreSQL Express Configuration の検証](/ja/blog/2026/03/27/aurora-postgresql-express-configuration)で `describe-db-clusters` の出力を見たとき、`StorageEncrypted: false` だったので暗号化されていないと思った。
+
+```json title="Output"
+{
+  "StorageEncrypted": false,
+  "StorageEncryptionType": "sse-rds"
+}
+```
+
+しかし[公式ドキュメント](https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/CHAP_GettingStartedAurora.AuroraPostgreSQL.ExpressConfig.html)には「Clusters with express configuration are encrypted with AWS/RDS Service owned keys」と明記されている。[API ドキュメント](https://docs.aws.amazon.com/AmazonRDS/latest/APIReference/API_CreateDBCluster.html)では `StorageEncrypted` は「DB クラスターが暗号化されているかどうか」と定義されているので、`false` なのに暗号化されているのは矛盾して見える。Express Configuration で導入された `sse-rds`（RDS サービス所有キー）による暗号化は、従来の `StorageEncrypted` フィールドには反映されないようだ。API レスポンスのフィールド値だけで暗号化状態を判断すると誤解する。

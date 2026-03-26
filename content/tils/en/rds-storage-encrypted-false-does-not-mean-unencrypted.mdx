@@ -1,0 +1,18 @@
+---
+title: "RDS StorageEncrypted: false does not mean unencrypted"
+description: "Aurora Express Configuration clusters return StorageEncrypted: false, but the official documentation states they are encrypted with RDS service-owned keys. An example where the API response contradicts the docs."
+date: "2026-03-27"
+published: true
+tags: ["aws", "aurora", "rds", "security"]
+---
+
+While [verifying Aurora PostgreSQL Express Configuration](/en/blog/2026/03/27/aurora-postgresql-express-configuration), I saw `StorageEncrypted: false` in the `describe-db-clusters` output and assumed encryption was disabled.
+
+```json title="Output"
+{
+  "StorageEncrypted": false,
+  "StorageEncryptionType": "sse-rds"
+}
+```
+
+But the [official documentation](https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/CHAP_GettingStartedAurora.AuroraPostgreSQL.ExpressConfig.html) states: "Clusters with express configuration are encrypted with AWS/RDS Service owned keys." The [API documentation](https://docs.aws.amazon.com/AmazonRDS/latest/APIReference/API_CreateDBCluster.html) defines `StorageEncrypted` as "whether the DB cluster is encrypted," so `false` while actually encrypted looks contradictory. It appears that `sse-rds` (RDS service-owned key) encryption introduced with Express Configuration is not reflected in the traditional `StorageEncrypted` field. Don't rely solely on API response field values to determine encryption status.
