@@ -1,0 +1,341 @@
+---
+title: "AWS JDBC Wrapper の Valkey クエリキャッシュを検証 — ElastiCache Serverless で初回タイムアウトの落とし穴"
+description: "AWS Advanced JDBC Wrapper 3.3.0 の Remote Query Cache Plugin を ElastiCache for Valkey Serverless で検証。キャッシュヒット時は約105msで安定するが、初回接続で必ずタイムアウトが発生し CacheMonitor が SUSPECT 状態に陥る問題を発見した。"
+date: 2026-03-27
+published: true
+featured: false
+categories: [infrastructure]
+tags: ["aws", "aurora", "postgresql", "elasticache", "valkey", "java", "jdbc", "database"]
+---
+
+## はじめに
+
+2026年3月26日、AWS は [AWS Advanced JDBC Wrapper が Valkey による自動クエリキャッシュに対応した](https://aws.amazon.com/about-aws/whats-new/2026/03/aws-jdbc-caching-with-valkey/)ことを発表した。JDBC ドライバの設定変更だけで、アプリケーションコードをほぼ書き換えずにクエリ結果を ElastiCache にキャッシュできる機能だ。
+
+従来、クエリキャッシュを導入するにはクエリごとにキャッシュの保存・取得コードを手動で書く必要があった。Remote Query Cache Plugin はこの手間を JDBC ドライバレベルで吸収する。SQL コメントに `/* CACHE_PARAM(ttl=300s) */` と書くだけでキャッシュ対象を指定できる。
+
+本記事では、Aurora PostgreSQL Serverless v2 と ElastiCache for Valkey Serverless の構成で実際にプラグインを検証した結果を共有する。結論から言うと、**ElastiCache Serverless との組み合わせでは初回接続時に必ずタイムアウトが発生し、CacheMonitor が不安定な状態に陥る**という問題を発見した。公式ドキュメントは [Caching database query results](https://docs.aws.amazon.com/AmazonElastiCache/latest/dg/caching-database-query-results.html) および [Remote Query Cache Plugin](https://github.com/aws/aws-advanced-jdbc-wrapper/blob/main/docs/using-the-jdbc-driver/using-plugins/UsingTheRemoteQueryCachePlugin.md) を参照。
+
+## 検証環境
+
+| 項目 | 値 |
+| --- | --- |
+| リージョン | ap-northeast-1（東京） |
+| DB | Aurora PostgreSQL Serverless v2（16.6、0.5-2 ACU） |
+| キャッシュ | ElastiCache for Valkey Serverless（Valkey 8.1） |
+| 実行環境 | EC2 t3.small（Amazon Linux 2023、同一 VPC 内） |
+| Java | Amazon Corretto 21.0.10 |
+| AWS JDBC Wrapper | 3.3.0 |
+| PostgreSQL JDBC | 42.7.8 |
+| Valkey Glide | 2.3.0 |
+| Commons Pool | 2.12.0 |
+
+前提条件:
+
+- AWS CLI セットアップ済み（`rds:*`、`elasticache:*`、`ec2:*` の操作権限）
+- Java 21 + Maven
+
+結果だけ知りたい場合は[まとめ](#まとめ)にスキップできる。
+
+## 環境構築
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">インフラ構築手順（VPC / Aurora / ElastiCache / EC2）</summary>
+
+### VPC・サブネット・セキュリティグループ
+
+```bash title="Terminal"
+# VPC
+VPC_ID=$(aws ec2 create-vpc --cidr-block 10.0.0.0/16 \
+  --tag-specifications 'ResourceType=vpc,Tags=[{Key=Name,Value=jdbc-cache-test}]' \
+  --query 'Vpc.VpcId' --output text --region ap-northeast-1)
+aws ec2 modify-vpc-attribute --enable-dns-hostnames '{"Value":true}' --vpc-id $VPC_ID
+
+# サブネット（3 AZ）
+SUBNET_A=$(aws ec2 create-subnet --vpc-id $VPC_ID --cidr-block 10.0.1.0/24 \
+  --availability-zone ap-northeast-1a --query 'Subnet.SubnetId' --output text --region ap-northeast-1)
+SUBNET_C=$(aws ec2 create-subnet --vpc-id $VPC_ID --cidr-block 10.0.2.0/24 \
+  --availability-zone ap-northeast-1c --query 'Subnet.SubnetId' --output text --region ap-northeast-1)
+SUBNET_D=$(aws ec2 create-subnet --vpc-id $VPC_ID --cidr-block 10.0.3.0/24 \
+  --availability-zone ap-northeast-1d --query 'Subnet.SubnetId' --output text --region ap-northeast-1)
+
+# IGW（EC2 への SSH 用）
+IGW_ID=$(aws ec2 create-internet-gateway --query 'InternetGateway.InternetGatewayId' \
+  --output text --region ap-northeast-1)
+aws ec2 attach-internet-gateway --internet-gateway-id $IGW_ID --vpc-id $VPC_ID
+RTB_ID=$(aws ec2 describe-route-tables --filters "Name=vpc-id,Values=$VPC_ID" \
+  --query 'RouteTables[0].RouteTableId' --output text --region ap-northeast-1)
+aws ec2 create-route --route-table-id $RTB_ID --destination-cidr-block 0.0.0.0/0 \
+  --gateway-id $IGW_ID --region ap-northeast-1
+aws ec2 modify-subnet-attribute --subnet-id $SUBNET_A --map-public-ip-on-launch
+
+# セキュリティグループ
+SG_EC2=$(aws ec2 create-security-group --group-name jdbc-cache-test-ec2 \
+  --description "EC2" --vpc-id $VPC_ID --query 'GroupId' --output text --region ap-northeast-1)
+SG_AURORA=$(aws ec2 create-security-group --group-name jdbc-cache-test-aurora \
+  --description "Aurora" --vpc-id $VPC_ID --query 'GroupId' --output text --region ap-northeast-1)
+SG_CACHE=$(aws ec2 create-security-group --group-name jdbc-cache-test-cache \
+  --description "ElastiCache" --vpc-id $VPC_ID --query 'GroupId' --output text --region ap-northeast-1)
+
+aws ec2 authorize-security-group-ingress --group-id $SG_EC2 --protocol tcp --port 22 --cidr 0.0.0.0/0
+aws ec2 authorize-security-group-ingress --group-id $SG_AURORA --protocol tcp --port 5432 --source-group $SG_EC2
+aws ec2 authorize-security-group-ingress --group-id $SG_CACHE --protocol tcp --port 6379 --source-group $SG_EC2
+```
+
+### Aurora PostgreSQL Serverless v2
+
+```bash title="Terminal"
+aws rds create-db-subnet-group --db-subnet-group-name jdbc-cache-test \
+  --db-subnet-group-description "JDBC cache test" \
+  --subnet-ids "$SUBNET_A" "$SUBNET_C" "$SUBNET_D" --region ap-northeast-1
+
+aws rds create-db-cluster --db-cluster-identifier jdbc-cache-test \
+  --engine aurora-postgresql --engine-version 16.6 \
+  --master-username postgres --master-user-password '<password>' \
+  --db-subnet-group-name jdbc-cache-test \
+  --vpc-security-group-ids $SG_AURORA \
+  --serverless-v2-scaling-configuration MinCapacity=0.5,MaxCapacity=2 \
+  --storage-encrypted --no-deletion-protection --region ap-northeast-1
+
+aws rds create-db-instance --db-instance-identifier jdbc-cache-test-writer \
+  --db-cluster-identifier jdbc-cache-test \
+  --db-instance-class db.serverless --engine aurora-postgresql --region ap-northeast-1
+
+aws rds wait db-instance-available --db-instance-identifier jdbc-cache-test-writer --region ap-northeast-1
+```
+
+### ElastiCache for Valkey Serverless
+
+```bash title="Terminal"
+aws elasticache create-serverless-cache \
+  --serverless-cache-name jdbc-cache-test \
+  --engine valkey \
+  --subnet-ids "$SUBNET_A" "$SUBNET_C" "$SUBNET_D" \
+  --security-group-ids $SG_CACHE --region ap-northeast-1
+```
+
+### EC2 インスタンス
+
+```bash title="Terminal"
+AMI_ID=$(aws ec2 describe-images --owners amazon \
+  --filters "Name=name,Values=al2023-ami-2023.*-x86_64" "Name=state,Values=available" \
+  --query 'sort_by(Images, &CreationDate)[-1].ImageId' --output text --region ap-northeast-1)
+
+aws ec2 create-key-pair --key-name jdbc-cache-test --key-type ed25519 \
+  --query 'KeyMaterial' --output text > jdbc-cache-test.pem
+chmod 600 jdbc-cache-test.pem
+
+aws ec2 run-instances --image-id $AMI_ID --instance-type t3.small \
+  --key-name jdbc-cache-test --security-group-ids $SG_EC2 \
+  --subnet-id $SUBNET_A \
+  --tag-specifications 'ResourceType=instance,Tags=[{Key=Name,Value=jdbc-cache-test}]' \
+  --region ap-northeast-1
+
+# Java + Maven + psql インストール
+ssh ec2-user@<public-ip> 'sudo dnf install -y java-21-amazon-corretto-devel maven postgresql16'
+```
+
+### テストデータ
+
+```bash title="Terminal"
+PGPASSWORD='<password>' psql -h <aurora-endpoint> -U postgres -d postgres -c "
+CREATE TABLE products (
+  id SERIAL PRIMARY KEY,
+  name VARCHAR(100) NOT NULL,
+  category VARCHAR(50) NOT NULL,
+  price NUMERIC(10,2) NOT NULL,
+  stock INT NOT NULL DEFAULT 0
+);
+INSERT INTO products (name, category, price, stock) VALUES
+  ('MacBook Pro 14', 'laptop', 248000, 50),
+  ('ThinkPad X1 Carbon', 'laptop', 198000, 30),
+  ('Dell XPS 15', 'laptop', 178000, 25),
+  ('iPhone 16 Pro', 'phone', 159800, 100),
+  ('Galaxy S25 Ultra', 'phone', 189800, 80),
+  ('Pixel 9 Pro', 'phone', 129800, 60),
+  ('iPad Air', 'tablet', 98800, 70),
+  ('Galaxy Tab S10', 'tablet', 118800, 40),
+  ('AirPods Pro', 'audio', 39800, 200),
+  ('Sony WH-1000XM5', 'audio', 44800, 150);
+"
+```
+
+</details>
+
+## テストアプリケーション
+
+Remote Query Cache Plugin の設定は最小限だ。通常の JDBC 接続との違いは3点のみ。
+
+1. 接続 URL を `jdbc:aws-wrapper:postgresql://` に変更
+2. `wrapperPlugins` に `remoteQueryCache` を指定
+3. `cacheEndpointAddrRw` に ElastiCache のエンドポイントを設定
+
+```java title="Java（キャッシュ接続の核心部分）"
+Properties props = new Properties();
+props.setProperty("user", "postgres");
+props.setProperty("password", password);
+props.setProperty("wrapperPlugins", "remoteQueryCache");
+props.setProperty("cacheEndpointAddrRw", "my-cache.serverless.apne1.cache.amazonaws.com:6379");
+
+Connection conn = DriverManager.getConnection(
+    "jdbc:aws-wrapper:postgresql://my-aurora.cluster-xxx.ap-northeast-1.rds.amazonaws.com:5432/postgres",
+    props);
+```
+
+キャッシュ対象のクエリには SQL コメントで TTL を指定する。
+
+```java title="Java（クエリヒント）"
+ResultSet rs = stmt.executeQuery(
+    "/* CACHE_PARAM(ttl=300s) */ SELECT * FROM products WHERE category = 'laptop' ORDER BY price DESC");
+```
+
+ヒントのないクエリはキャッシュされず、通常通り DB に直接実行される。
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">pom.xml（依存関係）</summary>
+
+```xml title="pom.xml"
+<dependencies>
+    <dependency>
+        <groupId>software.amazon.jdbc</groupId>
+        <artifactId>aws-advanced-jdbc-wrapper</artifactId>
+        <version>3.3.0</version>
+    </dependency>
+    <dependency>
+        <groupId>org.postgresql</groupId>
+        <artifactId>postgresql</artifactId>
+        <version>42.7.8</version>
+    </dependency>
+    <dependency>
+        <groupId>org.apache.commons</groupId>
+        <artifactId>commons-pool2</artifactId>
+        <version>2.12.0</version>
+    </dependency>
+    <dependency>
+        <groupId>io.valkey</groupId>
+        <artifactId>valkey-glide</artifactId>
+        <version>2.3.0</version>
+    </dependency>
+</dependencies>
+```
+
+</details>
+
+## 検証1: キャッシュの基本動作
+
+同一コネクションで同じクエリを8回実行し、キャッシュの動作を確認した。
+
+```text title="Output"
+Query 1: 3 rows, 10568 ms
+Query 2: 3 rows, 7 ms
+Query 3: 3 rows, 7 ms
+Query 4: 3 rows, 19 ms
+Query 5: 3 rows, 100 ms
+Query 6: 3 rows, 216 ms
+Query 7: 3 rows, 110 ms
+Query 8: 3 rows, 90 ms
+```
+
+Query 1 が約10.5秒かかっている。ログを確認すると、初回のキャッシュ読み取りで `TimeoutException: Request timed out` が発生し、CacheMonitor が `HEALTHY→SUSPECT` に遷移していた。
+
+```text title="Output（ログ）"
+[HEALTHY→SUSPECT] jdbc-cache-test-xxx.serverless.apne1.cache.amazonaws.com:6379
+  READ failed: CONNECTION - TimeoutException: Request timed out
+```
+
+Query 1 はキャッシュミス（タイムアウト）として DB から結果を取得し、バックグラウンドでキャッシュに書き込んでいる。Query 2-3 が 7ms と非常に速いのは、CacheMonitor が SUSPECT 状態のためキャッシュをバイパスし、DB に直接クエリしているためだ。Query 5 以降の 90-216ms がキャッシュヒット時の実際のレイテンシである。
+
+さらに、連続実行すると CacheMonitor のヘルスチェックで `Timeout waiting for idle object, borrowMaxWaitDuration=PT0.1S` エラーが多発した。
+
+```text title="Output（ログ）"
+SEVERE: Non-recoverable error (DATA) for jdbc-cache-test-xxx:6379:
+  Timeout waiting for idle object, borrowMaxWaitDuration=PT0.1S
+```
+
+これは CacheMonitor 内部の接続プールの borrow タイムアウトが 100ms に固定されており、ElastiCache Serverless の TLS ハンドシェイク時間がこれを超えるために発生している。ヘルスチェックは常に失敗するが、データパス（実際のキャッシュ読み書き）は別の接続プールを使うため、キャッシュ自体は動作する。
+
+## 検証2: パフォーマンス比較
+
+キャッシュなし（Plain JDBC）とキャッシュあり（Remote Query Cache Plugin）で同一クエリを20回実行し、レイテンシを比較した。ウォームアップ3回の後に計測。
+
+| 指標 | キャッシュなし | キャッシュあり |
+| --- | --- | --- |
+| 平均 | 2.1 ms | 106.8 ms |
+| 中央値 | 2.0 ms | 105.0 ms |
+| 最小 | 2 ms | 105 ms |
+| 最大 | 3 ms | 132 ms |
+
+**キャッシュありの方が約50倍遅い**という予想外の結果になった。
+
+これは今回の検証環境の特性による。Aurora Serverless v2 と EC2 が同一 VPC 内にあり、テストデータが10行と小さいため、DB 直接クエリが 2ms で完了する。一方、ElastiCache Serverless への TLS 接続は毎回約100ms のオーバーヘッドがある。
+
+クエリキャッシュが効果を発揮するのは以下のケースだ。
+
+- **クエリ自体が重い**（集計、JOIN、非インデックス検索で数百ms以上かかる）
+- **DB の負荷を下げたい**（高並行アクセスで CPU 圧迫を軽減）
+- **DB とアプリケーションが異なるリージョン/AZ にある**（ネットワークレイテンシが大きい）
+
+今回のように軽量クエリ + 同一 VPC 構成では、キャッシュのオーバーヘッドがクエリ時間を上回る。
+
+## 検証3: キャッシュの整合性と TTL
+
+DB を更新した後、キャッシュが古い値（stale data）を返すかを確認した。
+
+```text title="Output"
+Step 1: Prime cache
+  Query 1: MacBook Pro 14 = ¥248000.00  (cache MISS → DB から取得、キャッシュに書き込み)
+  Query 2: MacBook Pro 14 = ¥248000.00  (cache HIT)
+Step 2: Update price in DB (248000 -> 228000)
+Step 3: Verify DB has new value
+  DB value: ¥228000.00
+Step 4: Read from cache (expect stale 248000)
+  Cached value: ¥228000.00  ← 期待した stale 値ではなく新しい値
+```
+
+**キャッシュから古い値が返されなかった**。ログを確認すると、Step 4 の時点で CacheMonitor のヘルスチェックエラー（`Timeout waiting for idle object`）が発生しており、キャッシュの読み取りがスキップされて DB にフォールバックしていた。
+
+つまり、CacheMonitor が不安定な状態では、プラグインはキャッシュを自動的にバイパスして DB から直接結果を返す。これはフェイルセーフとしては正しい動作だが、**キャッシュが効いているかどうかをアプリケーション側から判別できない**という問題がある。レイテンシの変化でしか判断できない。
+
+## まとめ
+
+- **初回接続で必ずタイムアウトが発生する** — ElastiCache Serverless の TLS ハンドシェイクが、プラグイン内部の接続タイムアウト（デフォルト2秒）を超える。`cacheConnectionTimeoutMs` を 10秒や30秒に増やしても、Valkey Glide クライアント側のタイムアウトで失敗する。初回クエリは常にキャッシュミスとして DB にフォールバックするため、アプリケーションの起動直後に余分なレイテンシが発生する
+- **CacheMonitor のヘルスチェックが常に失敗する** — 内部の接続プール borrow タイムアウトが 100ms に固定されており、ElastiCache Serverless の TLS 接続確立時間がこれを超える。ヘルスチェックは常に `Non-recoverable error (DATA)` を報告するが、データパスのキャッシュ読み書きは別経路で動作するため、キャッシュ自体は機能する。ただし、ヘルスチェック失敗によりキャッシュがバイパスされるタイミングがあり、動作が不安定になる
+- **軽量クエリではキャッシュのオーバーヘッドが上回る** — 同一 VPC 内で 2ms で完了するクエリに対して、キャッシュヒット時のレイテンシは約105ms。TLS 接続のオーバーヘッドが支配的だ。クエリキャッシュは「DB クエリが数百ms以上かかる」「DB の CPU 負荷を下げたい」ケースで効果を発揮する
+- **フェイルセーフは正しく動作する** — キャッシュ障害時は自動的に DB にフォールバックし、アプリケーションは正常に動作し続ける。`failWhenCacheDown` を `false`（デフォルト）にしておけば、キャッシュの問題がアプリケーション障害に波及しない
+
+ElastiCache Serverless との組み合わせでは、初回接続のタイムアウトと CacheMonitor の不安定さが課題だ。ノードベースの ElastiCache クラスター（TLS なし、または事前に接続を温めておく構成）であれば、これらの問題は軽減される可能性がある。本番導入を検討する場合は、実際のクエリパターンとレイテンシ要件で事前検証することを強く推奨する。
+
+## クリーンアップ
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">リソース削除コマンド</summary>
+
+```bash title="Terminal"
+# Aurora
+aws rds delete-db-instance --db-instance-identifier jdbc-cache-test-writer \
+  --skip-final-snapshot --region ap-northeast-1
+aws rds wait db-instance-deleted --db-instance-identifier jdbc-cache-test-writer --region ap-northeast-1
+aws rds delete-db-cluster --db-cluster-identifier jdbc-cache-test \
+  --skip-final-snapshot --region ap-northeast-1
+
+# ElastiCache
+aws elasticache delete-serverless-cache --serverless-cache-name jdbc-cache-test --region ap-northeast-1
+
+# EC2
+aws ec2 terminate-instances --instance-ids <instance-id> --region ap-northeast-1
+
+# 削除完了を待ってからネットワークリソースを削除
+aws ec2 delete-key-pair --key-name jdbc-cache-test --region ap-northeast-1
+aws ec2 delete-security-group --group-id <sg-aurora> --region ap-northeast-1
+aws ec2 delete-security-group --group-id <sg-cache> --region ap-northeast-1
+aws ec2 delete-security-group --group-id <sg-ec2> --region ap-northeast-1
+aws rds delete-db-subnet-group --db-subnet-group-name jdbc-cache-test --region ap-northeast-1
+aws ec2 detach-internet-gateway --internet-gateway-id <igw-id> --vpc-id <vpc-id> --region ap-northeast-1
+aws ec2 delete-internet-gateway --internet-gateway-id <igw-id> --region ap-northeast-1
+aws ec2 delete-subnet --subnet-id <subnet-a> --region ap-northeast-1
+aws ec2 delete-subnet --subnet-id <subnet-c> --region ap-northeast-1
+aws ec2 delete-subnet --subnet-id <subnet-d> --region ap-northeast-1
+aws ec2 delete-vpc --vpc-id <vpc-id> --region ap-northeast-1
+```
+
+</details>

@@ -1,0 +1,340 @@
+---
+title: "Testing AWS JDBC Wrapper's Valkey Query Cache — The ElastiCache Serverless Timeout Pitfall"
+description: "Verified the Remote Query Cache Plugin in AWS Advanced JDBC Wrapper 3.3.0 with ElastiCache for Valkey Serverless. Cache hits stabilize at ~105ms, but the first connection always times out, pushing CacheMonitor into SUSPECT state."
+date: 2026-03-27
+published: true
+featured: false
+categories: [infrastructure]
+tags: ["aws", "aurora", "postgresql", "elasticache", "valkey", "java", "jdbc", "database"]
+---
+
+## Introduction
+
+On March 26, 2026, AWS [announced that the AWS Advanced JDBC Wrapper now supports automatic query caching with Valkey](https://aws.amazon.com/about-aws/whats-new/2026/03/aws-jdbc-caching-with-valkey/). The feature lets you cache JDBC query results in ElastiCache with minimal code changes — just configure the driver and add SQL comment hints like `/* CACHE_PARAM(ttl=300s) */` to queries you want cached.
+
+Previously, implementing query caching required manually writing store/retrieve logic for each query. The Remote Query Cache Plugin absorbs this at the JDBC driver level.
+
+This article shares the results of testing the plugin with Aurora PostgreSQL Serverless v2 and ElastiCache for Valkey Serverless. The key finding: **the first connection to ElastiCache Serverless always times out, causing CacheMonitor to enter an unstable state**. See the official docs at [Caching database query results](https://docs.aws.amazon.com/AmazonElastiCache/latest/dg/caching-database-query-results.html) and [Remote Query Cache Plugin](https://github.com/aws/aws-advanced-jdbc-wrapper/blob/main/docs/using-the-jdbc-driver/using-plugins/UsingTheRemoteQueryCachePlugin.md).
+
+## Test Environment
+
+| Item | Value |
+| --- | --- |
+| Region | ap-northeast-1 (Tokyo) |
+| Database | Aurora PostgreSQL Serverless v2 (16.6, 0.5-2 ACU) |
+| Cache | ElastiCache for Valkey Serverless (Valkey 8.1) |
+| Client | EC2 t3.small (Amazon Linux 2023, same VPC) |
+| Java | Amazon Corretto 21.0.10 |
+| AWS JDBC Wrapper | 3.3.0 |
+| PostgreSQL JDBC | 42.7.8 |
+| Valkey Glide | 2.3.0 |
+| Commons Pool | 2.12.0 |
+
+Prerequisites:
+
+- AWS CLI configured (`rds:*`, `elasticache:*`, `ec2:*` permissions)
+- Java 21 + Maven
+
+Skip to [Summary](#summary) if you only want the findings.
+
+## Setup
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">Infrastructure setup (VPC / Aurora / ElastiCache / EC2)</summary>
+
+### VPC, Subnets, and Security Groups
+
+```bash title="Terminal"
+# VPC
+VPC_ID=$(aws ec2 create-vpc --cidr-block 10.0.0.0/16 \
+  --tag-specifications 'ResourceType=vpc,Tags=[{Key=Name,Value=jdbc-cache-test}]' \
+  --query 'Vpc.VpcId' --output text --region ap-northeast-1)
+aws ec2 modify-vpc-attribute --enable-dns-hostnames '{"Value":true}' --vpc-id $VPC_ID
+
+# Subnets (3 AZs)
+SUBNET_A=$(aws ec2 create-subnet --vpc-id $VPC_ID --cidr-block 10.0.1.0/24 \
+  --availability-zone ap-northeast-1a --query 'Subnet.SubnetId' --output text --region ap-northeast-1)
+SUBNET_C=$(aws ec2 create-subnet --vpc-id $VPC_ID --cidr-block 10.0.2.0/24 \
+  --availability-zone ap-northeast-1c --query 'Subnet.SubnetId' --output text --region ap-northeast-1)
+SUBNET_D=$(aws ec2 create-subnet --vpc-id $VPC_ID --cidr-block 10.0.3.0/24 \
+  --availability-zone ap-northeast-1d --query 'Subnet.SubnetId' --output text --region ap-northeast-1)
+
+# IGW for SSH access
+IGW_ID=$(aws ec2 create-internet-gateway --query 'InternetGateway.InternetGatewayId' \
+  --output text --region ap-northeast-1)
+aws ec2 attach-internet-gateway --internet-gateway-id $IGW_ID --vpc-id $VPC_ID
+RTB_ID=$(aws ec2 describe-route-tables --filters "Name=vpc-id,Values=$VPC_ID" \
+  --query 'RouteTables[0].RouteTableId' --output text --region ap-northeast-1)
+aws ec2 create-route --route-table-id $RTB_ID --destination-cidr-block 0.0.0.0/0 \
+  --gateway-id $IGW_ID --region ap-northeast-1
+aws ec2 modify-subnet-attribute --subnet-id $SUBNET_A --map-public-ip-on-launch
+
+# Security groups
+SG_EC2=$(aws ec2 create-security-group --group-name jdbc-cache-test-ec2 \
+  --description "EC2" --vpc-id $VPC_ID --query 'GroupId' --output text --region ap-northeast-1)
+SG_AURORA=$(aws ec2 create-security-group --group-name jdbc-cache-test-aurora \
+  --description "Aurora" --vpc-id $VPC_ID --query 'GroupId' --output text --region ap-northeast-1)
+SG_CACHE=$(aws ec2 create-security-group --group-name jdbc-cache-test-cache \
+  --description "ElastiCache" --vpc-id $VPC_ID --query 'GroupId' --output text --region ap-northeast-1)
+
+aws ec2 authorize-security-group-ingress --group-id $SG_EC2 --protocol tcp --port 22 --cidr 0.0.0.0/0
+aws ec2 authorize-security-group-ingress --group-id $SG_AURORA --protocol tcp --port 5432 --source-group $SG_EC2
+aws ec2 authorize-security-group-ingress --group-id $SG_CACHE --protocol tcp --port 6379 --source-group $SG_EC2
+```
+
+### Aurora PostgreSQL Serverless v2
+
+```bash title="Terminal"
+aws rds create-db-subnet-group --db-subnet-group-name jdbc-cache-test \
+  --db-subnet-group-description "JDBC cache test" \
+  --subnet-ids "$SUBNET_A" "$SUBNET_C" "$SUBNET_D" --region ap-northeast-1
+
+aws rds create-db-cluster --db-cluster-identifier jdbc-cache-test \
+  --engine aurora-postgresql --engine-version 16.6 \
+  --master-username postgres --master-user-password '<password>' \
+  --db-subnet-group-name jdbc-cache-test \
+  --vpc-security-group-ids $SG_AURORA \
+  --serverless-v2-scaling-configuration MinCapacity=0.5,MaxCapacity=2 \
+  --storage-encrypted --no-deletion-protection --region ap-northeast-1
+
+aws rds create-db-instance --db-instance-identifier jdbc-cache-test-writer \
+  --db-cluster-identifier jdbc-cache-test \
+  --db-instance-class db.serverless --engine aurora-postgresql --region ap-northeast-1
+
+aws rds wait db-instance-available --db-instance-identifier jdbc-cache-test-writer --region ap-northeast-1
+```
+
+### ElastiCache for Valkey Serverless
+
+```bash title="Terminal"
+aws elasticache create-serverless-cache \
+  --serverless-cache-name jdbc-cache-test \
+  --engine valkey \
+  --subnet-ids "$SUBNET_A" "$SUBNET_C" "$SUBNET_D" \
+  --security-group-ids $SG_CACHE --region ap-northeast-1
+```
+
+### EC2 Instance
+
+```bash title="Terminal"
+AMI_ID=$(aws ec2 describe-images --owners amazon \
+  --filters "Name=name,Values=al2023-ami-2023.*-x86_64" "Name=state,Values=available" \
+  --query 'sort_by(Images, &CreationDate)[-1].ImageId' --output text --region ap-northeast-1)
+
+aws ec2 create-key-pair --key-name jdbc-cache-test --key-type ed25519 \
+  --query 'KeyMaterial' --output text > jdbc-cache-test.pem
+chmod 600 jdbc-cache-test.pem
+
+aws ec2 run-instances --image-id $AMI_ID --instance-type t3.small \
+  --key-name jdbc-cache-test --security-group-ids $SG_EC2 \
+  --subnet-id $SUBNET_A \
+  --tag-specifications 'ResourceType=instance,Tags=[{Key=Name,Value=jdbc-cache-test}]' \
+  --region ap-northeast-1
+
+ssh ec2-user@<public-ip> 'sudo dnf install -y java-21-amazon-corretto-devel maven postgresql16'
+```
+
+### Test Data
+
+```bash title="Terminal"
+PGPASSWORD='<password>' psql -h <aurora-endpoint> -U postgres -d postgres -c "
+CREATE TABLE products (
+  id SERIAL PRIMARY KEY,
+  name VARCHAR(100) NOT NULL,
+  category VARCHAR(50) NOT NULL,
+  price NUMERIC(10,2) NOT NULL,
+  stock INT NOT NULL DEFAULT 0
+);
+INSERT INTO products (name, category, price, stock) VALUES
+  ('MacBook Pro 14', 'laptop', 248000, 50),
+  ('ThinkPad X1 Carbon', 'laptop', 198000, 30),
+  ('Dell XPS 15', 'laptop', 178000, 25),
+  ('iPhone 16 Pro', 'phone', 159800, 100),
+  ('Galaxy S25 Ultra', 'phone', 189800, 80),
+  ('Pixel 9 Pro', 'phone', 129800, 60),
+  ('iPad Air', 'tablet', 98800, 70),
+  ('Galaxy Tab S10', 'tablet', 118800, 40),
+  ('AirPods Pro', 'audio', 39800, 200),
+  ('Sony WH-1000XM5', 'audio', 44800, 150);
+"
+```
+
+</details>
+
+## Test Application
+
+The plugin requires only three changes from a standard JDBC connection:
+
+1. Change the URL prefix to `jdbc:aws-wrapper:postgresql://`
+2. Set `wrapperPlugins` to `remoteQueryCache`
+3. Set `cacheEndpointAddrRw` to the ElastiCache endpoint
+
+```java title="Java (cache connection setup)"
+Properties props = new Properties();
+props.setProperty("user", "postgres");
+props.setProperty("password", password);
+props.setProperty("wrapperPlugins", "remoteQueryCache");
+props.setProperty("cacheEndpointAddrRw", "my-cache.serverless.apne1.cache.amazonaws.com:6379");
+
+Connection conn = DriverManager.getConnection(
+    "jdbc:aws-wrapper:postgresql://my-aurora.cluster-xxx.ap-northeast-1.rds.amazonaws.com:5432/postgres",
+    props);
+```
+
+To cache a query, add a SQL comment hint with the TTL:
+
+```java title="Java (query hint)"
+ResultSet rs = stmt.executeQuery(
+    "/* CACHE_PARAM(ttl=300s) */ SELECT * FROM products WHERE category = 'laptop' ORDER BY price DESC");
+```
+
+Queries without the hint execute directly against the database as usual.
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">pom.xml (dependencies)</summary>
+
+```xml title="pom.xml"
+<dependencies>
+    <dependency>
+        <groupId>software.amazon.jdbc</groupId>
+        <artifactId>aws-advanced-jdbc-wrapper</artifactId>
+        <version>3.3.0</version>
+    </dependency>
+    <dependency>
+        <groupId>org.postgresql</groupId>
+        <artifactId>postgresql</artifactId>
+        <version>42.7.8</version>
+    </dependency>
+    <dependency>
+        <groupId>org.apache.commons</groupId>
+        <artifactId>commons-pool2</artifactId>
+        <version>2.12.0</version>
+    </dependency>
+    <dependency>
+        <groupId>io.valkey</groupId>
+        <artifactId>valkey-glide</artifactId>
+        <version>2.3.0</version>
+    </dependency>
+</dependencies>
+```
+
+</details>
+
+## Test 1: Basic Cache Behavior
+
+Ran the same query 8 times on a single connection to observe cache behavior.
+
+```text title="Output"
+Query 1: 3 rows, 10568 ms
+Query 2: 3 rows, 7 ms
+Query 3: 3 rows, 7 ms
+Query 4: 3 rows, 19 ms
+Query 5: 3 rows, 100 ms
+Query 6: 3 rows, 216 ms
+Query 7: 3 rows, 110 ms
+Query 8: 3 rows, 90 ms
+```
+
+Query 1 took ~10.5 seconds. The logs reveal a `TimeoutException` on the first cache read, causing CacheMonitor to transition from `HEALTHY` to `SUSPECT`:
+
+```text title="Output (logs)"
+[HEALTHY→SUSPECT] jdbc-cache-test-xxx.serverless.apne1.cache.amazonaws.com:6379
+  READ failed: CONNECTION - TimeoutException: Request timed out
+```
+
+Query 1 fell back to the database (cache miss), while writing the result to the cache in the background. Queries 2-3 at 7ms are suspiciously fast — the CacheMonitor was still in SUSPECT state, so the plugin bypassed the cache entirely and queried the database directly. Queries 5-8 at 90-216ms represent actual cache hit latency.
+
+Additionally, the CacheMonitor health checks consistently failed with a pool borrow timeout:
+
+```text title="Output (logs)"
+SEVERE: Non-recoverable error (DATA) for jdbc-cache-test-xxx:6379:
+  Timeout waiting for idle object, borrowMaxWaitDuration=PT0.1S
+```
+
+The internal borrow timeout is hardcoded at 100ms, which is shorter than the TLS handshake time for ElastiCache Serverless.
+
+## Test 2: Performance Comparison
+
+Compared latency over 20 iterations (after 3 warmup rounds) between plain JDBC and the cache plugin.
+
+| Metric | No Cache | Cached |
+| --- | --- | --- |
+| Average | 2.1 ms | 106.8 ms |
+| Median | 2.0 ms | 105.0 ms |
+| Min | 2 ms | 105 ms |
+| Max | 3 ms | 132 ms |
+
+**The cached path was ~50x slower** — an unexpected result.
+
+This is specific to the test environment: Aurora Serverless v2 and EC2 are in the same VPC, and the test data is only 10 rows, so direct DB queries complete in 2ms. The TLS overhead to ElastiCache Serverless adds ~100ms per cache operation.
+
+Query caching delivers value when:
+
+- **Queries are expensive** (aggregations, JOINs, non-indexed lookups taking hundreds of ms)
+- **Database CPU pressure needs relief** (high-concurrency read offloading)
+- **Network latency between app and DB is significant** (cross-AZ or cross-region)
+
+For lightweight queries in the same VPC, the cache overhead dominates.
+
+## Test 3: Cache Staleness and TTL
+
+Updated the database after caching a query to check whether stale data would be returned.
+
+```text title="Output"
+Step 1: Prime cache
+  Query 1: MacBook Pro 14 = ¥248000.00  (cache MISS → fetched from DB, written to cache)
+  Query 2: MacBook Pro 14 = ¥248000.00  (cache HIT)
+Step 2: Update price in DB (248000 -> 228000)
+Step 3: Verify DB has new value
+  DB value: ¥228000.00
+Step 4: Read from cache (expect stale 248000)
+  Cached value: ¥228000.00  ← Fresh value, not stale
+```
+
+**The cache did not return stale data.** The logs show that at Step 4, the CacheMonitor health check error (`Timeout waiting for idle object`) caused the cache read to be skipped, falling back to the database.
+
+When CacheMonitor is unstable, the plugin automatically bypasses the cache and returns results directly from the database. This is correct fail-safe behavior, but it means **you can't tell from the application side whether the cache is actually being used** — only latency changes reveal it.
+
+## Summary
+
+- **The first connection always times out** — The TLS handshake to ElastiCache Serverless exceeds the plugin's internal connection timeout (default 2s). Even increasing `cacheConnectionTimeoutMs` to 10s or 30s doesn't help because the Valkey Glide client has its own timeout. The first query always falls back to the database as a cache miss, adding significant latency at application startup
+- **CacheMonitor health checks consistently fail** — The internal connection pool borrow timeout is fixed at 100ms, shorter than ElastiCache Serverless TLS connection establishment. Health checks always report `Non-recoverable error (DATA)`, but the data-path cache reads/writes use a separate path and still function. However, the unstable health state causes intermittent cache bypasses
+- **Lightweight queries are slower with caching** — For queries completing in 2ms within the same VPC, cache hits add ~105ms of TLS overhead. Query caching is designed for expensive queries (hundreds of ms or more) or high-concurrency DB offloading scenarios
+- **Fail-safe behavior works correctly** — When the cache is unhealthy, the plugin automatically falls back to the database. With `failWhenCacheDown` set to `false` (default), cache issues never cascade into application failures
+
+With ElastiCache Serverless, the initial connection timeout and CacheMonitor instability are significant concerns. A node-based ElastiCache cluster (without TLS, or with pre-warmed connections) may mitigate these issues. I strongly recommend testing with your actual query patterns and latency requirements before production adoption.
+
+## Cleanup
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">Resource deletion commands</summary>
+
+```bash title="Terminal"
+# Aurora
+aws rds delete-db-instance --db-instance-identifier jdbc-cache-test-writer \
+  --skip-final-snapshot --region ap-northeast-1
+aws rds wait db-instance-deleted --db-instance-identifier jdbc-cache-test-writer --region ap-northeast-1
+aws rds delete-db-cluster --db-cluster-identifier jdbc-cache-test \
+  --skip-final-snapshot --region ap-northeast-1
+
+# ElastiCache
+aws elasticache delete-serverless-cache --serverless-cache-name jdbc-cache-test --region ap-northeast-1
+
+# EC2
+aws ec2 terminate-instances --instance-ids <instance-id> --region ap-northeast-1
+
+# Wait for deletions, then remove network resources
+aws ec2 delete-key-pair --key-name jdbc-cache-test --region ap-northeast-1
+aws ec2 delete-security-group --group-id <sg-aurora> --region ap-northeast-1
+aws ec2 delete-security-group --group-id <sg-cache> --region ap-northeast-1
+aws ec2 delete-security-group --group-id <sg-ec2> --region ap-northeast-1
+aws rds delete-db-subnet-group --db-subnet-group-name jdbc-cache-test --region ap-northeast-1
+aws ec2 detach-internet-gateway --internet-gateway-id <igw-id> --vpc-id <vpc-id> --region ap-northeast-1
+aws ec2 delete-internet-gateway --internet-gateway-id <igw-id> --region ap-northeast-1
+aws ec2 delete-subnet --subnet-id <subnet-a> --region ap-northeast-1
+aws ec2 delete-subnet --subnet-id <subnet-c> --region ap-northeast-1
+aws ec2 delete-subnet --subnet-id <subnet-d> --region ap-northeast-1
+aws ec2 delete-vpc --vpc-id <vpc-id> --region ap-northeast-1
+```
+
+</details>
