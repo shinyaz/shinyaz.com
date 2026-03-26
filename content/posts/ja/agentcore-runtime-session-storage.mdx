@@ -132,7 +132,7 @@ aws iam put-role-policy \
 
 ### ランタイム作成（セッションストレージ付き）
 
-2026年3月時点で`--filesystem-configurations`はインストール済みのAWS CLIバージョンでは認識されなかった（`Unknown options`エラー）。公式ドキュメントにはCLI例が記載されているため、CLIバージョンによっては利用可能な可能性がある。本記事ではboto3で作成した。
+検証時のAWS CLI 2.34.15では`--filesystem-configurations`が認識されなかった（`Unknown options`エラー）。CLI 2.34.16で対応済みのため、CLIを使う場合はバージョンを確認すること。本記事ではboto3で作成した。
 
 ```python title="Python"
 import boto3

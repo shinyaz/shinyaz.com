@@ -130,7 +130,7 @@ aws iam put-role-policy \
 
 ### Runtime creation (with session storage)
 
-As of March 2026, `--filesystem-configurations` was not recognized by the installed AWS CLI version (`Unknown options` error). The official documentation includes a CLI example, so it may work with newer CLI versions. This article uses boto3.
+The installed AWS CLI 2.34.15 did not recognize `--filesystem-configurations` (`Unknown options` error). CLI 2.34.16 added support for this parameter, so check your CLI version if using the CLI. This article uses boto3.
 
 ```python title="Python"
 import boto3
