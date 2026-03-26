@@ -46,7 +46,8 @@ Note that the mounted path is available only at the time of agent invocation, no
 Prerequisites:
 
 - AWS CLI configured (`bedrock-agentcore:*`, `iam:*`, `s3:*` permissions)
-- boto3 1.42.76+ (requires `filesystemConfigurations` parameter support)
+- AWS CLI 2.34.16+ (`--filesystem-configurations` parameter support required)
+- boto3 1.42.76+ (used by test scripts)
 - Test region: us-west-2
 
 Skip to [Verification 1](#verification-1-file-restoration-across-stopresume) if you only want the results.
@@ -130,31 +131,27 @@ aws iam put-role-policy \
 
 ### Runtime creation (with session storage)
 
-The installed AWS CLI 2.34.15 did not recognize `--filesystem-configurations` (`Unknown options` error). CLI 2.34.16 added support for this parameter, so check your CLI version if using the CLI. This article uses boto3.
+Use `--filesystem-configurations` to specify the session storage mount path. This parameter requires AWS CLI 2.34.16 or later.
 
-```python title="Python"
-import boto3
-
-ACCOUNT_ID = "111122223333"
-BUCKET_NAME = f"agentcore-session-storage-test-{ACCOUNT_ID}"
-
-client = boto3.client("bedrock-agentcore-control", region_name="us-west-2")
-
-response = client.create_agent_runtime(
-    agentRuntimeName="session_storage_test_agent",
-    roleArn=f"arn:aws:iam::{ACCOUNT_ID}:role/AgentCoreSessionStorageTestRole",
-    agentRuntimeArtifact={
-        "codeConfiguration": {
-            "code": {"s3": {"bucket": BUCKET_NAME, "prefix": "agent.zip"}},
-            "runtime": "PYTHON_3_13",
-            "entryPoint": ["main.py"],
-        }
-    },
-    networkConfiguration={"networkMode": "PUBLIC"},
-    filesystemConfigurations=[
-        {"sessionStorage": {"mountPath": "/mnt/workspace"}}
-    ],
-)
+```bash title="Terminal"
+aws bedrock-agentcore-control create-agent-runtime \
+  --region "$REGION" \
+  --agent-runtime-name session_storage_test_agent \
+  --role-arn "arn:aws:iam::${ACCOUNT_ID}:role/AgentCoreSessionStorageTestRole" \
+  --agent-runtime-artifact "{
+    \"codeConfiguration\": {
+      \"code\": {\"s3\": {\"bucket\": \"${BUCKET_NAME}\", \"prefix\": \"agent.zip\"}},
+      \"runtime\": \"PYTHON_3_13\",
+      \"entryPoint\": [\"main.py\"]
+    }
+  }" \
+  --network-configuration '{"networkMode": "PUBLIC"}' \
+  --filesystem-configurations '[{
+    "sessionStorage": {
+      "mountPath": "/mnt/workspace"
+    }
+  }]'
+# → Note the agentRuntimeId from the response
 ```
 
 ### Endpoint creation

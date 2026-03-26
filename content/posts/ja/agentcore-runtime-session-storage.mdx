@@ -46,7 +46,8 @@ tags: ["bedrock", "agentcore", "session-storage", "ai-agents"]
 前提条件:
 
 - AWS CLIセットアップ済み（`bedrock-agentcore:*`、`iam:*`、`s3:*`の操作権限）
-- boto3 1.42.76以上（`filesystemConfigurations`パラメータのサポートが必要）
+- AWS CLI 2.34.16以上（`--filesystem-configurations`パラメータのサポートが必要）
+- boto3 1.42.76以上（検証スクリプトで使用）
 - 検証リージョン: us-west-2
 
 検証結果だけ読みたい場合は[検証1: 停止・再開でファイルは復元されるか](#検証1-停止再開でファイルは復元されるか)まで飛ばしてよい。
@@ -132,31 +133,27 @@ aws iam put-role-policy \
 
 ### ランタイム作成（セッションストレージ付き）
 
-検証時のAWS CLI 2.34.15では`--filesystem-configurations`が認識されなかった（`Unknown options`エラー）。CLI 2.34.16で対応済みのため、CLIを使う場合はバージョンを確認すること。本記事ではboto3で作成した。
+`--filesystem-configurations`でセッションストレージのマウントパスを指定する。このパラメータはAWS CLI 2.34.16以降で利用可能だ。
 
-```python title="Python"
-import boto3
-
-ACCOUNT_ID = "111122223333"
-BUCKET_NAME = f"agentcore-session-storage-test-{ACCOUNT_ID}"
-
-client = boto3.client("bedrock-agentcore-control", region_name="us-west-2")
-
-response = client.create_agent_runtime(
-    agentRuntimeName="session_storage_test_agent",
-    roleArn=f"arn:aws:iam::{ACCOUNT_ID}:role/AgentCoreSessionStorageTestRole",
-    agentRuntimeArtifact={
-        "codeConfiguration": {
-            "code": {"s3": {"bucket": BUCKET_NAME, "prefix": "agent.zip"}},
-            "runtime": "PYTHON_3_13",
-            "entryPoint": ["main.py"],
-        }
-    },
-    networkConfiguration={"networkMode": "PUBLIC"},
-    filesystemConfigurations=[
-        {"sessionStorage": {"mountPath": "/mnt/workspace"}}
-    ],
-)
+```bash title="Terminal"
+aws bedrock-agentcore-control create-agent-runtime \
+  --region "$REGION" \
+  --agent-runtime-name session_storage_test_agent \
+  --role-arn "arn:aws:iam::${ACCOUNT_ID}:role/AgentCoreSessionStorageTestRole" \
+  --agent-runtime-artifact "{
+    \"codeConfiguration\": {
+      \"code\": {\"s3\": {\"bucket\": \"${BUCKET_NAME}\", \"prefix\": \"agent.zip\"}},
+      \"runtime\": \"PYTHON_3_13\",
+      \"entryPoint\": [\"main.py\"]
+    }
+  }" \
+  --network-configuration '{"networkMode": "PUBLIC"}' \
+  --filesystem-configurations '[{
+    "sessionStorage": {
+      "mountPath": "/mnt/workspace"
+    }
+  }]'
+# → レスポンスの agentRuntimeId を控える
 ```
 
 ### エンドポイント作成
