@@ -161,11 +161,15 @@ TOKEN=$(aws rds generate-db-auth-token \
   --region $AWS_REGION)
 
 PGPASSWORD="$TOKEN" psql \
-  "host=$ENDPOINT port=5432 dbname=postgres user=postgres sslmode=require"
+  "host=$ENDPOINT port=5432 dbname=postgres user=postgres sslmode=require" \
+  -c "SELECT version();"
 ```
 
 ```text title="Output"
-PostgreSQL 17.7 on aarch64-unknown-linux-gnu, compiled by aarch64-unknown-linux-gnu-gcc (GCC) 10.5.0, 64-bit
+                                                   version
+--------------------------------------------------------------------------------------------------------------
+ PostgreSQL 17.7 on aarch64-unknown-linux-gnu, compiled by aarch64-unknown-linux-gnu-gcc (GCC) 10.5.0, 64-bit
+(1 row)
 ```
 
 問題なく接続できた。`SELECT aurora_version()` を実行すると `17.7.2` が返る。
