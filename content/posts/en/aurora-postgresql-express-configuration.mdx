@@ -1,0 +1,340 @@
+---
+title: "Aurora PostgreSQL now starts in seconds without a VPC — hands-on with Express Configuration"
+description: "Hands-on verification of Aurora PostgreSQL Express Configuration. VPC-free setup in ~30 seconds, TLS 1.3 via Internet Access Gateway, and default IAM auth — with real measurements and edge cases."
+date: "2026-03-27"
+published: true
+featured: false
+categories: [infrastructure]
+tags: ["aws", "aurora", "postgresql", "serverless", "iam"]
+---
+
+## Introduction
+
+On March 25, 2026, AWS [announced the general availability of Express Configuration for Amazon Aurora PostgreSQL](https://aws.amazon.com/about-aws/whats-new/2026/03/amazon-aurora-postgresql-database/). It lets you create and connect to an Aurora PostgreSQL Serverless database in seconds — without any VPC setup.
+
+Creating an Aurora cluster traditionally required configuring a VPC, subnet groups, and security groups, taking anywhere from several minutes to over ten. When you just want a database to start building on an idea, that setup cost was a real barrier. Express Configuration removes it.
+
+This article shares the results of creating a cluster via CLI with Express Configuration and verifying three aspects:
+
+1. Time from API call to Available, and what gets auto-configured
+2. Connection behavior through the Internet Access Gateway (TLS, IAM auth, latency)
+3. Which settings can and cannot be changed after creation
+
+See the official documentation at [Creating an Aurora PostgreSQL DB cluster with express configuration](https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/CHAP_GettingStartedAurora.AuroraPostgreSQL.ExpressConfig.html).
+
+## How Express Configuration works
+
+Express Configuration presets the required settings for Aurora PostgreSQL Serverless and creates both the cluster and instance in a single API call.
+
+| Aspect | Express Configuration | Traditional |
+|---|---|---|
+| VPC | Not required (`VPCNetworkingEnabled: false`) | Required (VPC + subnet group + security group) |
+| Connectivity | Internet Access Gateway (internet-facing) | Private within VPC |
+| Authentication | IAM auth enabled by default (passwordless) | Password auth by default (IAM auth also available) |
+| API calls | 1 (`create-db-cluster` only) | 2+ (cluster + instance) |
+| Serverless config | Auto (0–16 ACU, 300s auto-pause) | Manual |
+| Storage encryption | Encrypted with AWS/RDS service-owned key (immutable) | Customer-managed KMS key available |
+
+ACU (Aurora Capacity Unit) is the unit of processing capacity for Aurora Serverless, corresponding to a combination of CPU and memory.
+
+The Internet Access Gateway is a proxy layer placed in front of the Aurora cluster. It's distributed across multiple AZs and passes the PostgreSQL wire protocol through. You can connect from anywhere over the internet via TLS, without VPN or Direct Connect.
+
+## Test environment
+
+Prerequisites:
+
+- AWS CLI 2.34+ (required for `--with-express-configuration` parameter support)
+- psql (PostgreSQL client)
+- IAM permissions: `rds:CreateDBCluster`, `rds:CreateDBInstance`, `rds:EnableInternetAccessGateway`, `iam:CreateServiceLinkedRole`, `ec2:DescribeAvailabilityZones`
+- Test region: ap-northeast-1 (Tokyo)
+
+The following commands use these environment variables:
+
+```bash title="Terminal"
+export AWS_REGION=ap-northeast-1
+export CLUSTER_ID=aurora-express-test
+```
+
+## Verification 1: Cluster creation with Express Configuration
+
+### Creation command and timing
+
+```bash title="Terminal"
+aws rds create-db-cluster \
+  --db-cluster-identifier $CLUSTER_ID \
+  --engine aurora-postgresql \
+  --with-express-configuration \
+  --region $AWS_REGION
+```
+
+That's it. No VPC, subnets, security groups, or instance class to specify.
+
+Wait for the cluster to become available. With Express Configuration, the cluster and instance are created together, so the instance was also Available when `db-cluster-available` completed.
+
+```bash title="Terminal"
+aws rds wait db-cluster-available \
+  --db-cluster-identifier $CLUSTER_ID \
+  --region $AWS_REGION
+```
+
+Measurements:
+
+| Event | Timestamp (UTC) | Elapsed |
+|---|---|---|
+| API call initiated | 10:22:23.863 | — |
+| API response returned | 10:22:26.398 | ~2.5s |
+| Cluster + instance Available | 10:22:55.763 | **~32s** |
+
+The API response came back in about 2.5 seconds, and both the cluster and instance reached Available status in roughly 32 seconds.
+
+### What gets auto-configured
+
+Key fields from `describe-db-clusters` and `describe-db-instances`, summarized:
+
+| Field | Value | Meaning |
+|---|---|---|
+| EngineVersion | 17.7 | Default major version auto-selected |
+| MinCapacity / MaxCapacity | 0.0 / 16.0 | Scales from zero. Auto-pauses after 5 min idle |
+| IAMDatabaseAuthenticationEnabled | true | IAM auth enabled by default |
+| VPCNetworkingEnabled | false | Cluster lives outside a VPC |
+| InternetAccessGatewayEnabled | true | Internet-facing connectivity enabled |
+| VpcSecurityGroups | [] | No security groups (not needed outside VPC) |
+| StorageEncrypted / StorageEncryptionType | false / sse-rds | See below |
+| DBInstanceClass | db.serverless | Serverless v2 instance |
+| PubliclyAccessible | false | Connectivity via Internet Access Gateway, not traditional "public access" |
+
+`StorageEncrypted: false` looks like encryption is disabled, but per the official documentation, Express Configuration clusters are encrypted with AWS/RDS service-owned keys. The `StorageEncrypted` field indicates whether a customer-managed KMS key is used, while `sse-rds` (RDS service-owned key) encryption is handled separately. You cannot switch to a customer-managed key.
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">Raw describe-db-clusters output (key fields)</summary>
+
+```json title="Output"
+{
+  "Engine": "aurora-postgresql",
+  "EngineVersion": "17.7",
+  "EngineMode": "provisioned",
+  "MasterUsername": "postgres",
+  "IAMDatabaseAuthenticationEnabled": true,
+  "VPCNetworkingEnabled": false,
+  "InternetAccessGatewayEnabled": true,
+  "StorageEncrypted": false,
+  "StorageEncryptionType": "sse-rds",
+  "DeletionProtection": false,
+  "ServerlessV2ScalingConfiguration": {
+    "MinCapacity": 0.0,
+    "MaxCapacity": 16.0,
+    "SecondsUntilAutoPause": 300
+  },
+  "VpcSecurityGroups": [],
+  "DBClusterMembers": [{
+    "DBInstanceIdentifier": "aurora-express-test-instance-1",
+    "IsClusterWriter": true
+  }]
+}
+```
+
+</details>
+
+## Verification 2: Connecting through the Internet Access Gateway
+
+### IAM auth token generation and connection
+
+With Express Configuration, IAM authentication is enabled by default. Generate a temporary token with `generate-db-auth-token` and use it as the password.
+
+First, retrieve the cluster endpoint:
+
+```bash title="Terminal"
+ENDPOINT=$(aws rds describe-db-clusters \
+  --db-cluster-identifier $CLUSTER_ID \
+  --region $AWS_REGION \
+  --query 'DBClusters[0].Endpoint' --output text)
+echo $ENDPOINT
+```
+
+Generate a token and connect with psql. Tokens are valid for 15 minutes.
+
+```bash title="Terminal"
+TOKEN=$(aws rds generate-db-auth-token \
+  --hostname "$ENDPOINT" \
+  --port 5432 \
+  --username postgres \
+  --region $AWS_REGION)
+
+PGPASSWORD="$TOKEN" psql \
+  "host=$ENDPOINT port=5432 dbname=postgres user=postgres sslmode=require"
+```
+
+```text title="Output"
+PostgreSQL 17.7 on aarch64-unknown-linux-gnu, compiled by aarch64-unknown-linux-gnu-gcc (GCC) 10.5.0, 64-bit
+```
+
+Connected successfully. Running `SELECT aurora_version()` returns `17.7.2`.
+
+### TLS behavior
+
+Check TLS details after connecting with `pg_stat_ssl`:
+
+```sql title="SQL"
+SELECT ssl, version AS tls_version, cipher, bits
+FROM pg_stat_ssl WHERE pid = pg_backend_pid();
+```
+
+```text title="Output"
+ ssl | tls_version |         cipher         | bits
+-----+-------------+------------------------+------
+ t   | TLSv1.3     | TLS_AES_256_GCM_SHA384 |  256
+```
+
+TLS 1.3 with AES-256-GCM. The `pg_stat_ssl` output confirms that a TLS connection is established at least from the client to the Aurora instance.
+
+What happens with `sslmode=disable`?
+
+```text title="Output"
+FATAL: pg_hba.conf rejects connection for host "114.148.251.28",
+user "postgres", database "postgres", no encryption
+```
+
+A clear rejection. TLS is mandatory for Internet Access Gateway connections — `pg_hba.conf` is configured to reject unencrypted connections. Notably, the error message shows the client's global IP address directly.
+
+### DNS resolution structure
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">DNS resolution and latency measurement commands</summary>
+
+```bash title="Terminal (DNS resolution)"
+dig +short $ENDPOINT
+```
+
+```bash title="Terminal (latency measurement)"
+for i in $(seq 1 5); do
+  TOKEN=$(aws rds generate-db-auth-token \
+    --hostname "$ENDPOINT" --port 5432 \
+    --username postgres --region $AWS_REGION)
+  START=$(date +%s%N)
+  PGPASSWORD="$TOKEN" psql \
+    "host=$ENDPOINT port=5432 dbname=postgres user=postgres sslmode=require" \
+    -c "SELECT 1;" > /dev/null 2>&1
+  END=$(date +%s%N)
+  echo "Run $i: $(( (END - START) / 1000000 ))ms"
+done
+```
+
+</details>
+
+The endpoint's DNS resolution reveals an interesting CNAME chain:
+
+```text title="Output"
+aurora-express-test.cluster-cf6w84o6u4mc.ap-northeast-1.rds.amazonaws.com
+  → aurora-express-test-instance-1.cf6w84o6u4mc.ap-northeast-1.rds.amazonaws.com
+    → prc1c1.apgpxy.ap-northeast-1.rdsrelay.alameda.aws.dev
+      → 52.69.214.19, 54.95.98.46, 54.249.194.136
+```
+
+The cluster endpoint chains through the instance endpoint to `rdsrelay.alameda.aws.dev` — an internal domain. Three IP addresses confirm multi-AZ distribution at the DNS level.
+
+### Connection latency
+
+Five psql connection measurements (including IAM token generation):
+
+| Run | Latency |
+|---|---|
+| 1 | 731ms |
+| 2 | 1,209ms |
+| 3 | 712ms |
+| 4 | 250ms |
+| 5 | 187ms |
+
+Runs 1–3 ranged from 700ms to 1.2s, while runs 4–5 stabilized around 200ms. These measurements include IAM token generation time. The initial latency is likely due to DNS resolution and TLS session caches not yet being warm. There's some Internet Access Gateway overhead compared to direct VPC connections, but it's perfectly adequate for development use.
+
+## Verification 3: What you can and cannot change after creation
+
+### Settings you can change
+
+| Setting | Operation | Result |
+|---|---|---|
+| Capacity range | Changed to `MinCapacity=0.5, MaxCapacity=8` | ✅ Applied immediately |
+| Deletion Protection | Enabled with `--deletion-protection` | ✅ Applied immediately |
+
+Capacity range changes take effect immediately:
+
+```bash title="Terminal"
+aws rds modify-db-cluster \
+  --db-cluster-identifier $CLUSTER_ID \
+  --serverless-v2-scaling-configuration MinCapacity=0.5,MaxCapacity=8 \
+  --apply-immediately \
+  --region $AWS_REGION
+```
+
+### Settings you cannot change
+
+| Setting | Operation | Result |
+|---|---|---|
+| VPC security groups | Specified `--vpc-security-group-ids` | ❌ `VPC networking is disabled` error |
+| Encryption key | Switch to customer-managed KMS key | ❌ Not possible (AWS/RDS service-owned key only) |
+| Disable IAM auth | Switch to password authentication | ❌ Not possible (IAM auth only) |
+| Secrets Manager integration | Specified `--manage-master-user-password` | ⚠️ API succeeds, but docs state "does not apply" |
+
+Attempting to add VPC security groups returns:
+
+```text title="Output"
+InvalidParameterCombination: Aurora can't modify the cluster because
+VPC networking is disabled but you specified a VpcSecurityGroupIds parameter.
+```
+
+Express Configuration clusters exist outside a VPC, so VPC-related settings cannot be modified at all. **There is no migration path from Express Configuration to a traditional VPC-based setup.** If you need VPC placement for production, create the cluster the traditional way from the start. The following VPC-dependent features are also unavailable:
+
+- Aurora Limitless Database / Global Database
+- RDS Proxy / Blue/Green Deployments
+- Zero-ETL integration / Database Activity Streams
+- Babelfish / IPv6
+
+For Secrets Manager integration (`--manage-master-user-password`), the API call itself succeeded and a Secret was created. However, the official documentation explicitly states that "clusters with express configuration and internet access gateway support IAM authentication only" and that Secrets Manager credential management "does not apply." An API success does not guarantee the feature actually works as expected.
+
+## When to use Express Configuration
+
+Express Configuration works best when you need production-grade PostgreSQL right now but haven't finalized your VPC design.
+
+- **PoC / prototyping** — No VPC design needed to validate an idea. Database ready in seconds, free with Free Tier
+- **Personal projects / learning** — An alternative to Neon or Supabase. Key Aurora features like Serverless v2 scaling and read replicas are available (though some features like Global Database and RDS Proxy are restricted)
+- **CI/CD test environments** — Ideal for workflows that create and destroy clusters per test run
+
+Choose the traditional approach when:
+
+- **Production workloads** — VPC network controls, security group access restrictions, and customer-managed KMS key encryption are needed
+- **Compliance requirements** — If customer-managed KMS key encryption is mandatory, Express Configuration cannot accommodate it
+- **Integration with VPC services** — When private connectivity from Lambda (VPC), ECS, or EKS is required
+
+## Summary
+
+- **Production-grade PostgreSQL in ~30 seconds** — No VPC, subnet groups, or security groups needed. A single `--with-express-configuration` flag creates both cluster and instance simultaneously. In this test, it reached Available in about 32 seconds
+- **Internet Access Gateway enforces TLS 1.3** — Unencrypted connections are rejected at the `pg_hba.conf` level. DNS resolves through `rdsrelay.alameda.aws.dev` to three IPs across multiple AZs. Steady-state connection latency is around 200ms
+- **Default IAM auth is the right design choice** — Defaulting to password auth for an internet-exposed database would be risky. IAM auth provides passwordless connections via temporary tokens with zero additional configuration
+- **No VPC migration path is the biggest constraint** — Express Configuration clusters cannot be moved into a VPC later. VPC-dependent features like Global Database, RDS Proxy, and Blue/Green Deployments are also unavailable. Ideal for development and testing, but if you anticipate promoting to production, start with the traditional approach
+
+## Cleanup
+
+To delete an Express Configuration cluster, delete the instance first, then the cluster.
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">Resource deletion commands</summary>
+
+```bash title="Terminal"
+# Delete instance
+aws rds delete-db-instance \
+  --db-instance-identifier ${CLUSTER_ID}-instance-1 \
+  --skip-final-snapshot \
+  --region $AWS_REGION
+
+# Wait for instance deletion
+aws rds wait db-instance-deleted \
+  --db-instance-identifier ${CLUSTER_ID}-instance-1 \
+  --region $AWS_REGION
+
+# Delete cluster
+aws rds delete-db-cluster \
+  --db-cluster-identifier $CLUSTER_ID \
+  --skip-final-snapshot \
+  --region $AWS_REGION
+```
+
+</details>

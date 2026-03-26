@@ -1,0 +1,342 @@
+---
+title: "Aurora PostgreSQL が VPC 不要・数秒起動に — Express Configuration の実力を検証する"
+description: "Aurora PostgreSQL の新機能 Express Configuration を検証。VPC 不要で約30秒起動、Internet Access Gateway 経由の TLS 1.3 接続、IAM 認証デフォルトの挙動を実測データとともに共有する。"
+date: "2026-03-27"
+published: true
+featured: false
+categories: [infrastructure]
+tags: ["aws", "aurora", "postgresql", "serverless", "iam"]
+---
+
+## はじめに
+
+2026年3月25日、AWS は [Amazon Aurora PostgreSQL の Express Configuration を一般提供開始した](https://aws.amazon.com/about-aws/whats-new/2026/03/amazon-aurora-postgresql-database/)。VPC の設定なしに Aurora PostgreSQL Serverless データベースを数秒で作成・接続できる新機能だ。
+
+従来の Aurora クラスター作成には、VPC・サブネットグループ・セキュリティグループの設定が必要で、作成完了まで数分〜十数分かかっていた。「アイデアを思いついたらすぐに DB を使いたい」という場面では、このセットアップコストが障壁になっていた。Express Configuration はこの障壁を取り除く。
+
+本記事では、CLI から Express Configuration でクラスターを作成し、以下の3点を検証した結果を共有する。
+
+1. 作成から Available までの所要時間と、自動構成されるリソースの内容
+2. Internet Access Gateway 経由の接続挙動（TLS、IAM 認証、レイテンシ）
+3. 作成後に変更できる設定とできない設定
+
+公式ドキュメントは [Creating an Aurora PostgreSQL DB cluster with express configuration](https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/CHAP_GettingStartedAurora.AuroraPostgreSQL.ExpressConfig.html) を参照。
+
+## Express Configuration の仕組み
+
+Express Configuration は、Aurora PostgreSQL Serverless の作成に必要な設定をプリセットし、単一の API コールでクラスターとインスタンスの両方を作成する仕組みだ。
+
+| 項目 | Express Configuration | 従来方式 |
+|---|---|---|
+| VPC | 不要（`VPCNetworkingEnabled: false`） | 必須（VPC + サブネットグループ + セキュリティグループ） |
+| 接続方式 | Internet Access Gateway（インターネット経由） | VPC 内プライベート接続 |
+| 認証 | IAM 認証がデフォルト（パスワードレス） | パスワード認証がデフォルト（IAM 認証も選択可能） |
+| API コール | 1回（`create-db-cluster` のみ） | 2回以上（クラスター + インスタンス） |
+| Serverless 設定 | 自動（0〜16 ACU、300秒でオートポーズ） | 手動指定 |
+| ストレージ暗号化 | AWS/RDS サービス所有キーで暗号化（変更不可） | KMS カスタマーマネージドキーも選択可能 |
+
+ACU（Aurora Capacity Unit）は Aurora Serverless の処理能力の単位で、CPU とメモリの組み合わせに相当する。
+
+Internet Access Gateway は、Aurora クラスターの前段に配置されるプロキシレイヤーだ。複数の AZ に分散配置され、PostgreSQL ワイヤプロトコルをそのまま通す。VPN や Direct Connect なしに、インターネット上のどこからでも TLS 経由で接続できる。
+
+## 検証環境
+
+前提条件:
+
+- AWS CLI 2.34+（`--with-express-configuration` パラメータのサポートが必要）
+- psql（PostgreSQL クライアント）
+- IAM 権限: `rds:CreateDBCluster`, `rds:CreateDBInstance`, `rds:EnableInternetAccessGateway`, `iam:CreateServiceLinkedRole`, `ec2:DescribeAvailabilityZones`
+- 検証リージョン: ap-northeast-1（東京）
+
+以降のコマンドでは次の環境変数を使用する。
+
+```bash title="Terminal"
+export AWS_REGION=ap-northeast-1
+export CLUSTER_ID=aurora-express-test
+```
+
+## 検証1: Express Configuration でのクラスター作成
+
+### 作成コマンドと所要時間
+
+```bash title="Terminal"
+aws rds create-db-cluster \
+  --db-cluster-identifier $CLUSTER_ID \
+  --engine aurora-postgresql \
+  --with-express-configuration \
+  --region $AWS_REGION
+```
+
+たったこれだけだ。VPC、サブネット、セキュリティグループ、インスタンスクラスの指定は一切不要。
+
+Available になるまでポーリングで待機する。Express Configuration ではクラスターとインスタンスが同時に作成されるため、`db-cluster-available` の完了時点でインスタンスも Available になっていた。
+
+```bash title="Terminal"
+aws rds wait db-cluster-available \
+  --db-cluster-identifier $CLUSTER_ID \
+  --region $AWS_REGION
+```
+
+計測結果:
+
+| イベント | タイムスタンプ (UTC) | 経過時間 |
+|---|---|---|
+| API コール開始 | 10:22:23.863 | — |
+| API レスポンス返却 | 10:22:26.398 | 約2.5秒 |
+| クラスター + インスタンス Available | 10:22:55.763 | **約32秒** |
+
+API レスポンスは約2.5秒で返り、クラスターとインスタンスが同時に Available になるまで約32秒だった。
+
+### 自動構成されたリソースの内容
+
+`describe-db-clusters` と `describe-db-instances` の出力から、Express Configuration が自動設定した内容を整理する。
+
+| フィールド | 値 | 意味 |
+|---|---|---|
+| EngineVersion | 17.7 | デフォルトのメジャーバージョンが自動選択 |
+| MinCapacity / MaxCapacity | 0.0 / 16.0 | ゼロからスケーリング。5分アイドルでオートポーズ |
+| IAMDatabaseAuthenticationEnabled | true | IAM 認証がデフォルトで有効 |
+| VPCNetworkingEnabled | false | VPC の外に配置 |
+| InternetAccessGatewayEnabled | true | インターネット経由の接続が有効 |
+| VpcSecurityGroups | [] | セキュリティグループなし（VPC 外のため不要） |
+| StorageEncrypted / StorageEncryptionType | false / sse-rds | 後述 |
+| DBInstanceClass | db.serverless | Serverless v2 インスタンス |
+| PubliclyAccessible | false | 従来の「パブリックアクセス」とは異なるレイヤーで接続性を提供 |
+
+`StorageEncrypted: false` は一見すると暗号化が無効に見えるが、公式ドキュメントによると Express Configuration のクラスターは AWS/RDS サービス所有キーで暗号化されている。`StorageEncrypted` はカスタマーマネージド KMS キーの使用有無を示すフィールドであり、`sse-rds`（RDS サービス所有キー）による暗号化は別扱いだ。カスタマーマネージドキーへの変更はできない。
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">describe-db-clusters の生出力（主要フィールド抜粋）</summary>
+
+```json title="Output"
+{
+  "Engine": "aurora-postgresql",
+  "EngineVersion": "17.7",
+  "EngineMode": "provisioned",
+  "MasterUsername": "postgres",
+  "IAMDatabaseAuthenticationEnabled": true,
+  "VPCNetworkingEnabled": false,
+  "InternetAccessGatewayEnabled": true,
+  "StorageEncrypted": false,
+  "StorageEncryptionType": "sse-rds",
+  "DeletionProtection": false,
+  "ServerlessV2ScalingConfiguration": {
+    "MinCapacity": 0.0,
+    "MaxCapacity": 16.0,
+    "SecondsUntilAutoPause": 300
+  },
+  "VpcSecurityGroups": [],
+  "DBClusterMembers": [{
+    "DBInstanceIdentifier": "aurora-express-test-instance-1",
+    "IsClusterWriter": true
+  }]
+}
+```
+
+</details>
+
+## 検証2: Internet Access Gateway 経由の接続
+
+### IAM 認証トークンの生成と接続
+
+Express Configuration では IAM 認証がデフォルトで有効になっている。接続には `generate-db-auth-token` で一時トークンを生成し、パスワードとして使用する。
+
+まずクラスターエンドポイントを取得する。
+
+```bash title="Terminal"
+ENDPOINT=$(aws rds describe-db-clusters \
+  --db-cluster-identifier $CLUSTER_ID \
+  --region $AWS_REGION \
+  --query 'DBClusters[0].Endpoint' --output text)
+echo $ENDPOINT
+```
+
+トークンを生成して psql で接続する。トークンの有効期限は15分だ。
+
+```bash title="Terminal"
+TOKEN=$(aws rds generate-db-auth-token \
+  --hostname "$ENDPOINT" \
+  --port 5432 \
+  --username postgres \
+  --region $AWS_REGION)
+
+PGPASSWORD="$TOKEN" psql \
+  "host=$ENDPOINT port=5432 dbname=postgres user=postgres sslmode=require"
+```
+
+```text title="Output"
+PostgreSQL 17.7 on aarch64-unknown-linux-gnu, compiled by aarch64-unknown-linux-gnu-gcc (GCC) 10.5.0, 64-bit
+```
+
+問題なく接続できた。`SELECT aurora_version()` を実行すると `17.7.2` が返る。
+
+### TLS の挙動
+
+接続後に `pg_stat_ssl` を確認すると、TLS の詳細がわかる。
+
+```sql title="SQL"
+SELECT ssl, version AS tls_version, cipher, bits
+FROM pg_stat_ssl WHERE pid = pg_backend_pid();
+```
+
+```text title="Output"
+ ssl | tls_version |         cipher         | bits
+-----+-------------+------------------------+------
+ t   | TLSv1.3     | TLS_AES_256_GCM_SHA384 |  256
+```
+
+TLS 1.3 / AES-256-GCM で接続されている。`pg_stat_ssl` の結果から、少なくともクライアントから Aurora インスタンスまで TLS 接続が確立されていることが確認できる。
+
+では `sslmode=disable` で接続するとどうなるか。
+
+```text title="Output"
+FATAL: pg_hba.conf rejects connection for host "114.148.251.28",
+user "postgres", database "postgres", no encryption
+```
+
+明確に拒否される。Internet Access Gateway 経由の接続では **TLS が必須**で、`pg_hba.conf` レベルで非暗号化接続が拒否される設定になっている。エラーメッセージにはクライアントのグローバル IP アドレスがそのまま表示される点も興味深い。
+
+### DNS 解決の構造
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">DNS 解決とレイテンシの再現コマンド</summary>
+
+```bash title="Terminal (DNS 解決)"
+dig +short $ENDPOINT
+```
+
+```bash title="Terminal (レイテンシ計測)"
+for i in $(seq 1 5); do
+  TOKEN=$(aws rds generate-db-auth-token \
+    --hostname "$ENDPOINT" --port 5432 \
+    --username postgres --region $AWS_REGION)
+  START=$(date +%s%N)
+  PGPASSWORD="$TOKEN" psql \
+    "host=$ENDPOINT port=5432 dbname=postgres user=postgres sslmode=require" \
+    -c "SELECT 1;" > /dev/null 2>&1
+  END=$(date +%s%N)
+  echo "Run $i: $(( (END - START) / 1000000 ))ms"
+done
+```
+
+</details>
+
+エンドポイントの DNS 解決を確認すると、興味深い CNAME チェーンが見える。
+
+```text title="Output"
+aurora-express-test.cluster-cf6w84o6u4mc.ap-northeast-1.rds.amazonaws.com
+  → aurora-express-test-instance-1.cf6w84o6u4mc.ap-northeast-1.rds.amazonaws.com
+    → prc1c1.apgpxy.ap-northeast-1.rdsrelay.alameda.aws.dev
+      → 52.69.214.19, 54.95.98.46, 54.249.194.136
+```
+
+クラスターエンドポイントはインスタンスエンドポイントを経由し、最終的に `rdsrelay.alameda.aws.dev` という内部ドメインに解決される。3つの IP アドレスに解決されており、複数 AZ への分散が DNS レベルで確認できる。
+
+### 接続レイテンシ
+
+psql での接続（IAM トークン生成を含む）を5回計測した。
+
+| 回 | レイテンシ |
+|---|---|
+| 1 | 731ms |
+| 2 | 1,209ms |
+| 3 | 712ms |
+| 4 | 250ms |
+| 5 | 187ms |
+
+初回〜3回目は700ms〜1.2秒、4回目以降は200ms前後に安定した。計測には IAM トークン生成の時間も含まれている。初回の遅延は DNS 解決や TLS セッションのキャッシュが効いていないことが原因と考えられる。VPC 内の直接接続と比較すると Internet Access Gateway のオーバーヘッドがあるが、開発用途では十分な速度だ。
+
+## 検証3: 作成後に変更できる設定とできない設定
+
+Express Configuration で作成したクラスターに対して、各種設定変更を試みた。
+
+### 変更できる設定
+
+| 設定 | 操作 | 結果 |
+|---|---|---|
+| キャパシティ範囲 | `MinCapacity=0.5, MaxCapacity=8` に変更 | ✅ 即時反映 |
+| Deletion Protection | `--deletion-protection` で有効化 | ✅ 即時反映 |
+
+キャパシティ範囲の変更は即座に反映された。
+
+```bash title="Terminal"
+aws rds modify-db-cluster \
+  --db-cluster-identifier $CLUSTER_ID \
+  --serverless-v2-scaling-configuration MinCapacity=0.5,MaxCapacity=8 \
+  --apply-immediately \
+  --region $AWS_REGION
+```
+
+### 変更できない設定
+
+| 設定 | 操作 | 結果 |
+|---|---|---|
+| VPC セキュリティグループ | `--vpc-security-group-ids` を指定 | ❌ `VPC networking is disabled` エラー |
+| 暗号化キー | カスタマーマネージド KMS キーへの変更 | ❌ 不可（AWS/RDS サービス所有キー固定） |
+| IAM 認証の無効化 | パスワード認証への切り替え | ❌ 不可（IAM 認証のみサポート） |
+| Secrets Manager 連携 | `--manage-master-user-password` を指定 | ⚠️ API は成功するが、ドキュメントでは「適用されない」と明記 |
+
+VPC セキュリティグループの追加を試みると、以下のエラーが返る。
+
+```text title="Output"
+InvalidParameterCombination: Aurora can't modify the cluster because
+VPC networking is disabled but you specified a VpcSecurityGroupIds parameter.
+```
+
+Express Configuration で作成したクラスターは VPC の外に存在するため、VPC 関連の設定は一切変更できない。**Express Configuration から従来の VPC 内構成への移行はできない**。本番環境で VPC 内に配置する必要がある場合は、最初から従来方式で作成する必要がある。VPC を前提とする以下の機能も利用できない:
+
+- Aurora Limitless Database / Global Database
+- RDS Proxy / Blue/Green Deployments
+- Zero-ETL 統合 / Database Activity Streams
+- Babelfish / IPv6
+
+Secrets Manager 連携（`--manage-master-user-password`）については、API コール自体は成功し Secret が作成されたが、公式ドキュメントには「Internet Access Gateway が有効なクラスターでは IAM 認証のみサポートされ、Secrets Manager によるマスター認証情報管理は適用されない」と明記されている。API の成功が機能の利用可能性を保証するわけではない点に注意が必要だ。
+
+## どういう場面で使うべきか
+
+Express Configuration が最も効果を発揮するのは、「本番グレードの PostgreSQL を今すぐ使いたいが、VPC の設計はまだ決まっていない」ケースだ。
+
+- **PoC・プロトタイプ** — アイデアの検証に VPC 設計は不要。数秒で DB が手に入り、Free Tier で無料で試せる
+- **個人プロジェクト・学習** — Neon や Supabase の代替として。Serverless v2 のスケーリングやリードレプリカなど Aurora の主要機能が使える（ただし Global Database や RDS Proxy 等の一部機能は制限あり）
+- **CI/CD のテスト環境** — テストごとにクラスターを作成・削除するワークフローに最適
+
+一方、以下のケースでは従来方式を選ぶべきだ:
+
+- **本番環境** — VPC によるネットワーク制御、セキュリティグループによるアクセス制限、カスタマーマネージド KMS キーによる暗号化が必要
+- **コンプライアンス要件** — カスタマーマネージド KMS キーでの暗号化が必須の場合、Express Configuration では対応できない
+- **VPC 内の他サービスとの連携** — Lambda（VPC 内）、ECS、EKS からのプライベート接続が必要な場合
+
+## まとめ
+
+- **約30秒で本番グレードの PostgreSQL が手に入る** — VPC の設定、サブネットグループ、セキュリティグループの作成が一切不要。CLI なら `--with-express-configuration` フラグ1つで、クラスターとインスタンスが同時に作成される。今回の検証では約32秒で Available になった
+- **Internet Access Gateway は TLS 1.3 必須のプロキシレイヤー** — 非暗号化接続は `pg_hba.conf` レベルで拒否される。DNS は `rdsrelay.alameda.aws.dev` 経由で3つの IP に解決され、複数 AZ に分散配置されている。接続レイテンシは安定時で200ms前後
+- **IAM 認証デフォルトは正しい設計判断** — インターネットに露出するデータベースでパスワード認証をデフォルトにするのはリスクが高い。IAM 認証をデフォルトにすることで、一時トークンによるパスワードレス接続が追加設定なしで使える
+- **VPC への移行パスがないことが最大の制約** — Express Configuration で作成したクラスターを後から VPC 内に移動することはできない。Global Database、RDS Proxy、Blue/Green Deployments 等の VPC 前提の機能も使えない。開発・検証用途には最適だが、本番環境への昇格を想定する場合は最初から従来方式で作成すべきだ
+
+## クリーンアップ
+
+Express Configuration で作成したクラスターの削除は、インスタンスを先に削除してからクラスターを削除する。
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">リソース削除コマンド</summary>
+
+```bash title="Terminal"
+# インスタンス削除
+aws rds delete-db-instance \
+  --db-instance-identifier ${CLUSTER_ID}-instance-1 \
+  --skip-final-snapshot \
+  --region $AWS_REGION
+
+# インスタンス削除完了を待機
+aws rds wait db-instance-deleted \
+  --db-instance-identifier ${CLUSTER_ID}-instance-1 \
+  --region $AWS_REGION
+
+# クラスター削除
+aws rds delete-db-cluster \
+  --db-cluster-identifier $CLUSTER_ID \
+  --skip-final-snapshot \
+  --region $AWS_REGION
+```
+
+</details>
