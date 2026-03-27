@@ -1,8 +1,8 @@
 ---
 title: "Agentic AI security starts with treating agents like employees: Unpacking the 7 principles for financial services"
 description: "A deep dive into the AWS Security Blog's agentic AI security framework for financial services. Reorganizes the 7 design principles into three axes—permissions, traceability, and controls—with Bedrock AgentCore implementation guidance."
-date: 2026-03-27
-published: false
+date: 2026-03-28
+published: true
 featured: false
 categories: [ai-agents]
 tags: ["bedrock", "agentcore", "security", "ai-agents", "cedar"]
@@ -26,7 +26,7 @@ Traditional security frameworks assume deterministic software. Inputs produce pr
 
 - **Non-deterministic** — The same input can produce different decisions
 - **Autonomous** — Agents invoke tools and execute actions without human intervention
-- **Emergent** — Multiple agents collaborating can produce unexpected collective behaviors that no single agent was designed to exhibit
+- **Emergent** — Multiple agents collaborating can produce unexpected collective behaviors that no single agent was designed to exhibit. For example, a risk assessment agent makes a conservative call, a portfolio management agent reacts by executing a wave of sell orders, and the result is a portfolio skew that nobody intended
 
 Financial regulators are tightening requirements around AI explainability and accountability—SR 11-7 in the US, SS1/23 in the UK, ECB guidelines in the EU. Organizations must explain not just "what the AI did" but "why it did it" and "who is responsible."
 
@@ -34,7 +34,7 @@ So how should we approach this challenge? The original article offers a key star
 
 ## The Core Idea: Human-AI Security Homology
 
-The most important concept threading through all seven principles is **Human-AI Security Homology**. The original article treats this as one of the seven principles in parallel, but I see it as the foundational idea that underpins the other six.
+The most important concept threading through all seven principles is **Human-AI Security Homology**. The original article treats this as one of the seven principles in parallel, but I see it as the foundational idea that underpins the other six. Least-privilege maps to separation of duties in HR, logging and tracing maps to employee activity records, operational controls map to compliance audits—every one of the remaining six principles has a direct counterpart in how we already manage human employees.
 
 The idea: manage AI agents with the same security rigor you apply to human employees. Identity management, separation of duties, behavioral monitoring, change management, incident response—everything you already do for people, do for agents too.
 
@@ -88,9 +88,9 @@ Even with correct permissions at design time and comprehensive logging at runtim
 [Amazon Bedrock Guardrails](https://aws.amazon.com/bedrock/guardrails/) provides content filtering, PII detection, and response validation before agent outputs reach production systems. But operational controls go well beyond Guardrails. The original article also recommends:
 
 - Agent health and performance monitoring (AgentCore Observability)
-- Failure recovery procedures with circuit breakers
-- Reasoning quality degradation detection
-- Canary testing for staged rollouts
+- Failure recovery procedures with circuit breakers — automatically fall back when agent latency or error rates exceed thresholds
+- Reasoning quality degradation detection — periodically evaluate output consistency and accuracy to catch quality drops early
+- Canary testing for staged rollouts — validate model or prompt updates against a small slice of traffic before full deployment
 - Emergent behavior detection in multi-agent workflows
 
 The original article also references a **crawl, walk, run** approach. Don't aim for perfect controls on day one. Start with the minimum required controls, then evolve based on monitoring feedback.
