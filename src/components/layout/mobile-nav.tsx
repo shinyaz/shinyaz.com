@@ -18,12 +18,15 @@ export function MobileNav({ locale, t }: MobileNavProps) {
 
   // Animate in after portal mount
   useEffect(() => {
-    if (isOpen) {
-      requestAnimationFrame(() => setVisible(true));
-    } else {
-      setVisible(false);
-    }
+    if (!isOpen) return;
+    const id = requestAnimationFrame(() => setVisible(true));
+    return () => cancelAnimationFrame(id);
   }, [isOpen]);
+
+  // Reset visible immediately when closing (derived from isOpen)
+  if (!isOpen && visible) {
+    setVisible(false);
+  }
 
   // Lock body scroll when open
   useEffect(() => {
