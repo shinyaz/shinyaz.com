@@ -26,6 +26,7 @@ export default function sitemap(): MetadataRoute.Sitemap {
     for (const l of locales) {
       blogAlternates[l] = `${SITE_URL}/${l}/blog`;
     }
+    blogAlternates["x-default"] = `${SITE_URL}/${defaultLocale}/blog`;
     entries.push({
       url: `${SITE_URL}/${locale}/blog`,
       changeFrequency: "daily",
@@ -42,6 +43,7 @@ export default function sitemap(): MetadataRoute.Sitemap {
       for (const l of locales) {
         pageAlternates[l] = `${SITE_URL}/${l}/${page}`;
       }
+      pageAlternates["x-default"] = `${SITE_URL}/${defaultLocale}/${page}`;
       entries.push({
         url: `${SITE_URL}/${locale}/${page}`,
         changeFrequency: "monthly",
@@ -76,6 +78,10 @@ export default function sitemap(): MetadataRoute.Sitemap {
           alternates[l] = url;
         }
       }
+      if (Object.keys(alternates).length > 1) {
+        const defaultUrl = alternates[defaultLocale];
+        if (defaultUrl) alternates["x-default"] = defaultUrl;
+      }
       entries.push({
         url: `${SITE_URL}${post.permalink}`,
         lastModified: new Date(post.updated ?? post.date),
@@ -96,6 +102,7 @@ export default function sitemap(): MetadataRoute.Sitemap {
       for (const l of locales) {
         catAlternates[l] = `${SITE_URL}/${l}/category/${cat.slug}`;
       }
+      catAlternates["x-default"] = `${SITE_URL}/${defaultLocale}/category/${cat.slug}`;
       entries.push({
         url: `${SITE_URL}/${locale}/category/${cat.slug}`,
         changeFrequency: "weekly",
@@ -113,6 +120,7 @@ export default function sitemap(): MetadataRoute.Sitemap {
       for (const l of locales) {
         tagAlternates[l] = `${SITE_URL}/${l}/tag/${tag}`;
       }
+      tagAlternates["x-default"] = `${SITE_URL}/${defaultLocale}/tag/${tag}`;
       entries.push({
         url: `${SITE_URL}/${locale}/tag/${tag}`,
         changeFrequency: "weekly",
@@ -128,6 +136,7 @@ export default function sitemap(): MetadataRoute.Sitemap {
     for (const l of locales) {
       tilIndexAlternates[l] = `${SITE_URL}/${l}/til`;
     }
+    tilIndexAlternates["x-default"] = `${SITE_URL}/${defaultLocale}/til`;
     entries.push({
       url: `${SITE_URL}/${locale}/til`,
       changeFrequency: "daily",
@@ -159,6 +168,10 @@ export default function sitemap(): MetadataRoute.Sitemap {
         for (const [l, url] of translations) {
           alternates[l] = url;
         }
+      }
+      if (Object.keys(alternates).length > 1) {
+        const defaultUrl = alternates[defaultLocale];
+        if (defaultUrl) alternates["x-default"] = defaultUrl;
       }
       entries.push({
         url: `${SITE_URL}${til.permalink}`,

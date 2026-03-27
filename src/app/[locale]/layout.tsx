@@ -107,6 +107,11 @@ export default async function LocaleLayout({ children, params }: LocaleLayoutPro
       "@type": "Person",
       name: AUTHOR,
     },
+    potentialAction: {
+      "@type": "SearchAction",
+      target: `${SITE_URL}/${locale}/search?q={search_term_string}`,
+      "query-input": "required name=search_term_string",
+    },
   };
 
   return (

@@ -6,7 +6,7 @@ import { MdxContent } from "@/components/mdx/mdx-content";
 import { TagBadge } from "@/components/blog/tag-badge";
 import { SocialShare } from "@/components/blog/social-share";
 import { SITE_URL, AUTHOR } from "@/lib/constants";
-import { locales, isValidLocale, getDictionary } from "@/lib/i18n";
+import { locales, isValidLocale, getDictionary, defaultLocale } from "@/lib/i18n";
 import { ProfileCard } from "@/components/common/profile-card";
 import { generateTilStaticParams } from "@/lib/til-params";
 
@@ -28,6 +28,9 @@ export async function generateMetadata({ params }: TilPageProps): Promise<Metada
     if (translated) {
       languages[l] = `${SITE_URL}${translated.permalink}`;
     }
+  }
+  if (languages[defaultLocale]) {
+    languages["x-default"] = languages[defaultLocale];
   }
 
   return {

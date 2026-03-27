@@ -8,7 +8,7 @@ import { TagBadge } from "@/components/blog/tag-badge";
 import { SocialShare } from "@/components/blog/social-share";
 import { RelatedPosts } from "@/components/blog/related-posts";
 import { SITE_URL, AUTHOR } from "@/lib/constants";
-import { locales, isValidLocale, getDictionary } from "@/lib/i18n";
+import { locales, isValidLocale, getDictionary, defaultLocale } from "@/lib/i18n";
 import { extractHeadings } from "@/lib/toc";
 import { TableOfContents } from "@/components/blog/table-of-contents";
 import { ProfileCard } from "@/components/common/profile-card";
@@ -34,6 +34,9 @@ export async function generateMetadata({ params }: PostPageProps): Promise<Metad
     if (translated) {
       languages[l] = `${SITE_URL}${translated.permalink}`;
     }
+  }
+  if (languages[defaultLocale]) {
+    languages["x-default"] = languages[defaultLocale];
   }
 
   return {
