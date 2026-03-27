@@ -25,6 +25,7 @@ npm run test:e2e     # E2E tests (Playwright, requires build)
 - `/deploying-app` — Pre-deployment full validation pass
 - `/syncing-agent-config` — Sync config between Claude Code & Kiro
 - `/creating-skill` — Create new agent skill
+- `/verifying-aws-features` — Verify AWS new features & write hands-on articles
 - `/optimizing-agent-instructions` — Analyze and optimize CLAUDE.md and skills
 
 ## Architecture
