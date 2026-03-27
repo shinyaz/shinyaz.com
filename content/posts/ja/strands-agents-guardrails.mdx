@@ -1,0 +1,322 @@
+---
+title: "Strands Agents SDK 実践 — Guardrails で入出力をフィルタリングする"
+description: "Strands Agents SDK に Bedrock Guardrails を適用し、エージェントの入出力を自動フィルタリングする。ガードレール発動時の挙動と、Hooks を使ったシャドーモード（監視のみ）の実装をコードで確認する。"
+date: 2026-03-29
+published: false
+featured: false
+categories: [ai-agents]
+tags: ["strands-agents", "bedrock", "python", "ai-agents", "guardrails"]
+series: "strands-agents-practical"
+seriesOrder: 4
+---
+
+## はじめに
+
+[前回の記事](/ja/blog/2026/03/29/strands-agents-hooks)では Hooks でエージェントの動作を制御する方法を学んだ。ツール呼び出しの制限や結果の加工ができるようになったが、もう 1 つ重要な制御がある。エージェントの入出力そのものの安全性だ。
+
+`guardrail_id` を 1 つ追加するだけで、エージェントの入出力が自動フィルタリングされる。
+
+この記事では以下を試す。
+
+1. **Bedrock Guardrails のセットアップ** — AWS CLI でガードレールを作成する
+2. **Strands エージェントへの適用** — `BedrockModel` にガードレールを設定する
+3. **ガードレール発動時の挙動** — ブロック時の `stop_reason` と会話履歴の自動書き換えを確認する
+4. **Hooks でシャドーモード** — ブロックせず監視だけ行う実装
+
+公式ドキュメントは [Guardrails](https://strandsagents.com/docs/user-guide/safety-security/guardrails/) を参照。
+
+## セットアップ
+
+[第 1 回](/ja/blog/2026/03/29/strands-agents-structured-output)の環境をそのまま使う。以降の例ではすべて同じモデル設定を使う。各例は独立した `.py` ファイルとして実行できる。共通設定を先頭に書き、その下に各例のコードを追加する形だ。
+
+```python title="Python (共通設定)"
+from strands import Agent
+from strands.models import BedrockModel
+
+bedrock_model = BedrockModel(
+    model_id="us.anthropic.claude-sonnet-4-20250514-v1:0",
+    region_name="us-east-1",
+)
+```
+
+### Bedrock Guardrails の作成
+
+AWS CLI でガードレールを作成する。この例では「投資アドバイス」をブロックするトピックポリシーと、暴力・ヘイトのコンテンツフィルターを設定する。
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">ガードレール作成コマンド</summary>
+
+```bash title="Terminal"
+aws bedrock create-guardrail \
+  --name "strands-test-guardrail" \
+  --description "Test guardrail for Strands practical series" \
+  --content-policy-config '{
+    "filtersConfig": [
+      {"type": "VIOLENCE", "inputStrength": "HIGH", "outputStrength": "HIGH"},
+      {"type": "HATE", "inputStrength": "HIGH", "outputStrength": "HIGH"}
+    ]
+  }' \
+  --topic-policy-config '{
+    "topicsConfig": [
+      {
+        "name": "Investment Advice",
+        "definition": "Providing specific investment recommendations or financial advice",
+        "examples": ["What stocks should I buy?", "Should I invest in crypto?"],
+        "type": "DENY"
+      }
+    ]
+  }' \
+  --blocked-input-messaging "Sorry, this request was blocked by guardrails." \
+  --blocked-outputs-messaging "Sorry, this response was blocked by guardrails." \
+  --region us-east-1
+```
+
+出力からガードレール ID を控える。
+
+```json title="Output"
+{
+    "guardrailId": "7by7u1yvthd8",
+    "guardrailArn": "arn:aws:bedrock:us-east-1:123456789012:guardrail/7by7u1yvthd8",
+    "version": "DRAFT"
+}
+```
+
+バージョンを発行する。
+
+```bash title="Terminal"
+aws bedrock create-guardrail-version \
+  --guardrail-identifier "7by7u1yvthd8" \
+  --region us-east-1
+```
+
+</details>
+
+ハマりポイント: パラメータ名は `--blocked-outputs-messaging`（**outputs** が複数形）だ。`--blocked-output-messaging` と単数形にするとエラーになる。
+
+## Strands エージェントへの適用
+
+`BedrockModel` に `guardrail_id` と `guardrail_version` を追加するだけだ。共通設定の `bedrock_model` をガードレール付きで上書きする。
+
+```python title="Python"
+GUARDRAIL_ID = "7by7u1yvthd8"  # 自分のガードレール ID に置き換える
+
+bedrock_model = BedrockModel(
+    model_id="us.anthropic.claude-sonnet-4-20250514-v1:0",
+    region_name="us-east-1",
+    guardrail_id=GUARDRAIL_ID,
+    guardrail_version="1",
+    guardrail_trace="enabled",
+)
+
+agent = Agent(model=bedrock_model, callback_handler=None)
+```
+
+エージェント側のコードは一切変わらない。モデル設定にガードレール ID を追加するだけだ。
+
+## ガードレール発動時の挙動
+
+通常のリクエストとブロックされるリクエストを比較する。
+
+```python title="Python"
+# 通常のリクエスト
+result1 = agent("What is the capital of France?")
+print(f"Stop reason: {result1.stop_reason}")
+print(f"Answer: {result1.message['content'][0]['text']}")
+
+# ブロックされるリクエスト（投資アドバイス）
+agent2 = Agent(model=bedrock_model, callback_handler=None)
+result2 = agent2("What stocks should I buy to get rich quickly?")
+print(f"\nStop reason: {result2.stop_reason}")
+print(f"Answer: {result2.message['content'][0]['text']}")
+```
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">01_guardrails.py 全体コード（コピペ用）</summary>
+
+```python title="01_guardrails.py"
+from strands import Agent
+from strands.models import BedrockModel
+
+GUARDRAIL_ID = "YOUR_GUARDRAIL_ID"  # 自分のガードレール ID に置き換える
+
+bedrock_model = BedrockModel(
+    model_id="us.anthropic.claude-sonnet-4-20250514-v1:0",
+    region_name="us-east-1",
+    guardrail_id=GUARDRAIL_ID,
+    guardrail_version="1",
+    guardrail_trace="enabled",
+)
+
+agent = Agent(model=bedrock_model, callback_handler=None)
+
+result1 = agent("What is the capital of France?")
+print(f"Stop reason: {result1.stop_reason}")
+print(f"Answer: {result1.message['content'][0]['text']}")
+
+agent2 = Agent(model=bedrock_model, callback_handler=None)
+result2 = agent2("What stocks should I buy to get rich quickly?")
+print(f"\nStop reason: {result2.stop_reason}")
+print(f"Answer: {result2.message['content'][0]['text']}")
+print(f"\nMessages after block: {len(agent2.messages)}")
+for i, msg in enumerate(agent2.messages):
+    role = msg['role']
+    text = msg['content'][0].get('text', '')[:80]
+    print(f"  [{i}] {role:10s}: {text}")
+```
+
+</details>
+
+```bash title="Terminal"
+python -u 01_guardrails.py
+```
+
+### 実行結果
+
+```text title="Output"
+Stop reason: end_turn
+Answer: The capital of France is Paris.
+
+Stop reason: guardrail_intervened
+Answer: Sorry, this request was blocked by guardrails.
+```
+
+通常のリクエストは `stop_reason: end_turn` で正常に回答される。投資アドバイスのリクエストは `stop_reason: guardrail_intervened` でブロックされ、`--blocked-input-messaging` で設定したメッセージが返される。
+
+### 会話履歴の自動書き換え
+
+ブロック後の会話履歴を確認すると、興味深い動作が分かる。
+
+```text title="Output (会話履歴)"
+Messages after block: 2
+  [0] user      : [User input redacted.]
+  [1] assistant : Sorry, this request was blocked by guardrails.
+```
+
+ユーザーの入力が `[User input redacted.]` に自動的に書き換えられている。これは、後続の会話で同じ入力がガードレールに再度引っかかるのを防ぐための仕組みだ。元の入力は会話履歴に残らない。
+
+## Hooks でシャドーモード — 監視のみの実装
+
+本番環境にガードレールを導入する前に、「ブロックはしないが、ブロックされるはずの入出力を記録する」シャドーモードで検証したい場面がある。[前回の記事](/ja/blog/2026/03/29/strands-agents-hooks)で学んだ Hooks を使って実装する。
+
+ポイントは、`BedrockModel` にはガードレールを設定せず、Hooks 内で `ApplyGuardrail` API を直接呼び出すことだ。
+
+```python title="Python (エージェント作成と実行)"
+import boto3
+from strands import Agent
+from strands.models import BedrockModel
+from strands.hooks import MessageAddedEvent, AfterInvocationEvent
+
+GUARDRAIL_ID = "7by7u1yvthd8"
+GUARDRAIL_VERSION = "1"
+
+# ガードレールなしのモデル（シャドーモード）
+bedrock_model = BedrockModel(
+    model_id="us.anthropic.claude-sonnet-4-20250514-v1:0",
+    region_name="us-east-1",
+)
+
+agent = Agent(model=bedrock_model, callback_handler=None)
+agent.add_hook(check_user_input)
+agent.add_hook(check_output)
+
+result = agent("What stocks should I buy to get rich quickly?")
+print(f"\nStop reason: {result.stop_reason}")
+print(f"Answer: {result.message['content'][0]['text'][:100]}...")
+```
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">Hook 関数の全体コード（check_user_input, check_output）</summary>
+
+```python title="Python"
+bedrock_client = boto3.client("bedrock-runtime", "us-east-1")
+
+def check_user_input(event: MessageAddedEvent) -> None:
+    if event.message.get("role") != "user":
+        return
+    content = "".join(block.get("text", "") for block in event.message.get("content", []))
+    if not content:
+        return
+    try:
+        response = bedrock_client.apply_guardrail(
+            guardrailIdentifier=GUARDRAIL_ID,
+            guardrailVersion=GUARDRAIL_VERSION,
+            source="INPUT",
+            content=[{"text": {"text": content}}],
+        )
+        if response.get("action") == "GUARDRAIL_INTERVENED":
+            print(f"[SHADOW] WOULD BLOCK INPUT: {content[:60]}...")
+            for assessment in response.get("assessments", []):
+                if "topicPolicy" in assessment:
+                    for topic in assessment["topicPolicy"].get("topics", []):
+                        print(f"[SHADOW]   Topic: {topic['name']} -> {topic['action']}")
+        else:
+            print(f"[SHADOW] INPUT OK: {content[:60]}...")
+    except Exception as e:
+        print(f"[SHADOW] Error: {e}")
+
+def check_output(event: AfterInvocationEvent) -> None:
+    if not event.agent.messages or event.agent.messages[-1].get("role") != "assistant":
+        return
+    content = "".join(
+        block.get("text", "") for block in event.agent.messages[-1].get("content", [])
+    )
+    if not content:
+        return
+    try:
+        response = bedrock_client.apply_guardrail(
+            guardrailIdentifier=GUARDRAIL_ID,
+            guardrailVersion=GUARDRAIL_VERSION,
+            source="OUTPUT",
+            content=[{"text": {"text": content}}],
+        )
+        if response.get("action") == "GUARDRAIL_INTERVENED":
+            print(f"[SHADOW] WOULD BLOCK OUTPUT: {content[:60]}...")
+        else:
+            print(f"[SHADOW] OUTPUT OK")
+    except Exception as e:
+        print(f"[SHADOW] Error: {e}")
+```
+
+</details>
+
+```bash title="Terminal"
+python -u 02_shadow.py
+```
+
+### 実行結果
+
+```text title="Output"
+[SHADOW] WOULD BLOCK INPUT: What stocks should I buy to get rich quickly?...
+[SHADOW]   Topic: Investment Advice -> BLOCKED
+[SHADOW] WOULD BLOCK OUTPUT: I can't recommend specific stocks for getting rich quickly, ...
+
+Stop reason: end_turn
+Answer: I can't recommend specific stocks for getting rich quickly, and here's why that approach is risky:...
+```
+
+入力と出力の両方で「WOULD BLOCK」と検知しているが、実際にはブロックしていない。エージェントは通常通り回答を生成している。
+
+この仕組みのポイントは以下だ。
+
+- **`BedrockModel` にはガードレールを設定しない** — モデルレベルではフィルタリングしない
+- **`apply_guardrail` API で別途チェックする** — Hooks 内で Bedrock の `ApplyGuardrail` API を直接呼び出す
+- **ログに記録するだけ** — ブロック判定の結果をログに出力するが、エージェントの動作は変えない
+
+本番導入前のチューニング期間に、どのような入出力がブロック対象になるかを把握するのに有用だ。
+
+## まとめ
+
+- **`guardrail_id` を 1 つ追加するだけで入出力が自動フィルタリングされる** — `BedrockModel` にガードレール ID とバージョンを設定するだけ。エージェント側のコードは変わらない。
+- **ブロック時は `stop_reason: guardrail_intervened` になる** — プログラムでブロックを検知できる。ユーザー入力は `[User input redacted.]` に自動書き換えされ、後続の会話への影響を防ぐ。
+- **Hooks + `ApplyGuardrail` API でシャドーモードを実装できる** — ブロックせず監視だけ行うモードで、本番導入前のチューニングに有用。前回学んだ Hooks の実践的な応用例。
+- **AWS CLI でのガードレール作成時は `--blocked-outputs-messaging`（複数形）に注意** — 単数形の `--blocked-output-messaging` ではエラーになる。
+
+## クリーンアップ
+
+検証が終わったらガードレールを削除する。
+
+```bash title="Terminal"
+aws bedrock delete-guardrail \
+  --guardrail-identifier "7by7u1yvthd8" \
+  --region us-east-1
+```

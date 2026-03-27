@@ -1,0 +1,240 @@
+---
+title: "Strands Agents SDK 実践 — セッション管理で会話を永続化する"
+description: "Strands Agents SDK の FileSessionManager で会話をファイルに永続化し、プロセス再起動後も復元できることを確認する。保存されるデータ構造と S3 への切り替え方法もコードで解説する。"
+date: 2026-03-29
+published: false
+featured: false
+categories: [ai-agents]
+tags: ["strands-agents", "bedrock", "python", "ai-agents", "session-management"]
+series: "strands-agents-practical"
+seriesOrder: 2
+---
+
+## はじめに
+
+[入門第 4 回](/ja/blog/2026/03/03/strands-agents-conversation)では、同じエージェントインスタンスに繰り返し話しかけることで会話が継続することを学んだ。しかし、あの会話はメモリ上にしか存在しない。プロセスを終了すれば消える。
+
+`FileSessionManager` を追加するだけで、会話がファイルに保存され再起動後も復元される。
+
+この記事では以下を試す。
+
+1. **FileSessionManager で保存** — 会話をローカルファイルに永続化する
+2. **プロセス再起動後の復元** — 別プロセスで同じセッションを復元する
+3. **保存されるデータの中身** — ディレクトリ構造と JSON ファイルを確認する
+4. **S3SessionManager への切り替え** — クラウドストレージへの移行パス
+
+公式ドキュメントは [Session Management](https://strandsagents.com/docs/user-guide/concepts/agents/session-management/) を参照。
+
+## セットアップ
+
+[第 1 回](/ja/blog/2026/03/29/strands-agents-structured-output)の環境をそのまま使う。以降の例ではすべて同じモデル設定を使う。各例は独立した `.py` ファイルとして実行できる。共通設定を先頭に書き、その下に各例のコードを追加する形だ。
+
+```python title="Python (共通設定)"
+from strands import Agent
+from strands.models import BedrockModel
+from strands.session.file_session_manager import FileSessionManager
+
+bedrock_model = BedrockModel(
+    model_id="us.anthropic.claude-sonnet-4-20250514-v1:0",
+    region_name="us-east-1",
+)
+```
+
+## FileSessionManager で会話を保存する
+
+`FileSessionManager` に `session_id` と保存先ディレクトリを指定し、`Agent` に渡すだけだ。
+
+```python title="01_save.py"
+session_manager = FileSessionManager(
+    session_id="user-123",
+    storage_dir="./sessions",
+)
+
+agent = Agent(
+    model=bedrock_model,
+    session_manager=session_manager,
+    callback_handler=None,
+)
+
+result1 = agent("My name is Taro. I'm learning Strands Agents SDK.")
+print(f"Agent: {result1.message['content'][0]['text'][:80]}...")
+print(f"Messages: {len(agent.messages)}")
+
+result2 = agent("What is my name?")
+print(f"Agent: {result2.message['content'][0]['text'][:80]}...")
+print(f"Messages: {len(agent.messages)}")
+```
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">01_save.py 全体コード（コピペ用）</summary>
+
+```python title="01_save.py"
+from strands import Agent
+from strands.models import BedrockModel
+from strands.session.file_session_manager import FileSessionManager
+
+bedrock_model = BedrockModel(
+    model_id="us.anthropic.claude-sonnet-4-20250514-v1:0",
+    region_name="us-east-1",
+)
+
+session_manager = FileSessionManager(session_id="user-123", storage_dir="./sessions")
+agent = Agent(model=bedrock_model, session_manager=session_manager, callback_handler=None)
+
+result1 = agent("My name is Taro. I'm learning Strands Agents SDK.")
+print(f"Agent: {result1.message['content'][0]['text'][:80]}...")
+print(f"Messages: {len(agent.messages)}")
+
+result2 = agent("What is my name?")
+print(f"Agent: {result2.message['content'][0]['text'][:80]}...")
+print(f"Messages: {len(agent.messages)}")
+```
+
+</details>
+
+```bash title="Terminal"
+python -u 01_save.py
+```
+
+### 実行結果
+
+```text title="Output"
+Agent: Hello Taro! Nice to meet you. I'd be happy to help you learn about Strands Agent...
+Messages: 2
+Agent: Your name is Taro, as you mentioned in your first message....
+Messages: 4
+```
+
+入門第 4 回と同じマルチターン会話だが、今回は `./sessions` ディレクトリに会話が自動保存されている。
+
+## プロセス再起動後の復元
+
+セッション管理の本当の価値は、プロセスを終了しても会話が残ることだ。別のスクリプト（= 別プロセス）で同じ `session_id` を指定してエージェントを作成し、復元を確認する。
+
+```python title="02_restore.py"
+session_manager = FileSessionManager(
+    session_id="user-123",
+    storage_dir="./sessions",
+)
+
+agent = Agent(
+    model=bedrock_model,
+    session_manager=session_manager,
+    callback_handler=None,
+)
+
+print(f"Restored messages: {len(agent.messages)}")
+
+result = agent("What is my name and what am I learning?")
+print(f"Agent: {result.message['content'][0]['text']}")
+print(f"Messages after: {len(agent.messages)}")
+```
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">02_restore.py 全体コード（コピペ用）</summary>
+
+```python title="02_restore.py"
+from strands import Agent
+from strands.models import BedrockModel
+from strands.session.file_session_manager import FileSessionManager
+
+bedrock_model = BedrockModel(
+    model_id="us.anthropic.claude-sonnet-4-20250514-v1:0",
+    region_name="us-east-1",
+)
+
+session_manager = FileSessionManager(session_id="user-123", storage_dir="./sessions")
+agent = Agent(model=bedrock_model, session_manager=session_manager, callback_handler=None)
+
+print(f"Restored messages: {len(agent.messages)}")
+
+result = agent("What is my name and what am I learning?")
+print(f"Agent: {result.message['content'][0]['text']}")
+print(f"Messages after: {len(agent.messages)}")
+```
+
+</details>
+
+```bash title="Terminal"
+python -u 02_restore.py
+```
+
+### 実行結果
+
+```text title="Output"
+Restored messages: 4
+Agent: Your name is Taro and you're learning Strands Agents SDK.
+Messages after: 6
+```
+
+`Agent` のコンストラクタで `session_manager` を渡した時点で、既存のセッションが自動的に復元される。4 メッセージ（2 ターン分）が復元され、エージェントは過去の会話を記憶している。
+
+特別な復元コードは不要だ。同じ `session_id` を指定するだけでよい。
+
+## 保存されるデータの中身
+
+`./sessions` ディレクトリの中身を確認する。
+
+```text title="ディレクトリ構造"
+sessions/
+└── session_user-123/
+    ├── session.json
+    └── agents/
+        └── agent_default/
+            ├── agent.json
+            └── messages/
+                ├── message_0.json
+                ├── message_1.json
+                ├── message_2.json
+                └── message_3.json
+```
+
+- **`session.json`** — セッションのメタデータ（`session_id`、作成日時）
+- **`agent.json`** — エージェントの状態（`agent_id` はデフォルトで `default`）
+- **`messages/`** — 各メッセージが個別の JSON ファイルとして保存される
+
+`session.json` の中身は以下のようになる。
+
+```json title="session.json"
+{
+    "session_id": "user-123",
+    "session_type": "AGENT",
+    "created_at": "2026-03-27T15:21:31.179132+00:00",
+    "updated_at": "2026-03-27T15:21:31.179145+00:00"
+}
+```
+
+メッセージは `agent()` を呼ぶたびに自動的にファイルに追加される。開発者が明示的に「保存」を呼ぶ必要はない。
+
+## S3SessionManager への切り替え
+
+本番環境やマルチインスタンス構成では、ローカルファイルではなく S3 に保存したい。コードの変更は最小限だ。
+
+```python title="Python"
+from strands.session.s3_session_manager import S3SessionManager
+
+session_manager = S3SessionManager(
+    session_id="user-123",
+    bucket="my-agent-sessions",
+    prefix="production/",
+    region_name="us-east-1",
+)
+
+agent = Agent(model=bedrock_model, session_manager=session_manager)
+```
+
+`FileSessionManager` を `S3SessionManager` に差し替え、`storage_dir` の代わりに `bucket` と `prefix` を指定するだけだ。エージェント側のコードは一切変わらない。
+
+S3 を使う場合は以下の IAM 権限が必要になる。
+
+- `s3:PutObject` — セッションデータの作成・更新
+- `s3:GetObject` — セッションデータの取得
+- `s3:DeleteObject` — セッションデータの削除
+- `s3:ListBucket` — バケット内のオブジェクト一覧
+
+## まとめ
+
+- **`FileSessionManager` を追加するだけで会話が永続化される** — `session_id` を指定してエージェントに渡すだけ。保存のタイミングは SDK が自動管理する。
+- **同じ `session_id` で復元される** — 別プロセスでも同じ `session_id` を指定すれば、過去の会話が自動的に復元される。特別な復元コードは不要。
+- **メッセージは個別の JSON ファイルとして保存される** — `session_<id>/agents/agent_default/messages/` 以下に、各メッセージが独立したファイルとして保存される。
+- **S3 への切り替えはクラス名の変更だけ** — `FileSessionManager` を `S3SessionManager` に差し替えるだけで、エージェント側のコードは変わらない。

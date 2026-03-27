@@ -1,0 +1,441 @@
+---
+title: "Strands Agents SDK 実践 — Structured Output で LLM の出力を型安全にする"
+description: "Strands Agents SDK の Structured Output を実際に動かし、Pydantic モデルで LLM の出力を型安全なオブジェクトに変換する。ツールとの併用やバリデーション自動リトライの仕組みをコードとメトリクスで確認する。"
+date: 2026-03-29
+published: false
+featured: false
+categories: [ai-agents]
+tags: ["strands-agents", "bedrock", "python", "ai-agents", "structured-output"]
+series: "strands-agents-practical"
+seriesOrder: 1
+---
+
+## はじめに
+
+[入門シリーズ](/ja/blog/2026/03/03/strands-agents-quickstart)では、エージェントの基本からマルチエージェントまでを学んだ。しかし、これまでのエージェントの出力はすべてテキストだった。「250 USD は 37,375 JPY です」という文字列を受け取っても、プログラムで金額を取り出すにはテキストをパースする必要がある。
+
+Structured Output を使えば、Pydantic モデルを渡すだけで LLM の出力が型付きオブジェクトになる。テキストパースは不要だ。
+
+この記事では以下を試す。
+
+1. **基本** — Pydantic モデルで LLM の出力を構造化する
+2. **ツールとの併用** — ツール実行結果を構造化する
+3. **バリデーション自動リトライ** — バリデーション失敗時に LLM が自動で修正する
+4. **会話履歴からの抽出** — マルチターン会話の文脈から情報を構造化する
+
+公式ドキュメントは [Structured Output](https://strandsagents.com/docs/user-guide/concepts/agents/structured-output/) を参照。
+
+## セットアップ
+
+[入門シリーズ](/ja/blog/2026/03/03/strands-agents-quickstart)の環境をそのまま使う。新規の場合は以下を実行する。
+
+```bash title="Terminal"
+mkdir my_agent && cd my_agent
+python -m venv .venv
+source .venv/bin/activate
+pip install strands-agents strands-agents-tools
+```
+
+以降の例ではすべて同じモデル設定を使う。各例は独立した `.py` ファイルとして実行できる。共通設定を先頭に書き、その下に各例のコードを追加する形だ。
+
+```python title="Python (共通設定)"
+from strands import Agent
+from strands.models import BedrockModel
+
+bedrock_model = BedrockModel(
+    model_id="us.anthropic.claude-sonnet-4-20250514-v1:0",
+    region_name="us-east-1",
+)
+```
+
+## 基本 — Pydantic モデルで出力を構造化する
+
+まずは最もシンプルな例から。テキストから人物情報を抽出し、型付きオブジェクトとして受け取る。
+
+```python title="Python"
+from pydantic import BaseModel, Field
+
+class PersonInfo(BaseModel):
+    """Information about a person."""
+    name: str = Field(description="Full name of the person")
+    age: int = Field(description="Age in years")
+    occupation: str = Field(description="Current occupation")
+
+agent = Agent(model=bedrock_model, callback_handler=None)
+result = agent(
+    "John Smith is a 30 year-old software engineer",
+    structured_output_model=PersonInfo,
+)
+
+person = result.structured_output
+print(f"Name: {person.name}")
+print(f"Age: {person.age}")
+print(f"Occupation: {person.occupation}")
+print(f"Type: {type(person).__name__}")
+```
+
+`callback_handler=None` はコンソールへのストリーミング出力を無効にする設定だ。結果は `result` から取得する。以降の例でもすべて同じ設定を使う。
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">01_basic.py 全体コード（コピペ用）</summary>
+
+```python title="01_basic.py"
+from strands import Agent
+from strands.models import BedrockModel
+from pydantic import BaseModel, Field
+
+bedrock_model = BedrockModel(
+    model_id="us.anthropic.claude-sonnet-4-20250514-v1:0",
+    region_name="us-east-1",
+)
+
+class PersonInfo(BaseModel):
+    """Information about a person."""
+    name: str = Field(description="Full name of the person")
+    age: int = Field(description="Age in years")
+    occupation: str = Field(description="Current occupation")
+
+agent = Agent(model=bedrock_model, callback_handler=None)
+result = agent(
+    "John Smith is a 30 year-old software engineer",
+    structured_output_model=PersonInfo,
+)
+
+person = result.structured_output
+print(f"Name: {person.name}")
+print(f"Age: {person.age}")
+print(f"Occupation: {person.occupation}")
+print(f"Type: {type(person).__name__}")
+```
+
+</details>
+
+```bash title="Terminal"
+python -u 01_basic.py
+```
+
+### 実行結果
+
+```text title="Output"
+Name: John Smith
+Age: 30
+Occupation: software engineer
+Type: PersonInfo
+```
+
+`result.structured_output` が `PersonInfo` 型のオブジェクトになっている。`person.name` で名前、`person.age` で年齢にアクセスできる。テキストをパースする必要はない。
+
+ポイントは 3 つだ。
+
+- **Pydantic モデルを定義する** — `BaseModel` を継承し、フィールドに `Field(description=...)` で説明を付ける。この説明が LLM への指示になる
+- **`structured_output_model` に渡す** — `agent()` の呼び出し時にモデルクラスを指定する
+- **`result.structured_output` で取得する** — 型付きオブジェクトとして結果を受け取る
+
+## ツールとの併用 — ツール実行結果を構造化する
+
+Structured Output はツールと組み合わせることができる。[入門第 2 回](/ja/blog/2026/03/03/strands-agents-custom-tools)で作った為替レート取得ツールの結果を、構造化されたオブジェクトとして受け取ってみる。
+
+出力モデルを定義し、ツールと一緒にエージェントに渡す。
+
+```python title="Python (モデル定義と実行)"
+class ConversionResult(BaseModel):
+    """Currency conversion result."""
+    base_currency: str = Field(description="Source currency code")
+    target_currency: str = Field(description="Target currency code")
+    exchange_rate: float = Field(description="Exchange rate used")
+    original_amount: float = Field(description="Original amount")
+    converted_amount: float = Field(description="Converted amount")
+
+agent = Agent(model=bedrock_model, tools=[get_exchange_rate], callback_handler=None)
+result = agent(
+    "Convert 250 USD to JPY",
+    structured_output_model=ConversionResult,
+)
+
+conv = result.structured_output
+print(f"Result: {conv.original_amount} {conv.base_currency} = {conv.converted_amount} {conv.target_currency}")
+print(f"Rate: {conv.exchange_rate}")
+```
+
+`get_exchange_rate` ツールは[入門第 2 回](/ja/blog/2026/03/03/strands-agents-custom-tools)と同じものを使う。
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">02_tools.py 全体コード（コピペ用）</summary>
+
+```python title="02_tools.py"
+from strands import Agent, tool
+from strands.models import BedrockModel
+from pydantic import BaseModel, Field
+import json
+
+bedrock_model = BedrockModel(
+    model_id="us.anthropic.claude-sonnet-4-20250514-v1:0",
+    region_name="us-east-1",
+)
+
+@tool
+def get_exchange_rate(base: str, target: str) -> dict:
+    """Get the current exchange rate between two currencies.
+
+    Args:
+        base: The base currency code (e.g. USD, EUR, JPY)
+        target: The target currency code (e.g. USD, EUR, JPY)
+
+    Returns:
+        dict: Exchange rate information
+    """
+    rates = {
+        ("USD", "JPY"): 149.50,
+        ("EUR", "USD"): 1.08,
+        ("EUR", "JPY"): 161.46,
+    }
+    rate = rates.get((base.upper(), target.upper()))
+    if rate is None:
+        return {"error": f"Rate not found for {base}/{target}"}
+    return {"base": base.upper(), "target": target.upper(), "rate": rate}
+
+class ConversionResult(BaseModel):
+    """Currency conversion result."""
+    base_currency: str = Field(description="Source currency code")
+    target_currency: str = Field(description="Target currency code")
+    exchange_rate: float = Field(description="Exchange rate used")
+    original_amount: float = Field(description="Original amount")
+    converted_amount: float = Field(description="Converted amount")
+
+agent = Agent(model=bedrock_model, tools=[get_exchange_rate], callback_handler=None)
+result = agent("Convert 250 USD to JPY", structured_output_model=ConversionResult)
+
+conv = result.structured_output
+print(f"Result: {conv.original_amount} {conv.base_currency} = {conv.converted_amount} {conv.target_currency}")
+print(f"Rate: {conv.exchange_rate}")
+
+print("\n--- Metrics ---")
+print(json.dumps(result.metrics.get_summary(), indent=2, default=str))
+```
+
+</details>
+
+```bash title="Terminal"
+python -u 02_tools.py
+```
+
+### 実行結果
+
+```text title="Output"
+Result: 250.0 USD = 37375.0 JPY
+Rate: 149.5
+```
+
+エージェントは `get_exchange_rate` ツールでレートを取得し、その結果を `ConversionResult` モデルに構造化して返した。テキストではなく、`conv.converted_amount` で数値として直接アクセスできる。
+
+### Structured Output の内部動作
+
+メトリクスを見ると、興味深い仕組みが分かる。
+
+```text title="Output (メトリクス抜粋)"
+Cycles: 2
+tool_usage:
+  get_exchange_rate: calls=1, success=1
+  ConversionResult: calls=1, success=1
+```
+
+`ConversionResult` がツールとして表示されている。Structured Output は内部的に Pydantic モデルを「ツール」として LLM に登録する仕組みだ。LLM は通常のツール呼び出しと同じ方法で構造化データを出力し、SDK がそれを Pydantic モデルとしてバリデーションする。
+
+つまり、エージェントループの流れは以下のようになる。
+
+1. **Cycle 1**: LLM が `get_exchange_rate` ツールを呼び出し、レートを取得する
+2. **Cycle 2**: LLM がレートを使って計算し、`ConversionResult` ツール（= Pydantic モデル）を呼び出して構造化データを出力する
+
+## バリデーション自動リトライ — LLM が自動で修正する
+
+Pydantic の `field_validator` でカスタムバリデーションを追加すると、バリデーション失敗時に LLM が自動でリトライする。
+
+```python title="Python"
+from pydantic import BaseModel, Field, field_validator
+
+class UserName(BaseModel):
+    """A user's name with a required suffix."""
+    first_name: str = Field(description="First name of the person")
+
+    @field_validator("first_name")
+    @classmethod
+    def validate_first_name(cls, value: str) -> str:
+        if not value.endswith("_verified"):
+            raise ValueError("first_name must end with '_verified' suffix")
+        return value
+
+agent = Agent(model=bedrock_model, callback_handler=None)
+result = agent(
+    "What is Aaron's first name?",
+    structured_output_model=UserName,
+)
+
+print(f"Result: {result.structured_output}")
+```
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">03_validation.py 全体コード（コピペ用）</summary>
+
+```python title="03_validation.py"
+from strands import Agent
+from strands.models import BedrockModel
+from pydantic import BaseModel, Field, field_validator
+
+bedrock_model = BedrockModel(
+    model_id="us.anthropic.claude-sonnet-4-20250514-v1:0",
+    region_name="us-east-1",
+)
+
+class UserName(BaseModel):
+    """A user's name with a required suffix."""
+    first_name: str = Field(description="First name of the person")
+
+    @field_validator("first_name")
+    @classmethod
+    def validate_first_name(cls, value: str) -> str:
+        if not value.endswith("_verified"):
+            raise ValueError("first_name must end with '_verified' suffix")
+        return value
+
+agent = Agent(model=bedrock_model, callback_handler=None)
+result = agent("What is Aaron's first name?", structured_output_model=UserName)
+print(f"Result: {result.structured_output}")
+```
+
+</details>
+
+```bash title="Terminal"
+python -u 03_validation.py
+```
+
+### 実行結果
+
+```text title="Output"
+tool_name=<UserName> | structured output validation failed |
+  error_message=<Validation failed for UserName. Please fix the following errors:
+  - Field 'first_name': Value error, first_name must end with '_verified' suffix>
+Result: first_name='Aaron_verified'
+```
+
+```text title="Output (メトリクス抜粋)"
+Cycles: 2
+UserName: calls=2, success=1, errors=1, success_rate=0.5
+```
+
+1 回目の呼び出しで LLM は `first_name="Aaron"` を返したが、バリデーションが失敗した。SDK はエラーメッセージを LLM に返し、LLM が 2 回目の呼び出しで `first_name="Aaron_verified"` に修正した。
+
+この仕組みは以下の場面で有用だ。
+
+- **フォーマット制約** — メールアドレスの形式、日付のフォーマットなど
+- **値の範囲制約** — 年齢が 0〜150 の範囲内、価格が正の数など
+- **ビジネスルール** — 特定のプレフィックスやサフィックスの付与
+
+開発者はバリデーションルールを Pydantic モデルに書くだけでよい。リトライのロジックは SDK が自動で処理する。
+
+## 会話履歴からの構造化抽出
+
+[入門第 4 回](/ja/blog/2026/03/03/strands-agents-conversation)で学んだマルチターン会話と Structured Output を組み合わせると、会話の文脈から情報を構造化できる。
+
+```python title="Python"
+from typing import Optional
+
+agent = Agent(model=bedrock_model, callback_handler=None)
+
+# 会話で情報を蓄積する
+agent("My name is Taro and I work as a data scientist at a startup in Tokyo.")
+agent("I've been using Python for 5 years and recently started learning Rust.")
+
+class ProfileSummary(BaseModel):
+    """Summary of a person's profile from conversation."""
+    name: str = Field(description="Person's name")
+    occupation: str = Field(description="Current job title")
+    location: str = Field(description="Where they work")
+    primary_language: str = Field(description="Main programming language")
+    learning: Optional[str] = Field(description="Language currently learning", default=None)
+
+# 会話履歴から構造化データを抽出する
+result = agent(
+    "Based on our conversation, extract my profile information.",
+    structured_output_model=ProfileSummary,
+)
+
+profile = result.structured_output
+print(f"Name: {profile.name}")
+print(f"Occupation: {profile.occupation}")
+print(f"Location: {profile.location}")
+print(f"Primary: {profile.primary_language}")
+print(f"Learning: {profile.learning}")
+print(f"\nMessages in history: {len(agent.messages)}")
+```
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">04_conversation.py 全体コード（コピペ用）</summary>
+
+```python title="04_conversation.py"
+from strands import Agent
+from strands.models import BedrockModel
+from pydantic import BaseModel, Field
+from typing import Optional
+
+bedrock_model = BedrockModel(
+    model_id="us.anthropic.claude-sonnet-4-20250514-v1:0",
+    region_name="us-east-1",
+)
+
+agent = Agent(model=bedrock_model, callback_handler=None)
+agent("My name is Taro and I work as a data scientist at a startup in Tokyo.")
+agent("I've been using Python for 5 years and recently started learning Rust.")
+
+class ProfileSummary(BaseModel):
+    """Summary of a person's profile from conversation."""
+    name: str = Field(description="Person's name")
+    occupation: str = Field(description="Current job title")
+    location: str = Field(description="Where they work")
+    primary_language: str = Field(description="Main programming language")
+    learning: Optional[str] = Field(description="Language currently learning", default=None)
+
+result = agent(
+    "Based on our conversation, extract my profile information.",
+    structured_output_model=ProfileSummary,
+)
+
+profile = result.structured_output
+print(f"Name: {profile.name}")
+print(f"Occupation: {profile.occupation}")
+print(f"Location: {profile.location}")
+print(f"Primary: {profile.primary_language}")
+print(f"Learning: {profile.learning}")
+print(f"\nMessages in history: {len(agent.messages)}")
+```
+
+</details>
+
+```bash title="Terminal"
+python -u 04_conversation.py
+```
+
+### 実行結果
+
+```text title="Output"
+Name: Taro
+Occupation: data scientist
+Location: Tokyo
+Primary: Python
+Learning: Rust
+Messages in history: 7
+```
+
+2 回の会話で蓄積された情報が、3 回目の呼び出しで `ProfileSummary` として構造化された。`Optional` フィールド（`learning`）も正しく抽出されている。
+
+この手法は以下の場面で有用だ。
+
+- **チャットボットのプロファイル構築** — 会話を通じてユーザー情報を段階的に収集し、最後に構造化する
+- **会議メモの構造化** — 自由形式の会話から決定事項やアクションアイテムを抽出する
+- **フォーム入力の代替** — 会話形式で情報を集め、最終的にフォームデータとして出力する
+
+## まとめ
+
+- **Pydantic モデルを渡すだけで型安全な出力が得られる** — `structured_output_model` にモデルクラスを指定するだけ。テキストパースは不要で、IDE の型補完も効く。
+- **内部的にはツールとして動作する** — Structured Output は Pydantic モデルをツールとして LLM に登録する。メトリクスにもツールとして表示されるため、通常のツールと同じ方法でパフォーマンスを確認できる。
+- **バリデーション失敗時は LLM が自動リトライする** — `field_validator` でカスタムバリデーションを追加すると、失敗時にエラーメッセージが LLM に返され、LLM が修正して再試行する。開発者がリトライロジックを書く必要はない。
+- **会話履歴と組み合わせて情報を抽出できる** — マルチターン会話で蓄積された文脈から、任意のタイミングで構造化データを取り出せる。

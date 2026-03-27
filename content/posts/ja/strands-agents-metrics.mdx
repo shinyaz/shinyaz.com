@@ -1,0 +1,351 @@
+---
+title: "Strands Agents SDK 実践 — メトリクスでエージェントを最適化する"
+description: "Strands Agents SDK の result.metrics を深掘りし、サイクル数・トークン量・ツール実行時間を分析する。ツール設計の違いがパフォーマンスに与える影響をメトリクスで比較し、エージェントの最適化ポイントを特定する。"
+date: 2026-03-29
+published: false
+featured: false
+categories: [ai-agents]
+tags: ["strands-agents", "bedrock", "python", "ai-agents", "metrics"]
+series: "strands-agents-practical"
+seriesOrder: 5
+---
+
+## はじめに
+
+[入門第 1 回](/ja/blog/2026/03/03/strands-agents-quickstart)で `result.metrics.get_summary()` を初めて見た。サイクル数が 2 であること、トークン使用量が 4,554 であることを確認した。しかし、あの時点では「数字を見た」だけだった。
+
+`result.metrics` でサイクル数・トークン量・ツール実行時間を比較し、ボトルネックを特定できる。
+
+この記事では以下を試す。
+
+1. **メトリクスの全体像** — `get_summary()` の全フィールドを解説する
+2. **ツール別パフォーマンス分析** — どのツールがボトルネックかを特定する
+3. **サイクル数の最適化** — ツール設計の変更でサイクル数がどう変わるかを比較する
+
+公式ドキュメントは [Metrics](https://strandsagents.com/docs/user-guide/observability-evaluation/metrics/) を参照。
+
+## セットアップ
+
+[第 1 回](/ja/blog/2026/03/29/strands-agents-structured-output)の環境をそのまま使う。以降の例ではすべて同じモデル設定を使う。各例は独立した `.py` ファイルとして実行できる。共通設定を先頭に書き、その下に各例のコードを追加する形だ。
+
+```python title="Python (共通設定)"
+from strands import Agent, tool
+from strands.models import BedrockModel
+import json
+
+bedrock_model = BedrockModel(
+    model_id="us.anthropic.claude-sonnet-4-20250514-v1:0",
+    region_name="us-east-1",
+)
+```
+
+## メトリクスの全体像
+
+`result.metrics.get_summary()` が返すフィールドを整理する。
+
+```python title="Python"
+from strands_tools import calculator
+
+agent = Agent(model=bedrock_model, tools=[calculator], callback_handler=None)
+result = agent("What is 123 * 456?")
+
+summary = result.metrics.get_summary()
+print(json.dumps(summary, indent=2, default=str))
+```
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">01_overview.py 全体コード（コピペ用）</summary>
+
+```python title="01_overview.py"
+from strands import Agent
+from strands.models import BedrockModel
+from strands_tools import calculator
+import json
+
+bedrock_model = BedrockModel(
+    model_id="us.anthropic.claude-sonnet-4-20250514-v1:0",
+    region_name="us-east-1",
+)
+
+agent = Agent(model=bedrock_model, tools=[calculator], callback_handler=None)
+result = agent("What is 123 * 456?")
+
+summary = result.metrics.get_summary()
+print(json.dumps(summary, indent=2, default=str))
+```
+
+</details>
+
+```bash title="Terminal"
+python -u 01_overview.py
+```
+
+主要なフィールドは以下だ。
+
+| フィールド | 説明 |
+|---|---|
+| `total_cycles` | エージェントループの総サイクル数 |
+| `total_duration` | 全体の実行時間（秒） |
+| `accumulated_usage.inputTokens` | 入力トークン数の合計 |
+| `accumulated_usage.outputTokens` | 出力トークン数の合計 |
+| `accumulated_usage.totalTokens` | 総トークン数 |
+| `tool_usage.<name>.execution_stats.call_count` | ツールの呼び出し回数 |
+| `tool_usage.<name>.execution_stats.success_count` | 成功回数 |
+| `tool_usage.<name>.execution_stats.error_count` | エラー回数 |
+| `tool_usage.<name>.execution_stats.total_time` | ツールの総実行時間（秒） |
+| `tool_usage.<name>.execution_stats.average_time` | ツールの平均実行時間（秒） |
+| `tool_usage.<name>.execution_stats.success_rate` | 成功率（0.0〜1.0） |
+
+入門シリーズで見てきた「サイクル数」「トークン使用量」に加えて、ツールごとの実行時間と成功率が取得できる。
+
+## ツール別パフォーマンス分析
+
+実行時間が異なる 2 つのツールを用意し、どちらがボトルネックかをメトリクスで特定する。
+
+```python title="Python (実行)"
+agent = Agent(model=bedrock_model, tools=[fast_lookup, slow_analysis], callback_handler=None)
+result = agent("Look up the name and city, then analyze the sentence 'Hello World from Tokyo'")
+
+summary = result.metrics.get_summary()
+for tool_name, info in summary['tool_usage'].items():
+    stats = info['execution_stats']
+    print(f"{tool_name}:")
+    print(f"  calls={stats['call_count']}, total_time={stats['total_time']:.4f}s, avg_time={stats['average_time']:.4f}s")
+```
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">02_tool_perf.py 全体コード（コピペ用）</summary>
+
+```python title="02_tool_perf.py"
+from strands import Agent, tool
+from strands.models import BedrockModel
+import time
+
+bedrock_model = BedrockModel(
+    model_id="us.anthropic.claude-sonnet-4-20250514-v1:0",
+    region_name="us-east-1",
+)
+
+@tool
+def fast_lookup(key: str) -> str:
+    """Look up a value by key (fast operation).
+
+    Args:
+        key: The key to look up
+
+    Returns:
+        str: The value
+    """
+    data = {"name": "Taro", "city": "Tokyo", "lang": "Python"}
+    return data.get(key, "Not found")
+
+@tool
+def slow_analysis(text: str) -> str:
+    """Analyze text (slow operation that simulates processing).
+
+    Args:
+        text: The text to analyze
+
+    Returns:
+        str: Analysis result
+    """
+    time.sleep(0.5)
+    return f"Analysis of '{text}': {len(text)} chars, {len(text.split())} words"
+
+agent = Agent(model=bedrock_model, tools=[fast_lookup, slow_analysis], callback_handler=None)
+result = agent("Look up the name and city, then analyze the sentence 'Hello World from Tokyo'")
+
+summary = result.metrics.get_summary()
+for tool_name, info in summary['tool_usage'].items():
+    stats = info['execution_stats']
+    print(f"{tool_name}:")
+    print(f"  calls={stats['call_count']}, total_time={stats['total_time']:.4f}s, avg_time={stats['average_time']:.4f}s")
+```
+
+</details>
+
+```bash title="Terminal"
+python -u 02_tool_perf.py
+```
+
+### 実行結果
+
+```text title="Output"
+fast_lookup:
+  calls=2, total_time=0.0032s, avg_time=0.0016s
+slow_analysis:
+  calls=1, total_time=0.5012s, avg_time=0.5012s
+```
+
+`fast_lookup` は 2 回呼ばれて合計 0.003 秒、`slow_analysis` は 1 回で 0.5 秒。ボトルネックが `slow_analysis` であることが一目で分かる。
+
+本番環境では、この情報を使って以下の判断ができる。
+
+- **キャッシュの導入** — `slow_analysis` の結果をキャッシュして 2 回目以降を高速化する
+- **非同期化** — 重い処理をバックグラウンドで実行する
+- **ツールの分割** — 重いツールを軽い部分と重い部分に分離し、軽い部分だけで回答できるケースを増やす
+
+## サイクル数の最適化 — ツール設計の影響
+
+[入門第 2 回](/ja/blog/2026/03/03/strands-agents-custom-tools)では「ツールの責務を分離する」原則を学んだ。しかし、分離にはトレードオフがある。メトリクスで確認する。
+
+### パターン A: 分離ツール（逐次呼び出し）
+
+```python title="Python (パターン A: 実行)"
+agent_a = Agent(model=bedrock_model, tools=[get_exchange_rate, convert_currency], callback_handler=None)
+result_a = agent_a("Convert 1000 EUR to JPY")
+summary_a = result_a.metrics.get_summary()
+```
+
+### パターン B: 統合ツール（1 回の呼び出し）
+
+```python title="Python"
+@tool
+def convert_with_rate(amount: float, base: str, target: str) -> dict:
+    """Convert currency amount from base to target currency.
+
+    Args:
+        amount: The amount to convert
+        base: The base currency code
+        target: The target currency code
+
+    Returns:
+        dict: Conversion result with rate
+    """
+    rates = {("USD", "JPY"): 149.50, ("EUR", "USD"): 1.08, ("EUR", "JPY"): 161.46}
+    rate = rates.get((base.upper(), target.upper()))
+    if rate is None:
+        return {"error": f"Rate not found for {base}/{target}"}
+    return {"base": base, "target": target, "rate": rate, "original": amount, "converted": round(amount * rate, 2)}
+
+agent_b = Agent(model=bedrock_model, tools=[convert_with_rate], callback_handler=None)
+result_b = agent_b("Convert 1000 EUR to JPY")
+summary_b = result_b.metrics.get_summary()
+```
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">03_compare.py 全体コード（コピペ用）</summary>
+
+```python title="03_compare.py"
+from strands import Agent, tool
+from strands.models import BedrockModel
+
+bedrock_model = BedrockModel(
+    model_id="us.anthropic.claude-sonnet-4-20250514-v1:0",
+    region_name="us-east-1",
+)
+
+@tool
+def get_exchange_rate(base: str, target: str) -> dict:
+    """Get the current exchange rate between two currencies.
+
+    Args:
+        base: The base currency code
+        target: The target currency code
+
+    Returns:
+        dict: Exchange rate information
+    """
+    rates = {("USD", "JPY"): 149.50, ("EUR", "USD"): 1.08, ("EUR", "JPY"): 161.46}
+    rate = rates.get((base.upper(), target.upper()))
+    if rate is None:
+        return {"error": f"Rate not found for {base}/{target}"}
+    return {"base": base.upper(), "target": target.upper(), "rate": rate}
+
+@tool
+def convert_currency(amount: float, rate: float) -> dict:
+    """Convert an amount using a given exchange rate.
+
+    Args:
+        amount: The amount to convert
+        rate: The exchange rate to apply
+
+    Returns:
+        dict: Conversion result
+    """
+    return {"original": amount, "rate": rate, "converted": round(amount * rate, 2)}
+
+agent_a = Agent(model=bedrock_model, tools=[get_exchange_rate, convert_currency], callback_handler=None)
+result_a = agent_a("Convert 1000 EUR to JPY")
+summary_a = result_a.metrics.get_summary()
+
+@tool
+def convert_with_rate(amount: float, base: str, target: str) -> dict:
+    """Convert currency amount from base to target currency.
+
+    Args:
+        amount: The amount to convert
+        base: The base currency code
+        target: The target currency code
+
+    Returns:
+        dict: Conversion result with rate
+    """
+    rates = {("USD", "JPY"): 149.50, ("EUR", "USD"): 1.08, ("EUR", "JPY"): 161.46}
+    rate = rates.get((base.upper(), target.upper()))
+    if rate is None:
+        return {"error": f"Rate not found for {base}/{target}"}
+    return {"base": base, "target": target, "rate": rate, "original": amount, "converted": round(amount * rate, 2)}
+
+agent_b = Agent(model=bedrock_model, tools=[convert_with_rate], callback_handler=None)
+result_b = agent_b("Convert 1000 EUR to JPY")
+summary_b = result_b.metrics.get_summary()
+
+print("=== Comparison ===")
+print(f"Cycles: {summary_a['total_cycles']} vs {summary_b['total_cycles']}")
+print(f"Tokens: {summary_a['accumulated_usage']['totalTokens']} vs {summary_b['accumulated_usage']['totalTokens']}")
+print(f"Duration: {summary_a['total_duration']:.2f}s vs {summary_b['total_duration']:.2f}s")
+```
+
+</details>
+
+```bash title="Terminal"
+python -u 03_compare.py
+```
+
+### 比較結果
+
+```text title="Output"
+=== Comparison ===
+Cycles: 3 vs 2
+Tokens: 2270 vs 1243
+Duration: 7.31s vs 4.33s
+```
+
+| 指標 | パターン A（分離） | パターン B（統合） |
+|---|---|---|
+| サイクル数 | 3 | 2 |
+| トークン数 | 2,270 | 1,243 |
+| 実行時間 | 7.31 秒 | 4.33 秒 |
+
+分離ツールは 3 サイクル（レート取得 → 変換 → 回答）、統合ツールは 2 サイクル（変換 → 回答）で完了する。トークン数は約 45% 削減、実行時間は約 40% 短縮された。
+
+これは入門第 2 回の「責務を分離する」原則とのトレードオフだ。
+
+- **分離が有利な場面** — レート取得だけ、変換だけを単独で使うケースがある場合。テストが容易。
+- **統合が有利な場面** — 常にセットで使われるツール。パフォーマンスが重要な場合。
+
+メトリクスで実際の数値を確認し、ユースケースに応じて判断するのが重要だ。
+
+## シリーズの振り返り
+
+実践編全 5 回で、入門で作ったエージェントを「信頼できるアプリケーション」に仕上げる方法を学んだ。
+
+| 回 | テーマ | 学んだこと |
+|---|---|---|
+| [第 1 回](/ja/blog/2026/03/29/strands-agents-structured-output) | Structured Output | Pydantic モデルで型安全な出力、バリデーション自動リトライ |
+| [第 2 回](/ja/blog/2026/03/29/strands-agents-session-management) | セッション管理 | FileSessionManager で会話の永続化と復元 |
+| [第 3 回](/ja/blog/2026/03/29/strands-agents-hooks) | Hooks | ツール呼び出しの監視・制限・結果加工 |
+| [第 4 回](/ja/blog/2026/03/29/strands-agents-guardrails) | Guardrails | 入出力フィルタリングとシャドーモード |
+| 第 5 回（本記事） | メトリクス | ツール別パフォーマンス分析、サイクル数の最適化 |
+
+入門シリーズが「エージェントの基本概念を理解する」フェーズだったのに対し、実践編は「出力を予測可能にし、会話を永続化し、動作を制御し、安全性を確保し、パフォーマンスを最適化する」フェーズだ。
+
+ここから先は、[Swarm](https://strandsagents.com/docs/user-guide/concepts/multi-agent/swarm/) や [Graph](https://strandsagents.com/docs/user-guide/concepts/multi-agent/graph/) などの高度なマルチエージェントパターン、[AWS Lambda](https://strandsagents.com/docs/user-guide/deploy/deploy_to_aws_lambda/) や [Bedrock AgentCore](https://strandsagents.com/docs/user-guide/deploy/deploy_to_bedrock_agentcore/) へのデプロイ、[OpenTelemetry](https://strandsagents.com/docs/user-guide/observability-evaluation/observability/) によるオブザーバビリティなど、より高度なトピックに進むことができる。
+
+## まとめ
+
+- **`result.metrics` でサイクル数・トークン量・ツール実行時間を一覧できる** — `get_summary()` でエージェントの動作を数値として把握できる。本番環境のデバッグや最適化の起点になる。
+- **ツール別の実行時間でボトルネックを特定できる** — `tool_usage.<name>.execution_stats` で各ツールの呼び出し回数、実行時間、成功率を確認し、最適化対象を判断できる。
+- **ツール設計の違いがサイクル数とトークン量に直結する** — 分離ツール（3 サイクル, 2,270 トークン）vs 統合ツール（2 サイクル, 1,243 トークン）。メトリクスで実測し、ユースケースに応じて判断する。
+- **入門シリーズの知識が実践編で活きる** — エージェントループ（第 1 回）、ツール設計（第 2 回）、会話管理（第 4 回）、マルチエージェント（第 5 回）の理解が、実践編の各トピックの土台になっている。

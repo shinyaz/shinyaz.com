@@ -1,0 +1,364 @@
+---
+title: "Strands Agents SDK 実践 — Hooks でエージェントループを制御する"
+description: "Strands Agents SDK の Hooks でエージェントループに処理を差し込む。ツール呼び出しのログ記録、回数制限、結果の加工を実際のコードで確認し、エージェントの動作をリアルタイムで制御する方法を学ぶ。"
+date: 2026-03-29
+published: false
+featured: false
+categories: [ai-agents]
+tags: ["strands-agents", "bedrock", "python", "ai-agents", "hooks"]
+series: "strands-agents-practical"
+seriesOrder: 3
+---
+
+## はじめに
+
+[入門第 1 回](/ja/blog/2026/03/03/strands-agents-quickstart)ではメトリクスでエージェントの動作を「事後に」確認した。しかし、本番環境では「実行中に」介入したい場面がある。ツール呼び出しをログに記録したい、呼び出し回数を制限したい、結果を加工してから LLM に返したい。
+
+`add_hook` 1 行でツール呼び出しを監視・制限できる。
+
+この記事では以下を試す。
+
+1. **ツール呼び出し前のログ記録** — `BeforeToolCallEvent` でツール名とパラメータを出力する
+2. **ツール呼び出し回数の制限** — `cancel_tool` でツールを無効化する
+3. **ツール結果の加工** — `AfterToolCallEvent` で結果にフォーマットを追加する
+
+公式ドキュメントは [Hooks](https://strandsagents.com/docs/user-guide/concepts/agents/hooks/) を参照。
+
+## セットアップ
+
+[第 1 回](/ja/blog/2026/03/29/strands-agents-structured-output)の環境をそのまま使う。以降の例ではすべて同じモデル設定を使う。各例は独立した `.py` ファイルとして実行できる。共通設定と共通ツールを先頭に書き、その下に各例のコードを追加する形だ。
+
+```python title="Python (共通設定)"
+from strands import Agent, tool
+from strands.models import BedrockModel
+from strands.hooks import BeforeToolCallEvent, AfterToolCallEvent, BeforeInvocationEvent
+
+bedrock_model = BedrockModel(
+    model_id="us.anthropic.claude-sonnet-4-20250514-v1:0",
+    region_name="us-east-1",
+)
+```
+
+以降の例では共通の天気取得ツールを使う。
+
+```python title="Python (共通ツール)"
+@tool
+def get_weather(city: str) -> str:
+    """Get the current weather for a city.
+
+    Args:
+        city: The city name
+
+    Returns:
+        str: Weather information
+    """
+    weather_data = {
+        "Tokyo": "Sunny, 22°C",
+        "London": "Cloudy, 15°C",
+        "New York": "Rainy, 18°C",
+        "Paris": "Windy, 16°C",
+        "Sydney": "Clear, 25°C",
+    }
+    return weather_data.get(city, f"No data for {city}")
+```
+
+## ツール呼び出し前後のログ記録
+
+`BeforeToolCallEvent` と `AfterToolCallEvent` にコールバック関数を登録する。
+
+```python title="Python"
+def log_before_tool(event: BeforeToolCallEvent) -> None:
+    print(f"[HOOK] Before: {event.tool_use['name']}({event.tool_use['input']})")
+
+def log_after_tool(event: AfterToolCallEvent) -> None:
+    status = event.result.get("status", "unknown")
+    print(f"[HOOK] After: {event.tool_use['name']} -> {status}")
+
+agent = Agent(model=bedrock_model, tools=[get_weather], callback_handler=None)
+agent.add_hook(log_before_tool)
+agent.add_hook(log_after_tool)
+
+result = agent("What's the weather in Tokyo and London?")
+print(f"\nAnswer: {result.message['content'][0]['text']}")
+```
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">01_log.py 全体コード（コピペ用）</summary>
+
+```python title="01_log.py"
+from strands import Agent, tool
+from strands.models import BedrockModel
+from strands.hooks import BeforeToolCallEvent, AfterToolCallEvent
+
+bedrock_model = BedrockModel(
+    model_id="us.anthropic.claude-sonnet-4-20250514-v1:0",
+    region_name="us-east-1",
+)
+
+@tool
+def get_weather(city: str) -> str:
+    """Get the current weather for a city.
+
+    Args:
+        city: The city name
+
+    Returns:
+        str: Weather information
+    """
+    weather_data = {
+        "Tokyo": "Sunny, 22°C",
+        "London": "Cloudy, 15°C",
+        "New York": "Rainy, 18°C",
+    }
+    return weather_data.get(city, f"No data for {city}")
+
+def log_before_tool(event: BeforeToolCallEvent) -> None:
+    print(f"[HOOK] Before: {event.tool_use['name']}({event.tool_use['input']})")
+
+def log_after_tool(event: AfterToolCallEvent) -> None:
+    status = event.result.get("status", "unknown")
+    print(f"[HOOK] After: {event.tool_use['name']} -> {status}")
+
+agent = Agent(model=bedrock_model, tools=[get_weather], callback_handler=None)
+agent.add_hook(log_before_tool)
+agent.add_hook(log_after_tool)
+
+result = agent("What's the weather in Tokyo and London?")
+print(f"\nAnswer: {result.message['content'][0]['text']}")
+```
+
+</details>
+
+```bash title="Terminal"
+python -u 01_log.py
+```
+
+### 実行結果
+
+```text title="Output"
+[HOOK] Before: get_weather({'city': 'Tokyo'})
+[HOOK] Before: get_weather({'city': 'London'})
+[HOOK] After: get_weather -> success
+[HOOK] After: get_weather -> success
+
+Answer: Here's the current weather for both cities:
+
+**Tokyo**: Sunny, 22°C (72°F)
+**London**: Cloudy, 15°C (59°F)
+```
+
+注目すべきは、Before が 2 つ先に発火し、After が 2 つ後に発火している点だ。LLM が 2 つのツールを並列に呼び出したため、Before → Before → After → After の順序になる。
+
+`add_hook` に渡す関数の型ヒント（`BeforeToolCallEvent` / `AfterToolCallEvent`）から、SDK がどのイベントに登録するかを自動判定する。イベント型を明示的に指定する必要はない。
+
+## ツール呼び出し回数の制限
+
+`BeforeToolCallEvent` の `cancel_tool` プロパティにメッセージを設定すると、ツールの実行がキャンセルされる。
+
+```python title="Python"
+tool_count = 0
+
+def reset_count(event: BeforeInvocationEvent) -> None:
+    global tool_count
+    tool_count = 0
+
+def limit_tool_calls(event: BeforeToolCallEvent) -> None:
+    global tool_count
+    tool_count += 1
+    if tool_count > 2:
+        event.cancel_tool = (
+            f"Tool '{event.tool_use['name']}' call limit reached (max 2). "
+            "DO NOT CALL THIS TOOL ANYMORE."
+        )
+        print(f"[HOOK] BLOCKED: {event.tool_use['name']}({event.tool_use['input']})")
+    else:
+        print(f"[HOOK] ALLOWED ({tool_count}/2): {event.tool_use['name']}({event.tool_use['input']})")
+
+agent = Agent(model=bedrock_model, tools=[get_weather], callback_handler=None)
+agent.add_hook(reset_count)
+agent.add_hook(limit_tool_calls)
+
+result = agent("What's the weather in Tokyo, London, New York, Paris, and Sydney?")
+```
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">02_limit.py 全体コード（コピペ用）</summary>
+
+```python title="02_limit.py"
+from strands import Agent, tool
+from strands.models import BedrockModel
+from strands.hooks import BeforeToolCallEvent, BeforeInvocationEvent
+
+bedrock_model = BedrockModel(
+    model_id="us.anthropic.claude-sonnet-4-20250514-v1:0",
+    region_name="us-east-1",
+)
+
+@tool
+def get_weather(city: str) -> str:
+    """Get the current weather for a city.
+
+    Args:
+        city: The city name
+
+    Returns:
+        str: Weather information
+    """
+    weather_data = {
+        "Tokyo": "Sunny, 22°C",
+        "London": "Cloudy, 15°C",
+        "New York": "Rainy, 18°C",
+        "Paris": "Windy, 16°C",
+        "Sydney": "Clear, 25°C",
+    }
+    return weather_data.get(city, f"No data for {city}")
+
+tool_count = 0
+
+def reset_count(event: BeforeInvocationEvent) -> None:
+    global tool_count
+    tool_count = 0
+
+def limit_tool_calls(event: BeforeToolCallEvent) -> None:
+    global tool_count
+    tool_count += 1
+    if tool_count > 2:
+        event.cancel_tool = (
+            f"Tool '{event.tool_use['name']}' call limit reached (max 2). "
+            "DO NOT CALL THIS TOOL ANYMORE."
+        )
+        print(f"[HOOK] BLOCKED: {event.tool_use['name']}({event.tool_use['input']})")
+    else:
+        print(f"[HOOK] ALLOWED ({tool_count}/2): {event.tool_use['name']}({event.tool_use['input']})")
+
+agent = Agent(model=bedrock_model, tools=[get_weather], callback_handler=None)
+agent.add_hook(reset_count)
+agent.add_hook(limit_tool_calls)
+
+result = agent("What's the weather in Tokyo, London, New York, Paris, and Sydney?")
+```
+
+</details>
+
+```bash title="Terminal"
+python -u 02_limit.py
+```
+
+### 実行結果
+
+```text title="Output"
+[HOOK] ALLOWED (1/2): get_weather({'city': 'Tokyo'})
+[HOOK] ALLOWED (2/2): get_weather({'city': 'London'})
+[HOOK] BLOCKED: get_weather({'city': 'New York'})
+[HOOK] BLOCKED: get_weather({'city': 'Paris'})
+[HOOK] BLOCKED: get_weather({'city': 'Sydney'})
+```
+
+```text title="Output (メトリクス抜粋)"
+get_weather: calls=5, success=2, errors=3
+```
+
+5 都市分のツール呼び出しのうち、最初の 2 回だけが実行され、残り 3 回はブロックされた。ブロックされたツールはメトリクスで `errors` に計上される。LLM は「tool call limit に達した」と認識し、取得できた 2 都市分の情報だけで回答を生成した。
+
+`reset_count` を `BeforeInvocationEvent` に登録しているのは、`agent()` を複数回呼び出す場合にカウントをリセットするためだ。
+
+## ツール結果の加工
+
+`AfterToolCallEvent` の `result` プロパティを書き換えると、LLM に返される結果を変更できる。
+
+```python title="Python"
+@tool
+def calculate(expression: str) -> str:
+    """Evaluate a math expression.
+
+    Args:
+        expression: A math expression to evaluate (e.g. "2 + 3")
+
+    Returns:
+        str: The result of the calculation
+    """
+    result = eval(expression)
+    return str(result)
+
+def format_result(event: AfterToolCallEvent) -> None:
+    if event.tool_use["name"] == "calculate":
+        original = event.result["content"][0]["text"]
+        expression = event.tool_use["input"]["expression"]
+        event.result["content"][0]["text"] = f"[FORMATTED] {expression} = {original}"
+        print(f"[HOOK] Modified result: {original} -> {event.result['content'][0]['text']}")
+
+agent = Agent(model=bedrock_model, tools=[calculate], callback_handler=None)
+agent.add_hook(format_result)
+
+result = agent("What is 42 * 58?")
+print(f"\nAnswer: {result.message['content'][0]['text']}")
+```
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">03_modify.py 全体コード（コピペ用）</summary>
+
+```python title="03_modify.py"
+from strands import Agent, tool
+from strands.models import BedrockModel
+from strands.hooks import AfterToolCallEvent
+
+bedrock_model = BedrockModel(
+    model_id="us.anthropic.claude-sonnet-4-20250514-v1:0",
+    region_name="us-east-1",
+)
+
+@tool
+def calculate(expression: str) -> str:
+    """Evaluate a math expression.
+
+    Args:
+        expression: A math expression to evaluate (e.g. "2 + 3")
+
+    Returns:
+        str: The result of the calculation
+    """
+    result = eval(expression)
+    return str(result)
+
+def format_result(event: AfterToolCallEvent) -> None:
+    if event.tool_use["name"] == "calculate":
+        original = event.result["content"][0]["text"]
+        expression = event.tool_use["input"]["expression"]
+        event.result["content"][0]["text"] = f"[FORMATTED] {expression} = {original}"
+        print(f"[HOOK] Modified result: {original} -> {event.result['content'][0]['text']}")
+
+agent = Agent(model=bedrock_model, tools=[calculate], callback_handler=None)
+agent.add_hook(format_result)
+
+result = agent("What is 42 * 58?")
+print(f"\nAnswer: {result.message['content'][0]['text']}")
+```
+
+</details>
+
+```bash title="Terminal"
+python -u 03_modify.py
+```
+
+### 実行結果
+
+```text title="Output"
+[HOOK] Modified result: 2436 -> [FORMATTED] 42 * 58 = 2436
+
+Answer: 42 * 58 = 2,436
+```
+
+Hook がツール結果に `[FORMATTED]` プレフィックスと式を追加し、LLM はその加工済みの結果を受け取って回答を生成した。
+
+この手法は以下の場面で有用だ。
+
+- **結果のフォーマット統一** — 異なるツールの出力形式を統一する
+- **メタデータの付与** — 実行時間やソース情報を結果に追加する
+- **フィルタリング** — 機密情報を結果から除去してから LLM に渡す
+
+## まとめ
+
+- **`add_hook` 1 行でツール呼び出しを監視できる** — `BeforeToolCallEvent` / `AfterToolCallEvent` の型ヒントから、SDK がイベント種別を自動判定する。
+- **`cancel_tool` でツール実行をキャンセルできる** — キャンセルメッセージが LLM に返され、LLM がそれを解釈して回答に含める。ブロックされたツールはメトリクスで `errors` に計上される。
+- **`event.result` の書き換えで LLM への入力を制御できる** — ツール結果を加工してから LLM に渡すことで、出力の品質やセキュリティを向上させられる。
+- **複数の Hook を組み合わせて Plugin にまとめられる** — 関連する Hook を `Plugin` クラスにまとめると、再利用可能なモジュールになる。詳細は公式ドキュメントの [Plugins](https://strandsagents.com/docs/user-guide/concepts/plugins/) を参照。

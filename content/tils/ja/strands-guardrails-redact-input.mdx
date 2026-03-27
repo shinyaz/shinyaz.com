@@ -1,0 +1,21 @@
+---
+title: "Bedrock Guardrails 発動時にユーザー入力が自動で書き換えられる"
+description: "Strands Agents で Bedrock Guardrails がブロックすると、会話履歴のユーザー入力が [User input redacted.] に自動書き換えされる。会話履歴をデバッグしていて入力が消えていたらこれが原因。"
+date: 2026-03-29
+published: false
+tags: ["strands-agents", "bedrock", "guardrails", "python"]
+---
+
+Strands Agents SDK に Bedrock Guardrails を設定してブロックされるリクエストを送ったところ、会話履歴のユーザー入力が消えていた。
+
+```text title="Output"
+Messages after block: 2
+  [0] user      : [User input redacted.]
+  [1] assistant : Sorry, this request was blocked by guardrails.
+```
+
+元の入力（「What stocks should I buy?」）が `[User input redacted.]` に自動書き換えされている。これは後続の会話で同じ入力がガードレールに再度引っかかるのを防ぐための仕組みだった。
+
+この動作は `BedrockModel` の `guardrail_redact_input` パラメータ（デフォルト `True`）で制御できる。書き換えメッセージは `guardrail_redact_input_message` で変更可能。出力側にも同様の `guardrail_redact_output`（デフォルト `False`）がある。
+
+会話履歴をデバッグしていて「ユーザーの入力が消えている」と思ったら、ガードレールの自動書き換えを疑うとよい。

@@ -1,0 +1,21 @@
+---
+title: "Bedrock Guardrails automatically rewrites user input on block"
+description: "When Bedrock Guardrails blocks a request in Strands Agents, the user input in conversation history is auto-replaced with [User input redacted.]. If user input disappears during debugging, this is why."
+date: 2026-03-29
+published: false
+tags: ["strands-agents", "bedrock", "guardrails", "python"]
+---
+
+After setting up Bedrock Guardrails on a Strands Agents SDK agent and sending a blocked request, the user input disappeared from conversation history.
+
+```text title="Output"
+Messages after block: 2
+  [0] user      : [User input redacted.]
+  [1] assistant : Sorry, this request was blocked by guardrails.
+```
+
+The original input ("What stocks should I buy?") was auto-replaced with `[User input redacted.]`. This prevents the same input from triggering the guardrail again in subsequent conversation turns.
+
+This behavior is controlled by `BedrockModel`'s `guardrail_redact_input` parameter (default `True`). The replacement message can be changed via `guardrail_redact_input_message`. There's also a `guardrail_redact_output` (default `False`) for the output side.
+
+If user input disappears from conversation history during debugging, check for guardrail auto-redaction.

@@ -1,0 +1,21 @@
+---
+title: "Strands Agents Structured Output internally works as a tool"
+description: "Pydantic models passed to structured_output_model appear as tools in metrics tool_usage. If you see an unfamiliar tool name during debugging, it's the Structured Output mechanism."
+date: 2026-03-29
+published: false
+tags: ["strands-agents", "bedrock", "python", "structured-output"]
+---
+
+When using Strands Agents SDK's Structured Output with a `ConversionResult` Pydantic model passed to `structured_output_model`, an unexpected tool name appeared in the metrics.
+
+```text title="Output"
+tool_usage:
+  get_exchange_rate: calls=1, success=1
+  ConversionResult: calls=1, success=1
+```
+
+`ConversionResult` is counted as a tool. Structured Output internally converts the Pydantic model into a tool specification and registers it with the LLM. The LLM outputs structured data using the same tool-calling mechanism, and the SDK validates it.
+
+So the agent loop goes: LLM → call `get_exchange_rate` → receive result → call `ConversionResult` tool → validation passes → done.
+
+If you see a Pydantic model name in `tool_usage` during debugging, it's the Structured Output internals. You can also check `call_count` and `error_count` to monitor validation success rates.
