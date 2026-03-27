@@ -1,0 +1,106 @@
+---
+title: "Agentic AI security starts with treating agents like employees: Unpacking the 7 principles for financial services"
+description: "A deep dive into the AWS Security Blog's agentic AI security framework for financial services. Reorganizes the 7 design principles into three axes—permissions, traceability, and controls—with Bedrock AgentCore implementation guidance."
+date: 2026-03-27
+published: false
+featured: false
+categories: [ai-agents]
+tags: ["bedrock", "agentcore", "security", "ai-agents", "cedar"]
+---
+
+## Introduction
+
+Picture an AI agent that handles customer inquiries, checks account balances, detects suspicious transactions, and freezes transfers when needed. This scenario is already becoming reality in financial services.
+
+But what happens when that agent incorrectly freezes a legitimate transfer? Or accesses customer data it shouldn't have? With traditional software, that's a "bug." With an autonomous AI agent, it's a "governance failure."
+
+On March 26, 2026, the AWS Security Blog published [Preparing for agentic AI: A financial services approach](https://aws.amazon.com/blogs/security/preparing-for-agentic-ai-a-financial-services-approach/). The post lays out seven design principles and concrete implementation guidance for securing agentic AI in financial services.
+
+This article reorganizes those seven principles into three axes—permissions, traceability, and controls—to clarify how we should think about agentic AI security.
+
+## The Problem: Why traditional security falls short
+
+Is compliance with ISO 27001 and the NIST Cybersecurity Framework enough? The original article answers clearly—**no**.
+
+Traditional security frameworks assume deterministic software. Inputs produce predictable outputs, and access controls are designed around APIs and users. Agentic AI breaks these assumptions:
+
+- **Non-deterministic** — The same input can produce different decisions
+- **Autonomous** — Agents invoke tools and execute actions without human intervention
+- **Emergent** — Multiple agents collaborating can produce unexpected collective behaviors that no single agent was designed to exhibit
+
+Financial regulators are tightening requirements around AI explainability and accountability—SR 11-7 in the US, SS1/23 in the UK, ECB guidelines in the EU. Organizations must explain not just "what the AI did" but "why it did it" and "who is responsible."
+
+So how should we approach this challenge? The original article offers a key starting point.
+
+## The Core Idea: Human-AI Security Homology
+
+The most important concept threading through all seven principles is **Human-AI Security Homology**. The original article treats this as one of the seven principles in parallel, but I see it as the foundational idea that underpins the other six.
+
+The idea: manage AI agents with the same security rigor you apply to human employees. Identity management, separation of duties, behavioral monitoring, change management, incident response—everything you already do for people, do for agents too.
+
+This is powerful because it's an "extend" approach, not a "replace" approach. Financial institutions can apply their existing HR and security frameworks to a new kind of "employee." That framing also makes it easier to explain to regulators.
+
+So what does this look like in practice? I've reorganized the remaining six principles into three groups.
+
+## The 7 Principles Reorganized: Three Questions
+
+### Who can do what — Designing permissions
+
+**Segregated AI Least-Privilege** and **Modular Agent Workflow Architecture** belong here.
+
+The core rule: don't let a single agent do everything.
+
+- Define clear operational boundaries for each agent
+- Split workflows into specialized sub-agents with minimal permissions each
+- Make user-initiated actions distinguishable from agent-to-agent actions
+
+In human terms: a sales rep can't access the accounting system. If Agent A handles customer interactions and Agent B handles transaction processing, there's no reason to give A transaction permissions.
+
+On AWS, [Amazon Bedrock AgentCore Policy](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/policy.html) directly supports this. Cedar-based policies control which agents can invoke which tools under which conditions, enforced outside the agent code. Default deny semantics mean anything not explicitly permitted is rejected. For a hands-on walkthrough of Cedar-based tool access control, see [Controlling Agent Tool Access with Bedrock AgentCore Policy and Cedar Authorization](/en/blog/2026/03/15/bedrock-agentcore-policy-cedar-authorization).
+
+The Agents as Tools pattern in [Strands Agents SDK](/en/blog/2026/03/03/strands-agents-multi-agent) is also a useful reference for modular agent architecture — specialized sub-agents registered as tools under an orchestrator, with clear separation of responsibilities.
+
+### Can we trace what happened — Ensuring observability
+
+**Workflow and Agent Logging and Tracing** and **Governance Integration** form this group.
+
+Explainability in agentic AI depends on whether you can reconstruct "what happened" after the fact.
+
+- Trace agent inputs, reasoning steps, outputs, and tool usage end-to-end
+- Record inter-agent interactions—context sharing, handoffs, collective outputs
+- Integrate agent observability into existing governance frameworks
+
+Logging alone isn't enough. In chains of agent-to-agent actions, you must preserve the origin and lineage of each request. Going back to the opening scenario: if a transfer was frozen, you need to trace that decision back to the fraud detection agent's alert, which itself originated from a customer inquiry. For a concrete look at how multi-agent delegation works in practice, see [Agentic AI on EKS — Multi-Agent Coordination with A2A](/en/blog/2026/03/23/a2a-multi-agent-on-eks).
+
+[Amazon Bedrock AgentCore Observability](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/observability.html) provides purpose-built tracing, debugging, and monitoring for agent workflows. It supports OpenTelemetry standards, enabling integration with existing monitoring infrastructure through [AWS Distro for OpenTelemetry](https://aws.amazon.com/otel/).
+
+### How do we prevent drift — Operational controls
+
+**Agentic Operational Controls** and **Risk Management and Compliance** belong here.
+
+Even with correct permissions at design time and comprehensive logging at runtime, agent behavior can shift over time. Reasoning quality degradation, unexpected patterns, cost anomalies—you need real-time detection and intervention.
+
+- Define agent behavioral policies through business-friendly guardrails
+- Detect policy violations in real time and validate agent outputs
+- Establish human oversight workflows for critical actions with clear escalation paths
+- Monitor and optimize agent resource consumption and costs
+
+[Amazon Bedrock Guardrails](https://aws.amazon.com/bedrock/guardrails/) provides content filtering, PII detection, and response validation before agent outputs reach production systems. But operational controls go well beyond Guardrails. The original article also recommends:
+
+- Agent health and performance monitoring (AgentCore Observability)
+- Failure recovery procedures with circuit breakers
+- Reasoning quality degradation detection
+- Canary testing for staged rollouts
+- Emergent behavior detection in multi-agent workflows
+
+The original article also references a **crawl, walk, run** approach. Don't aim for perfect controls on day one. Start with the minimum required controls, then evolve based on monitoring feedback.
+
+## Summary
+
+- **AI agents are autonomous actors, not tools** — They need the same security governance as human employees. Extending existing frameworks rather than building from scratch is the pragmatic path.
+- **Understand the 7 principles through three axes** — Who can do what (AgentCore Policy), can we trace what happened (AgentCore Observability), how do we prevent drift (Guardrails + comprehensive operational monitoring). All three must work together for agentic AI governance.
+- **Crawl, walk, run** — Just as you onboard human employees gradually, start with minimum controls and monitoring for agents, then mature incrementally. This applies to any organization deploying agentic AI, not just financial services.
+
+## References
+
+- [Preparing for agentic AI: A financial services approach](https://aws.amazon.com/blogs/security/preparing-for-agentic-ai-a-financial-services-approach/) (AWS Security Blog, 2026-03-26)
