@@ -206,3 +206,7 @@ export const projects = [
     order: 2,
   },
 ];
+
+export const series = [
+  { name: "Test Series", slug: "test-series", nameJa: "テストシリーズ" },
+];

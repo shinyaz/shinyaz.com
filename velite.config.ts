@@ -83,6 +83,16 @@ const categories = defineCollection({
   }),
 });
 
+const series = defineCollection({
+  name: "Series",
+  pattern: "series/**/*.yml",
+  schema: s.object({
+    name: s.string().max(100),
+    slug: s.slug("series"),
+    nameJa: s.string().max(100).optional(),
+  }),
+});
+
 const projects = defineCollection({
   name: "Project",
   pattern: "projects/**/*.yml",
@@ -145,7 +155,7 @@ export default defineConfig({
     name: "[name]-[hash:6].[ext]",
     clean: true,
   },
-  collections: { posts, categories, pages, projects, tils },
+  collections: { posts, categories, series, pages, projects, tils },
   markdown: {
     rehypePlugins: [rehypeSlug],
   },

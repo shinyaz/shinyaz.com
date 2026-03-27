@@ -6,12 +6,14 @@ interface SeriesNavigationProps {
   seriesPosts: Post[];
   currentPermalink: string;
   locale: Locale;
+  seriesTitle?: { name: string; suffix: string };
 }
 
 export function SeriesNavigation({
   seriesPosts,
   currentPermalink,
   locale,
+  seriesTitle,
 }: SeriesNavigationProps) {
   if (seriesPosts.length < 2) return null;
 
@@ -24,13 +26,20 @@ export function SeriesNavigation({
 
   return (
     <nav
-      aria-label={t.series.title}
+      aria-label={seriesTitle ? `${seriesTitle.name}${seriesTitle.suffix}` : t.series.title}
       className="my-10 overflow-hidden rounded-lg border border-border"
     >
       <div className="border-b border-border bg-muted/50 px-5 py-2">
         <div className="flex items-center justify-between">
           <h2 className="text-[0.9375rem] font-bold tracking-tight">
-            {t.series.title}
+            {seriesTitle ? (
+              <>
+                {seriesTitle.name}
+                <span className="font-normal">{seriesTitle.suffix}</span>
+              </>
+            ) : (
+              t.series.title
+            )}
           </h2>
           <span className="text-sm text-muted-foreground">
             {currentIndex + 1} / {seriesPosts.length}
