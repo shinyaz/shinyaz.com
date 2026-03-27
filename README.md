@@ -234,6 +234,18 @@ nameJa: プログラミング
 descriptionJa: プログラミングに関する記事
 ```
 
+### Adding Series
+
+Create a `.yml` file in `content/series/`:
+
+```yaml
+name: Strands Agents SDK
+slug: strands-agents-intro
+nameJa: Strands Agents SDK 入門
+```
+
+The `slug` must match the `series` value used in post frontmatter. The series title is displayed in the series banner (top of post) and series navigation (bottom of post). `nameJa` is optional.
+
 ## SEO
 
 - **OG image**: A default Open Graph image (`public/icons/og-default.png`, 1200×630) is applied to all pages via the layout. Individual posts with a `cover` field use that as the image in BlogPosting JSON-LD.
@@ -351,6 +363,7 @@ content/
     en/                        # English pages (MDX)
     ja/                        # Japanese pages (MDX)
   categories/                  # Category definitions (YAML)
+  series/                      # Series definitions (YAML)
   projects/                    # Project definitions (YAML)
 velite.config.ts               # Velite collection schemas & MDX plugins
 vitest.config.mts              # Vitest configuration

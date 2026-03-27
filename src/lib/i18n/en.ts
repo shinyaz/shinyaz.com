@@ -86,8 +86,11 @@ export const en = {
   },
   series: {
     title: "Series",
+    seriesSuffix: " Series",
     currentPart: "this article",
     extra: "Extra",
+    prev: "Previous",
+    next: "Next",
   },
   relatedPosts: {
     title: "Related Posts",

@@ -1,6 +1,6 @@
 import type { Metadata } from "next";
 import { notFound } from "next/navigation";
-import { getPostBySlug, getRelatedPosts, getSeriesPosts } from "@/lib/posts";
+import { getPostBySlug, getRelatedPosts, getSeriesPosts, getSeriesTitle } from "@/lib/posts";
 import { formatDate, formatReadingTime } from "@/lib/utils";
 import { MdxContent } from "@/components/mdx/mdx-content";
 import { CategoryBadge } from "@/components/blog/category-badge";
@@ -13,6 +13,7 @@ import { extractHeadings } from "@/lib/toc";
 import { TableOfContents } from "@/components/blog/table-of-contents";
 import { ProfileCard } from "@/components/common/profile-card";
 import { SeriesNavigation } from "@/components/blog/series-navigation";
+import { SeriesBanner } from "@/components/blog/series-banner";
 import { generateBlogStaticParams } from "@/lib/blog-params";
 
 interface PostPageProps {
@@ -64,6 +65,7 @@ export default async function PostPage({ params }: PostPageProps) {
 
   const headings = extractHeadings(post.content);
   const seriesPosts = getSeriesPosts(post);
+  const seriesTitle = post.series ? getSeriesTitle(post.series, locale) : undefined;
   const relatedPosts = getRelatedPosts(post);
 
   const blogPostingJsonLd = {
@@ -152,6 +154,12 @@ export default async function PostPage({ params }: PostPageProps) {
             )}
           </div>
         </header>
+        <SeriesBanner
+          seriesPosts={seriesPosts}
+          currentPermalink={post.permalink}
+          locale={locale}
+          seriesTitle={seriesTitle}
+        />
         {headings.length >= 2 && (
           <TableOfContents headings={headings} locale={locale} />
         )}
@@ -162,6 +170,7 @@ export default async function PostPage({ params }: PostPageProps) {
           seriesPosts={seriesPosts}
           currentPermalink={post.permalink}
           locale={locale}
+          seriesTitle={seriesTitle}
         />
         <SocialShare
           url={`${SITE_URL}${post.permalink}`}

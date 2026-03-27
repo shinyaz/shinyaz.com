@@ -1,7 +1,7 @@
-import { posts, categories, pages, projects, tils } from "#site/content";
+import { posts, categories, pages, projects, tils, series } from "#site/content";
 import type { Post } from "#site/content";
 import { POSTS_PER_PAGE } from "./constants";
-import type { Locale } from "./i18n";
+import { getDictionary, type Locale } from "./i18n";
 
 export function getPublishedPosts(locale?: Locale) {
   return posts
@@ -100,6 +100,14 @@ export function getSeriesPosts(post: Post): Post[] {
   return getPublishedPosts(post.locale as Locale)
     .filter((p) => p.series === post.series)
     .sort((a, b) => (a.seriesOrder ?? 0) - (b.seriesOrder ?? 0));
+}
+
+export function getSeriesTitle(slug: string, locale: Locale): { name: string; suffix: string } | undefined {
+  const s = series.find((item) => item.slug === slug);
+  if (!s) return undefined;
+  const name = locale === "ja" && s.nameJa ? s.nameJa : s.name;
+  const { seriesSuffix } = getDictionary(locale).series;
+  return { name, suffix: seriesSuffix };
 }
 
 export function getRelatedPosts(post: Post, limit = 3): Post[] {

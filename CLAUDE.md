@@ -33,6 +33,7 @@ Next.js 16 App Router + Velite MDX + Tailwind CSS v4
 
 ```
 content/{posts,tils,pages}/{en,ja}/ → MDX content
+content/{categories,series}/        → YAML definitions
 src/app/[locale]/                   → Pages (all under locale prefix)
 .velite/                            → Generated (do not edit)
 ```

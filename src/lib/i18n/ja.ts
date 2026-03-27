@@ -86,8 +86,11 @@ export const ja = {
   },
   series: {
     title: "シリーズ記事",
+    seriesSuffix: " シリーズ",
     currentPart: "本記事",
     extra: "番外編",
+    prev: "前の記事",
+    next: "次の記事",
   },
   relatedPosts: {
     title: "関連記事",
