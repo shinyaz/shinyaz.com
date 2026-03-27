@@ -1,5 +1,10 @@
 import { notFound } from "next/navigation";
+import type { Metadata } from "next";
 import { isValidLocale, getDictionary } from "@/lib/i18n";
+
+export const metadata: Metadata = {
+  robots: { index: false },
+};
 
 interface OfflinePageProps {
   params: Promise<{ locale: string }>;

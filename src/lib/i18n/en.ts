@@ -76,6 +76,7 @@ export const en = {
   },
   search: {
     title: "Search",
+    description: "Search blog posts and TIL entries.",
     placeholder: "Search posts...",
     noResults: 'No posts found matching "{query}".',
     resultsCount: "{count} post(s) found",

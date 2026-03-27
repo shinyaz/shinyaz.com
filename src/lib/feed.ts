@@ -71,6 +71,7 @@ export function generateRss(locale: Locale): string {
       <link>${link}</link>
       <guid isPermaLink="true">${link}</guid>
       <pubDate>${pubDate}</pubDate>
+      <author>${escapeXml(AUTHOR)}</author>
 ${item.description ? `      <description>${escapeXml(item.description)}</description>\n` : ""}${categories}
     </item>`;
     })
@@ -117,6 +118,7 @@ export function generateAtom(locale: Locale): string {
       <id>${link}</id>
       <published>${published}</published>
       <updated>${itemUpdated}</updated>
+      <author><name>${escapeXml(AUTHOR)}</name></author>
 ${item.description ? `      <summary>${escapeXml(item.description)}</summary>\n` : ""}${categories}
     </entry>`;
     })

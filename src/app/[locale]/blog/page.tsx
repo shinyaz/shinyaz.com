@@ -13,22 +13,25 @@ interface BlogPageProps {
   searchParams: Promise<{ page?: string }>;
 }
 
-export async function generateMetadata({ params }: BlogPageProps): Promise<Metadata> {
+export async function generateMetadata({ params, searchParams }: BlogPageProps): Promise<Metadata> {
   const { locale } = await params;
   if (!isValidLocale(locale)) return {};
   const t = getDictionary(locale);
+  const { page } = await searchParams;
+  const pageNum = Math.max(1, Number(page) || 1);
+  const suffix = pageNum > 1 ? `?page=${pageNum}` : "";
   return {
     title: t.blog.title,
     description: t.blog.description,
     openGraph: {
       title: t.blog.title,
       description: t.blog.description,
-      url: `${SITE_URL}/${locale}/blog`,
+      url: `${SITE_URL}/${locale}/blog${suffix}`,
       type: "website",
     },
     alternates: {
-      canonical: `${SITE_URL}/${locale}/blog`,
-      languages: buildAlternateLanguages((l) => `/${l}/blog`),
+      canonical: `${SITE_URL}/${locale}/blog${suffix}`,
+      languages: buildAlternateLanguages((l) => `/${l}/blog${suffix}`),
     },
   };
 }

@@ -36,7 +36,7 @@ export default function sitemap(): MetadataRoute.Sitemap {
   }
 
   // Static pages: About, Projects, Uses
-  const staticPages = ["about", "projects", "uses", "privacy"];
+  const staticPages = ["about", "projects", "uses", "privacy", "now", "colophon"];
   for (const page of staticPages) {
     for (const locale of locales) {
       const pageAlternates: Record<string, string> = {};
@@ -49,6 +49,23 @@ export default function sitemap(): MetadataRoute.Sitemap {
         changeFrequency: "monthly",
         priority: 0.6,
         alternates: { languages: pageAlternates },
+      });
+    }
+  }
+
+  // Category and tag index pages
+  for (const indexPage of ["category", "tag"]) {
+    for (const locale of locales) {
+      const indexAlternates: Record<string, string> = {};
+      for (const l of locales) {
+        indexAlternates[l] = `${SITE_URL}/${l}/${indexPage}`;
+      }
+      indexAlternates["x-default"] = `${SITE_URL}/${defaultLocale}/${indexPage}`;
+      entries.push({
+        url: `${SITE_URL}/${locale}/${indexPage}`,
+        changeFrequency: "weekly",
+        priority: 0.6,
+        alternates: { languages: indexAlternates },
       });
     }
   }

@@ -1,5 +1,5 @@
 import { SITE_URL } from "./constants";
-import { locales } from "./i18n";
+import { locales, defaultLocale } from "./i18n";
 
 export function buildAlternateLanguages(
   pathFn: (locale: string) => string,
@@ -8,5 +8,6 @@ export function buildAlternateLanguages(
   for (const l of locales) {
     languages[l] = `${SITE_URL}${pathFn(l)}`;
   }
+  languages["x-default"] = `${SITE_URL}${pathFn(defaultLocale)}`;
   return languages;
 }
