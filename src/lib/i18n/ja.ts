@@ -76,6 +76,7 @@ export const ja = {
   },
   search: {
     title: "検索",
+    description: "ブログ記事やTILを検索する。",
     placeholder: "記事を検索...",
     noResults: "「{query}」に一致する記事はありませんでした。",
     resultsCount: "{count}件の記事が見つかりました",

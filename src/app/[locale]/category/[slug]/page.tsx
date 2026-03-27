@@ -24,7 +24,7 @@ export async function generateStaticParams() {
   return allParams;
 }
 
-export async function generateMetadata({ params }: CategoryPageProps): Promise<Metadata> {
+export async function generateMetadata({ params, searchParams }: CategoryPageProps): Promise<Metadata> {
   const { locale, slug } = await params;
   if (!isValidLocale(locale)) return {};
   const category = getCategoryBySlug(slug);
@@ -32,6 +32,9 @@ export async function generateMetadata({ params }: CategoryPageProps): Promise<M
 
   const name = getCategoryName(category, locale);
   const description = getCategoryDescription(category, locale);
+  const { page } = await searchParams;
+  const pageNum = Math.max(1, Number(page) || 1);
+  const suffix = pageNum > 1 ? `?page=${pageNum}` : "";
 
   return {
     title: name,
@@ -39,12 +42,12 @@ export async function generateMetadata({ params }: CategoryPageProps): Promise<M
     openGraph: {
       title: name,
       description: description ?? `${name}`,
-      url: `${SITE_URL}/${locale}/category/${slug}`,
+      url: `${SITE_URL}/${locale}/category/${slug}${suffix}`,
       type: "website",
     },
     alternates: {
-      canonical: `${SITE_URL}/${locale}/category/${slug}`,
-      languages: buildAlternateLanguages((l) => `/${l}/category/${slug}`),
+      canonical: `${SITE_URL}/${locale}/category/${slug}${suffix}`,
+      languages: buildAlternateLanguages((l) => `/${l}/category/${slug}${suffix}`),
     },
   };
 }

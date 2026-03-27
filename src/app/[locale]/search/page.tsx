@@ -25,6 +25,7 @@ export async function generateMetadata({
   const t = getDictionary(locale);
   return {
     title: t.search.title,
+    description: t.search.description,
     robots: { index: false },
     alternates: {
       canonical: `${SITE_URL}/${locale}/search`,

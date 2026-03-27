@@ -43,6 +43,8 @@ src/app/[locale]/                   → Pages (all under locale prefix)
 
 **Project-specific:** No external i18n lib (custom TS dictionaries). Tailwind v4 theme tokens: `rgb(var(--foreground))`
 
+**OG images:** Blog posts and TILs auto-generate OG images via `opengraph-image.tsx` (Next.js file-based convention). Do NOT suggest adding `openGraph.images` in `generateMetadata` for these pages.
+
 ## Critical Rules
 
 - **Server Components by default** — `"use client"` only for interactivity

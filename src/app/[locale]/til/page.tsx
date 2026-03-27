@@ -13,22 +13,25 @@ interface TilPageProps {
   searchParams: Promise<{ page?: string }>;
 }
 
-export async function generateMetadata({ params }: TilPageProps): Promise<Metadata> {
+export async function generateMetadata({ params, searchParams }: TilPageProps): Promise<Metadata> {
   const { locale } = await params;
   if (!isValidLocale(locale)) return {};
   const t = getDictionary(locale);
+  const { page } = await searchParams;
+  const pageNum = Math.max(1, Number(page) || 1);
+  const suffix = pageNum > 1 ? `?page=${pageNum}` : "";
   return {
     title: t.til.title,
     description: t.til.description,
     openGraph: {
       title: t.til.title,
       description: t.til.description,
-      url: `${SITE_URL}/${locale}/til`,
+      url: `${SITE_URL}/${locale}/til${suffix}`,
       type: "website",
     },
     alternates: {
-      canonical: `${SITE_URL}/${locale}/til`,
-      languages: buildAlternateLanguages((l) => `/${l}/til`),
+      canonical: `${SITE_URL}/${locale}/til${suffix}`,
+      languages: buildAlternateLanguages((l) => `/${l}/til${suffix}`),
     },
   };
 }

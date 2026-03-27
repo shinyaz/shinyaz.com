@@ -49,6 +49,7 @@ export async function generateMetadata({ params }: PostPageProps): Promise<Metad
       publishedTime: post.date,
       modifiedTime: post.updated,
       url: `${SITE_URL}${post.permalink}`,
+      locale: locale === "ja" ? "ja_JP" : "en_US",
       authors: [AUTHOR],
       tags: post.tags,
     },
@@ -84,8 +85,8 @@ export default async function PostPage({ params }: PostPageProps) {
       name: AUTHOR,
     },
     publisher: {
-      "@type": "Organization",
-      name: t.site.name,
+      "@type": "Person",
+      name: AUTHOR,
     },
     url: `${SITE_URL}${post.permalink}`,
     mainEntityOfPage: {

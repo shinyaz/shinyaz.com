@@ -43,6 +43,7 @@ export async function generateMetadata({ params }: TilPageProps): Promise<Metada
       publishedTime: til.date,
       modifiedTime: til.date,
       url: `${SITE_URL}${til.permalink}`,
+      locale: locale === "ja" ? "ja_JP" : "en_US",
       authors: [AUTHOR],
       tags: til.tags,
     },
@@ -62,7 +63,7 @@ export default async function TilDetailPage({ params }: TilPageProps) {
 
   const blogPostingJsonLd = {
     "@context": "https://schema.org",
-    "@type": "BlogPosting",
+    "@type": "TechArticle",
     headline: til.title,
     description: til.description,
     datePublished: til.date,
@@ -73,8 +74,8 @@ export default async function TilDetailPage({ params }: TilPageProps) {
       name: AUTHOR,
     },
     publisher: {
-      "@type": "Organization",
-      name: t.site.name,
+      "@type": "Person",
+      name: AUTHOR,
     },
     url: `${SITE_URL}${til.permalink}`,
     mainEntityOfPage: {
