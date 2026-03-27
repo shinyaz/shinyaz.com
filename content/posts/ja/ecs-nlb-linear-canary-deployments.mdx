@@ -1,0 +1,426 @@
+---
+title: "ECS + NLB で Linear / Canary デプロイを検証 — 10分遅延がステップ設計を左右する"
+description: "Amazon ECS の NLB 向け Linear / Canary デプロイを実際に構築・計測。NLB 固有の10分遅延が各ステップに累積し、ステップ数がデプロイ時間のボトルネックになることを実測データで確認した。"
+date: 2026-03-28
+published: true
+featured: false
+categories: [infrastructure]
+tags: ["aws", "ecs", "nlb", "blue-green-deployment", "devops"]
+---
+
+## はじめに
+
+2026年2月4日、AWS は [Amazon ECS が NLB (Network Load Balancer) での Linear / Canary デプロイ戦略をネイティブサポートする](https://aws.amazon.com/about-aws/whats-new/2026/02/amazon-ecs-nlb-linear-canary-deployments/)ことを発表した。これまで ALB でのみ利用可能だった段階的トラフィックシフトが、TCP/UDP ベースのワークロード（ゲームバックエンド、金融取引システム、リアルタイムメッセージングなど）でも使えるようになった。
+
+ただし NLB 利用時には、ECS が `TEST_TRAFFIC_SHIFT` と `PRODUCTION_TRAFFIC_SHIFT` のライフサイクルステージに **10分の遅延** を追加する。NLB のデータプレーンで設定されたトラフィック重みと実際のルーティングにミスマッチが生じうるための措置だが、この遅延がステップ数に応じて累積するため、ステップ設計がデプロイ全体の所要時間を大きく左右する。
+
+本記事では NLB + Linear / Canary デプロイを実際に構築・実行し、各ライフサイクルステージの所要時間を計測した結果を共有する。公式ドキュメントは [Amazon ECS linear deployments](https://docs.aws.amazon.com/AmazonECS/latest/developerguide/deployment-type-linear.html) および [Amazon ECS canary deployments](https://docs.aws.amazon.com/AmazonECS/latest/developerguide/canary-deployment.html) を参照。
+
+前提条件:
+
+- AWS CLI セットアップ済み（`ecs:*`、`elasticloadbalancing:*`、`ec2:*`、`iam:*` の操作権限）
+- テストリージョン: ap-northeast-1（東京）
+
+結果だけ知りたい場合は[比較: NLB での Linear vs Canary](#比較-nlb-での-linear-vs-canary)にスキップできる。
+
+## 環境構築
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">インフラ構築手順（VPC / NLB / ECS クラスター / サービス）</summary>
+
+### VPC・サブネット・ネットワーク
+
+```bash title="Terminal"
+# VPC
+VPC_ID=$(aws ec2 create-vpc --cidr-block 10.0.0.0/16 \
+  --tag-specifications 'ResourceType=vpc,Tags=[{Key=Name,Value=ecs-nlb-deploy-test}]' \
+  --query 'Vpc.VpcId' --output text --region ap-northeast-1)
+
+# サブネット（2 AZ）
+SUBNET_A=$(aws ec2 create-subnet --vpc-id $VPC_ID \
+  --cidr-block 10.0.1.0/24 --availability-zone ap-northeast-1a \
+  --query 'Subnet.SubnetId' --output text --region ap-northeast-1)
+SUBNET_C=$(aws ec2 create-subnet --vpc-id $VPC_ID \
+  --cidr-block 10.0.2.0/24 --availability-zone ap-northeast-1c \
+  --query 'Subnet.SubnetId' --output text --region ap-northeast-1)
+
+# インターネットゲートウェイ
+IGW_ID=$(aws ec2 create-internet-gateway \
+  --query 'InternetGateway.InternetGatewayId' --output text --region ap-northeast-1)
+aws ec2 attach-internet-gateway --internet-gateway-id $IGW_ID --vpc-id $VPC_ID --region ap-northeast-1
+
+# ルートテーブル
+RTB_ID=$(aws ec2 describe-route-tables --filters "Name=vpc-id,Values=$VPC_ID" "Name=association.main,Values=true" \
+  --query 'RouteTables[0].RouteTableId' --output text --region ap-northeast-1)
+aws ec2 create-route --route-table-id $RTB_ID --destination-cidr-block 0.0.0.0/0 --gateway-id $IGW_ID --region ap-northeast-1
+
+# パブリック IP 自動割り当て
+aws ec2 modify-subnet-attribute --subnet-id $SUBNET_A --map-public-ip-on-launch --region ap-northeast-1
+aws ec2 modify-subnet-attribute --subnet-id $SUBNET_C --map-public-ip-on-launch --region ap-northeast-1
+
+# セキュリティグループ
+SG_ID=$(aws ec2 create-security-group --group-name ecs-nlb-test-sg \
+  --description "ECS NLB deploy test" --vpc-id $VPC_ID \
+  --query 'GroupId' --output text --region ap-northeast-1)
+aws ec2 authorize-security-group-ingress --group-id $SG_ID --protocol tcp --port 80 --cidr 0.0.0.0/0 --region ap-northeast-1
+aws ec2 authorize-security-group-ingress --group-id $SG_ID --protocol tcp --port 8080 --cidr 0.0.0.0/0 --region ap-northeast-1
+```
+
+### NLB・ターゲットグループ・リスナー
+
+```bash title="Terminal"
+# NLB
+NLB_ARN=$(aws elbv2 create-load-balancer --name ecs-nlb-deploy-test \
+  --type network --subnets $SUBNET_A $SUBNET_C \
+  --query 'LoadBalancers[0].LoadBalancerArn' --output text --region ap-northeast-1)
+
+# ターゲットグループ（blue / green）
+BLUE_TG=$(aws elbv2 create-target-group --name ecs-nlb-blue-tg \
+  --protocol TCP --port 80 --vpc-id $VPC_ID --target-type ip \
+  --health-check-protocol TCP \
+  --query 'TargetGroups[0].TargetGroupArn' --output text --region ap-northeast-1)
+GREEN_TG=$(aws elbv2 create-target-group --name ecs-nlb-green-tg \
+  --protocol TCP --port 80 --vpc-id $VPC_ID --target-type ip \
+  --health-check-protocol TCP \
+  --query 'TargetGroups[0].TargetGroupArn' --output text --region ap-northeast-1)
+
+# リスナー（本番: 80、テスト: 8080）
+PROD_LISTENER=$(aws elbv2 create-listener --load-balancer-arn $NLB_ARN \
+  --protocol TCP --port 80 \
+  --default-actions Type=forward,TargetGroupArn=$BLUE_TG \
+  --query 'Listeners[0].ListenerArn' --output text --region ap-northeast-1)
+TEST_LISTENER=$(aws elbv2 create-listener --load-balancer-arn $NLB_ARN \
+  --protocol TCP --port 8080 \
+  --default-actions Type=forward,TargetGroupArn=$GREEN_TG \
+  --query 'Listeners[0].ListenerArn' --output text --region ap-northeast-1)
+```
+
+### IAM ロール
+
+```bash title="Terminal"
+# タスク実行ロール
+aws iam create-role --role-name ecsNlbTestTaskExecRole \
+  --assume-role-policy-document '{
+    "Version":"2012-10-17",
+    "Statement":[{"Effect":"Allow","Principal":{"Service":"ecs-tasks.amazonaws.com"},"Action":"sts:AssumeRole"}]
+  }'
+aws iam attach-role-policy --role-name ecsNlbTestTaskExecRole \
+  --policy-arn arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+
+# ECS インフラストラクチャロール（NLB 管理用）
+aws iam create-role --role-name ecsNlbTestInfraRole \
+  --assume-role-policy-document '{
+    "Version":"2012-10-17",
+    "Statement":[{"Effect":"Allow","Principal":{"Service":"ecs.amazonaws.com"},"Action":"sts:AssumeRole"}]
+  }'
+aws iam attach-role-policy --role-name ecsNlbTestInfraRole \
+  --policy-arn arn:aws:iam::aws:policy/AmazonECSInfrastructureRolePolicyForLoadBalancers
+```
+
+### ECS クラスター・タスク定義・サービス
+
+```bash title="Terminal"
+# クラスター
+aws ecs create-cluster --cluster-name nlb-deploy-test --region ap-northeast-1
+
+# タスク定義（v1: nginx デフォルト）
+aws ecs register-task-definition --family nlb-deploy-test \
+  --network-mode awsvpc --requires-compatibilities FARGATE \
+  --cpu 256 --memory 512 \
+  --execution-role-arn arn:aws:iam::<ACCOUNT_ID>:role/ecsNlbTestTaskExecRole \
+  --container-definitions '[{
+    "name":"web","image":"public.ecr.aws/nginx/nginx:1.27-alpine",
+    "essential":true,"portMappings":[{"containerPort":80,"protocol":"tcp"}]
+  }]' --region ap-northeast-1
+
+# サービス作成（Linear 戦略）
+aws ecs create-service --cluster nlb-deploy-test \
+  --service-name nlb-linear-test \
+  --task-definition nlb-deploy-test:1 \
+  --desired-count 1 --launch-type FARGATE \
+  --network-configuration '{
+    "awsvpcConfiguration":{"subnets":["'$SUBNET_A'","'$SUBNET_C'"],
+    "securityGroups":["'$SG_ID'"],"assignPublicIp":"ENABLED"}
+  }' \
+  --load-balancers '[{
+    "targetGroupArn":"'$BLUE_TG'","containerName":"web","containerPort":80,
+    "advancedConfiguration":{
+      "alternateTargetGroupArn":"'$GREEN_TG'",
+      "productionListenerRule":"'$PROD_LISTENER'",
+      "testListenerRule":"'$TEST_LISTENER'",
+      "roleArn":"arn:aws:iam::<ACCOUNT_ID>:role/ecsNlbTestInfraRole"
+    }
+  }]' \
+  --deployment-configuration '{
+    "maximumPercent":200,"minimumHealthyPercent":100,
+    "strategy":"LINEAR","bakeTimeInMinutes":1,
+    "linearConfiguration":{"stepPercent":50,"stepBakeTimeInMinutes":1}
+  }' --region ap-northeast-1
+
+# 安定するまで待機
+aws ecs wait services-stable --cluster nlb-deploy-test --services nlb-linear-test --region ap-northeast-1
+```
+
+</details>
+
+構成のポイント:
+
+- **NLB**: internet-facing、TCP リスナー（本番: 80、テスト: 8080）
+- **ターゲットグループ**: blue / green の2つ、IP ターゲットタイプ、TCP ヘルスチェック
+- **ECS**: Fargate、nginx コンテナ、`deploymentController=ECS`
+- **ECS インフラストラクチャロール**: `AmazonECSInfrastructureRolePolicyForLoadBalancers` ポリシーをアタッチ。NLB のリスナーやターゲットグループを ECS が操作するために必要
+
+サービスが安定したら、NLB の DNS 名で動作確認する。
+
+```bash title="Terminal"
+# NLB の DNS 名を取得
+NLB_DNS=$(aws elbv2 describe-load-balancers --names ecs-nlb-deploy-test \
+  --region ap-northeast-1 --query 'LoadBalancers[0].DNSName' --output text)
+
+# 本番ポート（80）でアクセス確認
+curl -s http://$NLB_DNS:80 | head -3
+```
+
+```text title="Output"
+<!DOCTYPE html>
+<html>
+<head>
+```
+
+nginx のデフォルトページが返れば環境構築は完了である。
+
+## 検証1: Linear デプロイ
+
+Linear 戦略（stepPercent=50.0%、stepBakeTime=1分）で新しいタスク定義をデプロイし、各ライフサイクルステージの所要時間を計測した。stepPercent=50.0% はステップ数が2回（50%→100%）となる設定で、10分遅延の累積効果を確認しつつ検証時間を現実的に抑えられる。stepBakeTime は遅延の影響を分離するため最小の1分に設定した。
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">v2 タスク定義の登録コマンド</summary>
+
+```bash title="Terminal"
+aws ecs register-task-definition --family nlb-deploy-test \
+  --network-mode awsvpc --requires-compatibilities FARGATE \
+  --cpu 256 --memory 512 \
+  --execution-role-arn arn:aws:iam::<ACCOUNT_ID>:role/ecsNlbTestTaskExecRole \
+  --container-definitions '[{
+    "name":"web","image":"public.ecr.aws/nginx/nginx:1.27-alpine",
+    "essential":true,"portMappings":[{"containerPort":80,"protocol":"tcp"}],
+    "environment":[{"name":"APP_VERSION","value":"v2"}]
+  }]' --region ap-northeast-1
+```
+
+</details>
+
+v2 のタスク定義を登録したら、`update-service` でデプロイをトリガーする。
+
+```bash title="Terminal"
+aws ecs update-service --cluster nlb-deploy-test \
+  --service nlb-linear-test \
+  --task-definition nlb-deploy-test:2 \
+  --region ap-northeast-1
+```
+
+デプロイの進行状況は `describe-service-deployments` で監視できる。以下のスクリプトで30秒間隔でステージ遷移を記録した。
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">デプロイ監視スクリプト</summary>
+
+```bash title="Terminal"
+# デプロイ ARN を取得
+DEPLOY_ARN=$(aws ecs describe-services \
+  --cluster nlb-deploy-test --services nlb-linear-test \
+  --region ap-northeast-1 \
+  --query 'services[0].currentServiceDeployment' --output text)
+
+# 30秒間隔でステージ遷移を監視
+prev_stage=""
+for i in $(seq 1 90); do
+  result=$(aws ecs describe-service-deployments \
+    --service-deployment-arns "$DEPLOY_ARN" \
+    --region ap-northeast-1 \
+    --query 'serviceDeployments[0].{status:status,stage:lifecycleStage,targetWeight:targetServiceRevision.requestedProductionTrafficWeight}' \
+    --output json)
+  stage=$(echo "$result" | jq -r '.stage // "null"')
+  status=$(echo "$result" | jq -r '.status')
+  weight=$(echo "$result" | jq -r '.targetWeight // "N/A"')
+  if [ "$stage" != "$prev_stage" ]; then
+    echo "$(date +%H:%M:%S) [STAGE CHANGE] $stage (target=$weight%)"
+    prev_stage="$stage"
+  fi
+  [ "$status" = "SUCCESSFUL" ] || [ "$status" = "FAILED" ] && break
+  sleep 30
+done
+```
+
+</details>
+
+### 計測結果
+
+上記の監視スクリプトで記録したステージ遷移は以下の通り。
+
+| ステージ | 開始時刻 | 終了時刻 | 所要時間 | トラフィック重み |
+| --- | --- | --- | --- | --- |
+| SCALE_UP | 18:52 | 18:55 | ~2分40秒 | 0% |
+| TEST_TRAFFIC_SHIFT | 18:55 | 19:05 | **~10分19秒** | 0%（テストのみ） |
+| PRODUCTION_TRAFFIC_SHIFT (step 1) | 19:05 | 19:17 | **~11分20秒** | 50% |
+| PRODUCTION_TRAFFIC_SHIFT (step 2) | 19:17 | 19:27 | **~10分18秒** | 100% |
+| BAKE_TIME | 19:27 | 19:28 | ~1分 | 100% |
+| CLEAN_UP | 19:28 | 19:29 | ~30秒 | 100% |
+| **合計** | | | **~36分** | |
+
+TEST_TRAFFIC_SHIFT に約10分、PRODUCTION_TRAFFIC_SHIFT の各ステップにも約10分（+ stepBakeTime 1分）かかっている。ドキュメントに記載されている NLB 固有の10分遅延が、TEST_TRAFFIC_SHIFT で1回、PRODUCTION_TRAFFIC_SHIFT で各ステップに1回ずつ、**計3回**発生していることが確認できた。
+
+stepBakeTime を1分に設定しているにもかかわらず、各ステップが約10〜11分かかっているのは、10分遅延が bakeTime とは別に加算されるためである。つまり各ステップの実質的な所要時間は「**10分遅延 + stepBakeTime**」となる。ただし、ドキュメントに記載されている通り、100%に到達した最後のステップでは stepBakeTime がスキップされる。実測でも step 1（50%）が約11分20秒、step 2（100%）が約10分18秒と、最後のステップが約1分短くなっており、この挙動が確認できた。
+
+## 検証2: Canary デプロイ
+
+検証1で Linear の10分遅延の累積を確認した。Canary も2段階シフト（canaryPercent→100%）なので、PRODUCTION_TRAFFIC_SHIFT での遅延発生回数は同じ2回のはずである。しかしリスク露出（最初のステップで流すトラフィック量）は大きく異なる。同程度の所要時間なら、リスク露出の小さい Canary が有利なのか？
+
+同じ NLB 環境で Canary（canaryPercent=10.0%、canaryBakeTime=1分）に切り替えてデプロイを実行した。`update-service` の `--deployment-configuration` で戦略を `CANARY` に変更すると、既存の Linear サービスをそのまま Canary に切り替えられる。
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">v3 タスク定義の登録コマンド</summary>
+
+```bash title="Terminal"
+aws ecs register-task-definition --family nlb-deploy-test \
+  --network-mode awsvpc --requires-compatibilities FARGATE \
+  --cpu 256 --memory 512 \
+  --execution-role-arn arn:aws:iam::<ACCOUNT_ID>:role/ecsNlbTestTaskExecRole \
+  --container-definitions '[{
+    "name":"web","image":"public.ecr.aws/nginx/nginx:1.27-alpine",
+    "essential":true,"portMappings":[{"containerPort":80,"protocol":"tcp"}],
+    "environment":[{"name":"APP_VERSION","value":"v3"}]
+  }]' --region ap-northeast-1
+```
+
+</details>
+
+v3 のタスク定義を登録したら、`update-service` で Canary 戦略に切り替えてデプロイをトリガーする。
+
+```bash title="Terminal"
+aws ecs update-service --cluster nlb-deploy-test \
+  --service nlb-linear-test \
+  --task-definition nlb-deploy-test:3 \
+  --deployment-configuration '{
+    "maximumPercent":200,"minimumHealthyPercent":100,
+    "strategy":"CANARY","bakeTimeInMinutes":1,
+    "canaryConfiguration":{"canaryPercent":10,"canaryBakeTimeInMinutes":1}
+  }' --region ap-northeast-1
+```
+
+監視は検証1と同じスクリプトで行った。
+
+### 計測結果
+
+| ステージ | 開始時刻 | 終了時刻 | 所要時間 | トラフィック重み |
+| --- | --- | --- | --- | --- |
+| PRE_SCALE_UP | 19:29 | 19:30 | ~31秒 | 0% |
+| SCALE_UP | 19:30 | 19:31 | ~1分33秒 | 0% |
+| TEST_TRAFFIC_SHIFT | 19:31 | 19:42 | **~10分19秒** | 0%（テストのみ） |
+| PRODUCTION_TRAFFIC_SHIFT (canary) | 19:42 | 19:53 | **~11分20秒** | 10% |
+| PRODUCTION_TRAFFIC_SHIFT (full) | 19:53 | 20:03 | **~10分18秒** | 100% |
+| BAKE_TIME | 20:03 | 20:04 | ~1分 | 100% |
+| **合計** | | | **~35分28秒** | |
+
+Linear と同様に、TEST_TRAFFIC_SHIFT で1回、PRODUCTION_TRAFFIC_SHIFT の各段階で1回ずつ、**計3回**の10分遅延が発生した。合計デプロイ時間は Linear とほぼ同一である。
+
+なお、Canary では Linear にはなかった PRE_SCALE_UP ステージが出現し、SCALE_UP も検証1（~2分40秒）より短い ~1分33秒だった。これらは戦略の違いというより、2回目のデプロイでコンテナイメージのキャッシュが効いた可能性が高い。10分遅延の発生パターンには影響しないため、比較上の差異としては無視できる。
+
+## 比較: NLB での Linear vs Canary
+
+### 実測データ
+
+| 項目 | Linear (50%×2) | Canary (10%→100%) |
+| --- | --- | --- |
+| SCALE_UP | ~2分40秒 | ~2分28秒 |
+| TEST_TRAFFIC_SHIFT | ~10分19秒 | ~10分19秒 |
+| PRODUCTION_TRAFFIC_SHIFT 合計 | ~21分38秒 | ~21分38秒 |
+| うち10分遅延の発生回数 | 3回 | 3回 |
+| BAKE_TIME | ~1分 | ~1分 |
+| 合計デプロイ時間 | ~36分 | ~35分28秒 |
+| 最初のステップでのリスク露出 | **50%** | **10%** |
+
+両戦略とも PRODUCTION_TRAFFIC_SHIFT が2段階なので、10分遅延の累積は同じである。合計デプロイ時間に実質的な差はない。
+
+### ステップ数別の想定デプロイ時間
+
+10分遅延が各ステップに加算されることが確認できたので、Linear でステップ数を増やした場合の想定デプロイ時間を計算できる。
+
+| stepPercent | ステップ数 | PRODUCTION_TRAFFIC_SHIFT | 想定合計デプロイ時間 |
+| --- | --- | --- | --- |
+| 50% | 2 | ~21分 | ~35分 |
+| 34% | 3 | ~32分 | ~46分 |
+| 25% | 4 | ~43分 | ~57分 |
+| 20% | 5 | ~54分 | ~1時間8分 |
+| 10% | 10 | ~109分 | ~2時間3分 |
+
+計算式: PRODUCTION_TRAFFIC_SHIFT ≈ (ステップ数 - 1) × (10分遅延 + stepBakeTime) + 10分遅延。最後のステップでは stepBakeTime がスキップされるため、単純な「ステップ数 × 11分」ではなく、最後のステップ分だけ bakeTime を引く。上の表は stepBakeTime=1分で計算している。
+
+ステップ数に比例して10分遅延が累積するため、ステップ数の選択がデプロイ時間に直結する。たとえば stepBakeTime=1分の場合、2ステップなら PROD だけで ~21分だが、10ステップでは ~109分になる。許容できるデプロイ時間から逆算してステップ数を決めるとよい。
+
+### 選択指針
+
+実測データから、以下の傾向が読み取れる。
+
+- **同じステップ数なら Canary が有利** — 2段階シフトの所要時間は同じだが、Canary は最初のステップで10%のトラフィックしか流さないため、問題発生時の影響範囲が小さい
+- **段階的な負荷確認が必要なら Linear** — 50%→100% のように中間状態でメトリクスを確認したい場合は Linear が適する。ただしステップ数に比例して10分遅延が累積するため、許容デプロイ時間から逆算してステップ数を決める必要がある
+- **NLB の10分遅延は ALB にはない** — ALB で Linear/Canary を使う場合はこの遅延が発生しないため、ステップ数の制約は緩い。NLB を選択する理由（TCP/UDP、静的 IP、低レイテンシ）がある場合にのみ、この遅延を受け入れる判断になる
+
+## まとめ
+
+- **10分遅延の正体は bakeTime とは別枠の固定コスト** — stepBakeTime や canaryBakeTime をいくら短くしても、NLB では各ステップに10分が上乗せされる。デプロイ時間の見積もりには `(ステップ数 - 1) × (10分 + bakeTime) + 10分` に加え、TEST_TRAFFIC_SHIFT の10分も含める必要がある
+- **NLB の段階的デプロイは「ステップ数の予算管理」** — 許容デプロイ時間を先に決め、そこからステップ数を逆算する設計が求められる。上のステップ数別テーブルを参考に、自分のワークロードに合ったステップ数を選んでほしい
+- **戦略選択よりロードバランサー選択のほうが影響が大きい** — Linear vs Canary の差はリスク露出の違いだけだが、NLB vs ALB の差はデプロイ時間そのものに影響する。NLB を使う理由（TCP/UDP、静的 IP）がなければ、ALB のほうがデプロイ設計の自由度が高い
+
+## クリーンアップ
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">リソース削除コマンド</summary>
+
+```bash title="Terminal"
+# ECS サービス削除
+aws ecs update-service --cluster nlb-deploy-test --service nlb-linear-test --desired-count 0 --region ap-northeast-1
+aws ecs delete-service --cluster nlb-deploy-test --service nlb-linear-test --force --region ap-northeast-1
+
+# タスク定義の登録解除
+for rev in 1 2 3; do
+  aws ecs deregister-task-definition --task-definition nlb-deploy-test:$rev --region ap-northeast-1
+done
+
+# ECS クラスター削除
+aws ecs delete-cluster --cluster nlb-deploy-test --region ap-northeast-1
+
+# リスナー削除
+aws elbv2 delete-listener --listener-arn $PROD_LISTENER --region ap-northeast-1
+aws elbv2 delete-listener --listener-arn $TEST_LISTENER --region ap-northeast-1
+
+# ターゲットグループ削除
+aws elbv2 delete-target-group --target-group-arn $BLUE_TG --region ap-northeast-1
+aws elbv2 delete-target-group --target-group-arn $GREEN_TG --region ap-northeast-1
+
+# NLB 削除
+aws elbv2 delete-load-balancer --load-balancer-arn $NLB_ARN --region ap-northeast-1
+
+# IAM ロール削除
+aws iam detach-role-policy --role-name ecsNlbTestTaskExecRole \
+  --policy-arn arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+aws iam delete-role --role-name ecsNlbTestTaskExecRole
+aws iam detach-role-policy --role-name ecsNlbTestInfraRole \
+  --policy-arn arn:aws:iam::aws:policy/AmazonECSInfrastructureRolePolicyForLoadBalancers
+aws iam delete-role --role-name ecsNlbTestInfraRole
+
+# セキュリティグループ削除
+aws ec2 delete-security-group --group-id $SG_ID --region ap-northeast-1
+
+# IGW デタッチ・削除
+aws ec2 detach-internet-gateway --internet-gateway-id $IGW_ID --vpc-id $VPC_ID --region ap-northeast-1
+aws ec2 delete-internet-gateway --internet-gateway-id $IGW_ID --region ap-northeast-1
+
+# サブネット削除
+aws ec2 delete-subnet --subnet-id $SUBNET_A --region ap-northeast-1
+aws ec2 delete-subnet --subnet-id $SUBNET_C --region ap-northeast-1
+
+# VPC 削除
+aws ec2 delete-vpc --vpc-id $VPC_ID --region ap-northeast-1
+```
+
+</details>

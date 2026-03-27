@@ -1,0 +1,29 @@
+---
+title: "ECS の NLB 用インフラロールポリシーの ARN に service-role/ プレフィックスはない"
+description: "AmazonECSInfrastructureRolePolicyForLoadBalancers の ARN は service-role/ なし。他の ECS ポリシーと同じパターンで書くと AttachRolePolicy が失敗する。"
+date: 2026-03-28
+published: true
+tags: ["aws", "ecs", "iam"]
+---
+
+ECS の NLB 用インフラロールに `AmazonECSInfrastructureRolePolicyForLoadBalancers` をアタッチしようとして、他の ECS ポリシーと同じノリで書いたら失敗した。
+
+```bash title="Terminal"
+# ❌ これは失敗する
+aws iam attach-role-policy --role-name myRole \
+  --policy-arn arn:aws:iam::aws:policy/service-role/AmazonECSInfrastructureRolePolicyForLoadBalancers
+```
+
+```text title="Output"
+An error occurred (NoSuchEntity) when calling the AttachRolePolicy operation: Policy ... does not exist or is not attachable.
+```
+
+正しい ARN は `service-role/` プレフィックスなし。
+
+```bash title="Terminal"
+# ✅ こちらが正しい
+aws iam attach-role-policy --role-name myRole \
+  --policy-arn arn:aws:iam::aws:policy/AmazonECSInfrastructureRolePolicyForLoadBalancers
+```
+
+`AmazonECSTaskExecutionRolePolicy` は `arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy` なので、同じパターンだと思い込みやすい。さらに厄介なことに、同じ `AmazonECSInfrastructureRolePolicyFor*` シリーズでも `ForVolumes` や `ForServiceConnectTransportLayerSecurity` は `service-role/` 付きで、`ForLoadBalancers` や `ForVpcLattice` にはない。`aws iam list-policies --scope AWS --query "Policies[?starts_with(PolicyName,'AmazonECS')].[PolicyName,Arn]"` で確認するのが確実である。

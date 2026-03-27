@@ -1,0 +1,29 @@
+---
+title: "ECS NLB infra role policy ARN has no service-role/ prefix"
+description: "AmazonECSInfrastructureRolePolicyForLoadBalancers ARN doesn't use the service-role/ prefix. Using the same pattern as other ECS policies causes AttachRolePolicy to fail."
+date: 2026-03-28
+published: true
+tags: ["aws", "ecs", "iam"]
+---
+
+Tried attaching `AmazonECSInfrastructureRolePolicyForLoadBalancers` to an ECS infra role using the same ARN pattern as other ECS policies. It failed.
+
+```bash title="Terminal"
+# ❌ This fails
+aws iam attach-role-policy --role-name myRole \
+  --policy-arn arn:aws:iam::aws:policy/service-role/AmazonECSInfrastructureRolePolicyForLoadBalancers
+```
+
+```text title="Output"
+An error occurred (NoSuchEntity) when calling the AttachRolePolicy operation: Policy ... does not exist or is not attachable.
+```
+
+The correct ARN has no `service-role/` prefix.
+
+```bash title="Terminal"
+# ✅ Correct
+aws iam attach-role-policy --role-name myRole \
+  --policy-arn arn:aws:iam::aws:policy/AmazonECSInfrastructureRolePolicyForLoadBalancers
+```
+
+Easy to get wrong because `AmazonECSTaskExecutionRolePolicy` uses `arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy`. Even within the `AmazonECSInfrastructureRolePolicyFor*` family, `ForVolumes` and `ForServiceConnectTransportLayerSecurity` have the `service-role/` prefix while `ForLoadBalancers` and `ForVpcLattice` don't. Safest to verify with `aws iam list-policies --scope AWS --query "Policies[?starts_with(PolicyName,'AmazonECS')].[PolicyName,Arn]"`.

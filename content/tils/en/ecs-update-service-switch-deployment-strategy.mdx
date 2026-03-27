@@ -1,0 +1,24 @@
+---
+title: "ECS update-service can dynamically switch between Linear and Canary"
+description: "No need to recreate the ECS service — update-service with --deployment-configuration switches between Linear and Canary strategies in place."
+date: 2026-03-28
+published: true
+tags: ["aws", "ecs", "blue-green-deployment"]
+---
+
+I assumed switching an ECS service from Linear to Canary deployment would require recreating the service.
+
+Turns out, just passing a different `strategy` in `--deployment-configuration` to `update-service` does the trick.
+
+```bash title="Terminal"
+aws ecs update-service --cluster my-cluster \
+  --service my-service \
+  --task-definition my-task:2 \
+  --deployment-configuration '{
+    "maximumPercent":200,"minimumHealthyPercent":100,
+    "strategy":"CANARY","bakeTimeInMinutes":1,
+    "canaryConfiguration":{"canaryPercent":10,"canaryBakeTimeInMinutes":1}
+  }'
+```
+
+The load balancer configuration (target groups, listeners, infra role) is already set at service creation time, so switching strategies only requires `--deployment-configuration`. Used this in my [NLB Linear / Canary verification article](/en/blog/2026/03/28/ecs-nlb-linear-canary-deployments).

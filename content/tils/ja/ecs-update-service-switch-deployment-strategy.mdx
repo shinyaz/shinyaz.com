@@ -1,0 +1,24 @@
+---
+title: "ECS の update-service で Linear ↔ Canary を動的に切り替えられる"
+description: "ECS サービスの再作成なしに、update-service の --deployment-configuration で Linear と Canary を動的に切り替えられることを確認した。"
+date: 2026-03-28
+published: true
+tags: ["aws", "ecs", "blue-green-deployment"]
+---
+
+ECS で Linear デプロイを設定したサービスを Canary に変えたいとき、サービスの再作成が必要だと思っていた。
+
+実際には `update-service` の `--deployment-configuration` で `strategy` を変更するだけで、既存サービスをそのまま切り替えられる。
+
+```bash title="Terminal"
+aws ecs update-service --cluster my-cluster \
+  --service my-service \
+  --task-definition my-task:2 \
+  --deployment-configuration '{
+    "maximumPercent":200,"minimumHealthyPercent":100,
+    "strategy":"CANARY","bakeTimeInMinutes":1,
+    "canaryConfiguration":{"canaryPercent":10,"canaryBakeTimeInMinutes":1}
+  }'
+```
+
+ロードバランサーの設定（ターゲットグループ、リスナー、インフラロール）はサービス作成時に設定済みなので、戦略の切り替えだけなら `--deployment-configuration` のみで完結する。[NLB での Linear / Canary 検証記事](/ja/blog/2026/03/28/ecs-nlb-linear-canary-deployments)で実際に使った。
