@@ -502,7 +502,7 @@ Query 6:   3 ms (cache HIT)
 
 Query 1 took 878ms (DB fetch + Valkey write). From Query 2 onward, cache hits reduced latency to 2-12ms. Query 2's 12ms reflects Valkey connection pool warmup; Query 3+ stabilized at 2-4ms.
 
-In the [ElastiCache Serverless test](/en/blog/2026/03/27/jdbc-query-cache-valkey-serverless), the first connection always timed out and CacheMonitor entered SUSPECT state. **With node-based (no TLS), the first query completed normally.** The absence of TLS handshake overhead is the key difference. See the [next article](/en/blog/2026/03/27/jdbc-query-cache-valkey-serverless) for details on the Serverless behavior.
+In the [ElastiCache Serverless test](/en/blog/2026/03/27/jdbc-query-cache-valkey-serverless), different behavior was observed, but **with node-based, the first query completed normally.** See the [next article](/en/blog/2026/03/27/jdbc-query-cache-valkey-serverless) for details on the Serverless behavior.
 
 ## Test 2: Performance Comparison
 
@@ -576,7 +576,7 @@ For reference, I also tested a lightweight query returning only 3 rows (~3ms wit
 | Min | 2 ms | 2 ms |
 | Max | 7 ms | 13 ms |
 
-With node-based (no TLS), cache overhead is near zero, so lightweight queries don't suffer performance degradation. However, the improvement margin is also small — the cache benefit scales with query weight.
+With node-based, cache overhead is near zero, so lightweight queries don't suffer performance degradation. However, the improvement margin is also small — the cache benefit scales with query weight.
 
 ## Test 3: Cache Staleness and TTL
 
@@ -607,7 +607,7 @@ When stale data from a long TTL becomes problematic, the docs suggest:
 ## Summary
 
 - **Up to 300x speedup for heavy aggregate queries** — A window function query over 1 million rows dropped from 749ms to 2ms. Cache hit latency is independent of query complexity, stabilizing at 1-4ms. The heavier the query, the greater the benefit
-- **No initial timeout with node-based (no TLS)** — ElastiCache Serverless always timed out on the first connection, but node-based worked from the first query. The absence of TLS handshake overhead is the key factor. See the [next article](/en/blog/2026/03/27/jdbc-query-cache-valkey-serverless) for the Serverless findings
+- **Node-based works reliably from the first query** — In this setup, caching worked correctly from the very first query. For behavior with ElastiCache Serverless, see the [next article](/en/blog/2026/03/27/jdbc-query-cache-valkey-serverless)
 - **Setup requires only JDBC driver configuration changes** — Change the connection URL, enable the plugin, set the cache endpoint. The only application code change is adding comment hints to queries. Impact on existing codebases is minimal
 - **TTL is the sole consistency control** — After data updates, stale values are returned until TTL expires. Don't add cache hints to queries requiring strong consistency. Set TTL based on your acceptable staleness window
 
