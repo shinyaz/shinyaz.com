@@ -335,7 +335,7 @@ java -cp "$CP" cachetest.QueryCacheTest \
 
 </details>
 
-## Test: Initial Connection and Cache Behavior
+## Test 1: Initial Connection and Cache Behavior (10-row table)
 
 Ran the same query 8 times on a single connection to observe cache behavior.
 
@@ -368,11 +368,60 @@ SEVERE: Non-recoverable error (DATA) for jdbc-cache-test-xxx:6379:
 
 The internal borrow timeout is hardcoded at 100ms, which is shorter than the TLS handshake time for ElastiCache Serverless.
 
+## Test 2: Do Heavy Queries Hit the Same Issues? (1M-row table)
+
+Tested with 1 million rows and the same aggregate queries from the [node-based article](/en/blog/2026/03/27/jdbc-query-cache-valkey-node-based) to check whether the initial timeout still occurs and how cache performance compares.
+
+Test data was replaced with 1 million rows (see the [node-based article](/en/blog/2026/03/27/jdbc-query-cache-valkey-node-based) setup for the INSERT statement).
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">Test 2 reproduction steps</summary>
+
+Replace test data with 1 million rows.
+
+```bash title="Terminal"
+PGPASSWORD='<password>' psql -h <aurora-endpoint> -U postgres -d postgres -c "
+TRUNCATE products;
+INSERT INTO products (name, category, price, stock)
+SELECT
+  'Product-' || i,
+  (ARRAY['laptop','phone','tablet','audio','camera','monitor','keyboard','mouse'])[1 + (i % 8)],
+  (random() * 500000 + 1000)::numeric(10,2),
+  (random() * 1000)::int
+FROM generate_series(1, 1000000) AS i;
+ANALYZE products;
+"
+```
+
+Use the `QueryCacheTest.java` from the [node-based article](/en/blog/2026/03/27/jdbc-query-cache-valkey-node-based), modified for Serverless: remove the `cacheUseSSL` setting (Serverless requires TLS, default is `true`).
+
+</details>
+
+```text title="Output"
+[Category stats]
+  No Cache: avg=410.3, median=401.0, min=322, max=500
+  Cached:   avg=36.9, median=2.5, min=1, max=344
+
+[Price tier]
+  No Cache: avg=421.4, median=404.0, min=333, max=513
+  Cached:   avg=1.4, median=1.0, min=1, max=3
+
+[Window function]
+  No Cache: avg=847.6, median=753.5, min=643, max=1400
+  Cached:   avg=1.1, median=1.0, min=1, max=2
+```
+
+The initial timeout and CacheMonitor SUSPECT transition occurred with heavy queries too. Category stats Cached max=344ms is from the CacheMonitor bypassing the cache during SUSPECT state, falling back to the database.
+
+However, after CacheMonitor recovered to HEALTHY, cache hits stabilized at 1-2ms — on par with node-based. This contrasts with the 90-216ms seen in Test 1 with the 10-row table. The difference is that aggregate results are just a few rows, so TLS overhead is relatively small compared to the serialized result set.
+
+**The initial timeout is a Serverless-specific issue, but once stable, heavy queries benefit from caching just as effectively.**
+
 ## Summary
 
 - **The first connection always times out** — The TLS handshake to ElastiCache Serverless exceeds the plugin's internal connection timeout (default 2s). Even increasing `cacheConnectionTimeoutMs` to 10s or 30s doesn't help because the Valkey Glide client has its own timeout. The first query always falls back to the database as a cache miss, adding significant latency at application startup
 - **CacheMonitor health checks consistently fail** — The internal connection pool borrow timeout is fixed at 100ms, shorter than ElastiCache Serverless TLS connection establishment. Health checks always report `Non-recoverable error (DATA)`, but the data-path cache reads/writes use a separate path and still function. However, the unstable health state causes intermittent cache bypasses
-- **Cache hit latency is ~90-216ms** — Compared to 2-4ms with node-based (no TLS), this is significantly slower. TLS connection overhead dominates. For heavy queries (hundreds of ms or more), caching still provides a benefit, but for lightweight queries the cache overhead may exceed the query time itself
+- **Cache hit latency depends on result set size** — Simple queries against a 10-row table showed 90-216ms, but aggregate queries against 1 million rows (returning just a few rows) achieved 1-2ms — on par with node-based. The high latency with the 10-row table is likely because TLS overhead dominated relative to the small serialized result set. For heavy queries, Serverless caching still delivers significant benefit
 - **Fail-safe behavior works correctly** — When the cache is unhealthy, the plugin automatically falls back to the database. With `failWhenCacheDown` set to `false` (default), cache issues never cascade into application failures
 
 With ElastiCache Serverless, the initial connection timeout and CacheMonitor instability are significant concerns. As confirmed in the [node-based article](/en/blog/2026/03/27/jdbc-query-cache-valkey-node-based), a node-based ElastiCache cluster (without TLS) does not exhibit these issues and works correctly from the first query. I strongly recommend testing with your actual query patterns and latency requirements before production adoption.

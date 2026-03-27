@@ -336,7 +336,7 @@ java -cp "$CP" cachetest.QueryCacheTest \
 
 </details>
 
-## 検証: 初回接続とキャッシュの挙動
+## 検証1: 初回接続とキャッシュの挙動（10行テーブル）
 
 同一コネクションで同じクエリを8回実行し、キャッシュの動作を確認した。
 
@@ -369,11 +369,60 @@ SEVERE: Non-recoverable error (DATA) for jdbc-cache-test-xxx:6379:
 
 これは CacheMonitor 内部の接続プールの borrow タイムアウトが 100ms に固定されており、ElastiCache Serverless の TLS ハンドシェイク時間がこれを超えるために発生している。ヘルスチェックは常に失敗するが、データパス（実際のキャッシュ読み書き）は別の接続プールを使うため、キャッシュ自体は動作する。
 
+## 検証2: 重いクエリでも同じ問題が発生するか（100万行テーブル）
+
+[1本目の記事](/ja/blog/2026/03/27/jdbc-query-cache-valkey-node-based)と同じ100万行のデータと集計クエリで、Serverless でも初回タイムアウトが発生するか、安定後のキャッシュ効果はどうかを確認した。
+
+テストデータは100万行に差し替えた（手順は[1本目の記事](/ja/blog/2026/03/27/jdbc-query-cache-valkey-node-based)の環境構築を参照）。
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">検証2の実行手順</summary>
+
+テストデータを100万行に差し替える。
+
+```bash title="Terminal"
+PGPASSWORD='<password>' psql -h <aurora-endpoint> -U postgres -d postgres -c "
+TRUNCATE products;
+INSERT INTO products (name, category, price, stock)
+SELECT
+  'Product-' || i,
+  (ARRAY['laptop','phone','tablet','audio','camera','monitor','keyboard','mouse'])[1 + (i % 8)],
+  (random() * 500000 + 1000)::numeric(10,2),
+  (random() * 1000)::int
+FROM generate_series(1, 1000000) AS i;
+ANALYZE products;
+"
+```
+
+[1本目の記事](/ja/blog/2026/03/27/jdbc-query-cache-valkey-node-based)の `QueryCacheTest.java` を Serverless 用に修正して実行する。変更点は `cacheUseSSL` の設定を削除するだけだ（Serverless は TLS 必須、デフォルト `true`）。
+
+</details>
+
+```text title="Output"
+[Category stats]
+  No Cache: avg=410.3, median=401.0, min=322, max=500
+  Cached:   avg=36.9, median=2.5, min=1, max=344
+
+[Price tier]
+  No Cache: avg=421.4, median=404.0, min=333, max=513
+  Cached:   avg=1.4, median=1.0, min=1, max=3
+
+[Window function]
+  No Cache: avg=847.6, median=753.5, min=643, max=1400
+  Cached:   avg=1.1, median=1.0, min=1, max=2
+```
+
+初回タイムアウトと CacheMonitor の SUSPECT 遷移は重いクエリでも変わらず発生した。Category stats の Cached max=344ms は、CacheMonitor が SUSPECT 状態の間にキャッシュがバイパスされ DB にフォールバックした結果だ。
+
+一方、CacheMonitor が HEALTHY に回復した後のキャッシュヒットは 1-2ms で、ノードベースと同等だった。10行テーブルでの検証1では 90-216ms だったキャッシュヒットが、100万行の集計クエリ（結果は数行）では大幅に速い。これは結果セットのサイズが小さいため、TLS のオーバーヘッドが相対的に小さくなるためだ。
+
+**初回タイムアウトは Serverless 固有の問題だが、安定後は重いクエリであれば十分にキャッシュの効果が得られる。**
+
 ## まとめ
 
 - **初回接続で必ずタイムアウトが発生する** — ElastiCache Serverless の TLS ハンドシェイクが、プラグイン内部の接続タイムアウト（デフォルト2秒）を超える。`cacheConnectionTimeoutMs` を 10秒や30秒に増やしても、Valkey Glide クライアント側のタイムアウトで失敗する。初回クエリは常にキャッシュミスとして DB にフォールバックするため、アプリケーションの起動直後に余分なレイテンシが発生する
 - **CacheMonitor のヘルスチェックが常に失敗する** — 内部の接続プール borrow タイムアウトが 100ms に固定されており、ElastiCache Serverless の TLS 接続確立時間がこれを超える。ヘルスチェックは常に `Non-recoverable error (DATA)` を報告するが、データパスのキャッシュ読み書きは別経路で動作するため、キャッシュ自体は機能する。ただし、ヘルスチェック失敗によりキャッシュがバイパスされるタイミングがあり、動作が不安定になる
-- **キャッシュヒット時のレイテンシは約90-216ms** — ノードベース（TLS なし）の 2-4ms と比較して大幅に遅い。TLS 接続のオーバーヘッドが支配的だ。重いクエリ（数百ms以上）であればそれでも効果はあるが、軽量クエリではキャッシュのオーバーヘッドが上回る可能性がある
+- **キャッシュヒット時のレイテンシは結果セットのサイズに依存する** — 10行テーブルへの単純クエリでは 90-216ms だったが、100万行テーブルへの集計クエリ（結果は数行）では 1-2ms とノードベースと同等だった。10行テーブルでレイテンシが大きかったのは、結果セット全体のシリアライズ/デシリアライズに対して TLS のオーバーヘッドが相対的に大きかったためと考えられる。重いクエリであれば Serverless でもキャッシュの効果は十分に得られる
 - **フェイルセーフは正しく動作する** — キャッシュ障害時は自動的に DB にフォールバックし、アプリケーションは正常に動作し続ける。`failWhenCacheDown` を `false`（デフォルト）にしておけば、キャッシュの問題がアプリケーション障害に波及しない
 
 ElastiCache Serverless との組み合わせでは、初回接続のタイムアウトと CacheMonitor の不安定さが課題だ。[1本目の記事](/ja/blog/2026/03/27/jdbc-query-cache-valkey-node-based)で検証した通り、ノードベースの ElastiCache クラスター（TLS なし）ではこれらの問題は発生せず、初回から正常に動作する。本番導入を検討する場合は、実際のクエリパターンとレイテンシ要件で事前検証することを強く推奨する。
