@@ -30,7 +30,7 @@ export function SeriesNavigation({
       className="my-10 overflow-hidden rounded-lg border border-border"
     >
       <div className="border-b border-border bg-muted/50 px-5 py-2">
-        <div className="flex items-center justify-between">
+        <div className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1">
           <h2 className="text-[0.9375rem] font-bold tracking-tight">
             {seriesTitle ? (
               <>

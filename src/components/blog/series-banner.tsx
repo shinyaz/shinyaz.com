@@ -33,7 +33,7 @@ export function SeriesBanner({
       className="mb-8 overflow-hidden rounded-lg border border-border"
     >
       <div className="px-5 py-3">
-        <div className="flex items-center justify-between">
+        <div className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1">
           <span className="text-[0.9375rem] font-bold tracking-tight">
             {seriesTitle ? (
               <>
