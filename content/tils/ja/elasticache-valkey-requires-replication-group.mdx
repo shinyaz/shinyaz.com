@@ -1,0 +1,39 @@
+---
+title: "ElastiCache for Valkey のノードベースクラスターは CreateCacheCluster ではなく CreateReplicationGroup で作る"
+description: "aws elasticache create-cache-cluster --engine valkey が InvalidParameterValue で失敗する。Valkey エンジンは CreateReplicationGroup API が必須だった。"
+date: "2026-03-27"
+published: true
+tags: ["aws", "elasticache", "valkey"]
+---
+
+[JDBC Wrapper の Valkey キャッシュ検証](/ja/blog/2026/03/27/jdbc-query-cache-valkey-node-based)で ElastiCache for Valkey のノードベースクラスターを作ろうとして嵌った。
+
+Redis OSS と同じ感覚で `create-cache-cluster` を使ったらエラーになった。
+
+```bash title="Terminal"
+aws elasticache create-cache-cluster \
+  --cache-cluster-id my-valkey \
+  --engine valkey \
+  --cache-node-type cache.t3.micro \
+  --num-cache-nodes 1
+```
+
+```text title="Output"
+An error occurred (InvalidParameterValue) when calling the CreateCacheCluster
+operation: This API doesn't support Valkey engine. Please use
+CreateReplicationGroup API for Valkey cluster creation.
+```
+
+Valkey エンジンは単一ノードであっても `create-replication-group` が必要だ。
+
+```bash title="Terminal"
+aws elasticache create-replication-group \
+  --replication-group-id my-valkey \
+  --replication-group-description "Single node Valkey" \
+  --engine valkey \
+  --cache-node-type cache.t3.micro \
+  --num-cache-clusters 1 \
+  --no-transit-encryption-enabled
+```
+
+エラーメッセージが親切なので気づけるが、Redis OSS からの移行時やスクリプトの書き換え時に見落としやすい。

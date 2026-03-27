@@ -1,0 +1,649 @@
+---
+title: "JDBC Wrapper Valkey キャッシュ検証 — 100万行の集計クエリを最大300倍高速化"
+description: "AWS Advanced JDBC Wrapper 3.3.0 の Remote Query Cache Plugin を Aurora PostgreSQL（100万行）+ ElastiCache for Valkey（ノードベース）で検証。749msの集計クエリが2msに短縮。TTL による整合性制御も期待通り動作した。"
+date: 2026-03-27
+published: true
+featured: false
+categories: [infrastructure]
+tags: ["aws", "aurora", "postgresql", "elasticache", "valkey", "java", "jdbc", "database"]
+series: "jdbc-query-cache-valkey"
+seriesOrder: 1
+---
+
+## はじめに
+
+2026年3月26日、AWS は [AWS Advanced JDBC Wrapper が Valkey による自動クエリキャッシュに対応した](https://aws.amazon.com/about-aws/whats-new/2026/03/aws-jdbc-caching-with-valkey/)ことを発表した。JDBC ドライバの設定変更だけで、アプリケーションコードをほぼ書き換えずにクエリ結果を ElastiCache にキャッシュできる機能だ。
+
+従来、クエリキャッシュを導入するにはクエリごとにキャッシュの保存・取得コードを手動で書く必要があった。Remote Query Cache Plugin はこの手間を JDBC ドライバレベルで吸収する。SQL コメントに `/* CACHE_PARAM(ttl=300s) */` と書くだけでキャッシュ対象を指定できる。
+
+本記事では、Aurora PostgreSQL Serverless v2（100万行）と ElastiCache for Valkey（ノードベース、TLS なし）の構成で実際にプラグインを検証した。集計クエリのレイテンシが **749ms → 2ms（約300倍）** に改善されることを確認した。公式ドキュメントは [Caching database query results](https://docs.aws.amazon.com/AmazonElastiCache/latest/dg/caching-database-query-results.html) および [Remote Query Cache Plugin](https://github.com/aws/aws-advanced-jdbc-wrapper/blob/main/docs/using-the-jdbc-driver/using-plugins/UsingTheRemoteQueryCachePlugin.md) を参照。
+
+## 検証環境
+
+| 項目 | 値 |
+| --- | --- |
+| リージョン | ap-northeast-1（東京） |
+| DB | Aurora PostgreSQL Serverless v2（16.6、0.5-2 ACU） |
+| キャッシュ | ElastiCache for Valkey（cache.t3.micro、単一ノード、TLS なし） |
+| 実行環境 | EC2 t3.small（Amazon Linux 2023、同一 VPC 内） |
+| Java | Amazon Corretto 21.0.10 |
+| AWS JDBC Wrapper | 3.3.0 |
+| PostgreSQL JDBC | 42.7.8 |
+| Valkey Glide | 2.3.0 |
+| Commons Pool | 2.12.0 |
+| テストデータ | 100万行（8カテゴリ、ランダム価格・在庫） |
+
+前提条件:
+
+- AWS CLI セットアップ済み（`rds:*`、`elasticache:*`、`ec2:*` の操作権限）
+- Java 21 + Maven
+
+結果だけ知りたい場合は[まとめ](#まとめ)にスキップできる。
+
+## 環境構築
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">インフラ構築手順（VPC / Aurora / ElastiCache / EC2）</summary>
+
+### VPC・サブネット・セキュリティグループ
+
+```bash title="Terminal"
+export AWS_REGION=ap-northeast-1
+MY_IP="$(curl -s https://checkip.amazonaws.com)/32"
+
+# VPC
+VPC_ID=$(aws ec2 create-vpc --cidr-block 10.0.0.0/16 \
+  --tag-specifications 'ResourceType=vpc,Tags=[{Key=Name,Value=jdbc-cache-test}]' \
+  --query 'Vpc.VpcId' --output text --region $AWS_REGION)
+aws ec2 modify-vpc-attribute --enable-dns-hostnames '{"Value":true}' --vpc-id $VPC_ID
+
+# サブネット（3 AZ）
+SUBNET_A=$(aws ec2 create-subnet --vpc-id $VPC_ID --cidr-block 10.0.1.0/24 \
+  --availability-zone ${AWS_REGION}a --query 'Subnet.SubnetId' --output text --region $AWS_REGION)
+SUBNET_C=$(aws ec2 create-subnet --vpc-id $VPC_ID --cidr-block 10.0.2.0/24 \
+  --availability-zone ${AWS_REGION}c --query 'Subnet.SubnetId' --output text --region $AWS_REGION)
+SUBNET_D=$(aws ec2 create-subnet --vpc-id $VPC_ID --cidr-block 10.0.3.0/24 \
+  --availability-zone ${AWS_REGION}d --query 'Subnet.SubnetId' --output text --region $AWS_REGION)
+
+# IGW（EC2 への SSH 用）
+IGW_ID=$(aws ec2 create-internet-gateway --query 'InternetGateway.InternetGatewayId' \
+  --output text --region $AWS_REGION)
+aws ec2 attach-internet-gateway --internet-gateway-id $IGW_ID --vpc-id $VPC_ID
+RTB_ID=$(aws ec2 describe-route-tables --filters "Name=vpc-id,Values=$VPC_ID" \
+  --query 'RouteTables[0].RouteTableId' --output text --region $AWS_REGION)
+aws ec2 create-route --route-table-id $RTB_ID --destination-cidr-block 0.0.0.0/0 --gateway-id $IGW_ID
+aws ec2 modify-subnet-attribute --subnet-id $SUBNET_A --map-public-ip-on-launch
+
+# セキュリティグループ
+SG_EC2=$(aws ec2 create-security-group --group-name jdbc-cache-test-ec2 \
+  --description "EC2" --vpc-id $VPC_ID --query 'GroupId' --output text --region $AWS_REGION)
+SG_AURORA=$(aws ec2 create-security-group --group-name jdbc-cache-test-aurora \
+  --description "Aurora" --vpc-id $VPC_ID --query 'GroupId' --output text --region $AWS_REGION)
+SG_CACHE=$(aws ec2 create-security-group --group-name jdbc-cache-test-cache \
+  --description "ElastiCache" --vpc-id $VPC_ID --query 'GroupId' --output text --region $AWS_REGION)
+
+aws ec2 authorize-security-group-ingress --group-id $SG_EC2 --protocol tcp --port 22 --cidr $MY_IP
+aws ec2 authorize-security-group-ingress --group-id $SG_AURORA --protocol tcp --port 5432 --source-group $SG_EC2
+aws ec2 authorize-security-group-ingress --group-id $SG_CACHE --protocol tcp --port 6379 --source-group $SG_EC2
+```
+
+### Aurora PostgreSQL Serverless v2
+
+```bash title="Terminal"
+aws rds create-db-subnet-group --db-subnet-group-name jdbc-cache-test \
+  --db-subnet-group-description "JDBC cache test" \
+  --subnet-ids "$SUBNET_A" "$SUBNET_C" "$SUBNET_D" --region $AWS_REGION
+
+aws rds create-db-cluster --db-cluster-identifier jdbc-cache-test \
+  --engine aurora-postgresql --engine-version 16.6 \
+  --master-username postgres --master-user-password '<password>' \
+  --db-subnet-group-name jdbc-cache-test \
+  --vpc-security-group-ids $SG_AURORA \
+  --serverless-v2-scaling-configuration MinCapacity=0.5,MaxCapacity=2 \
+  --storage-encrypted --no-deletion-protection --region $AWS_REGION
+
+aws rds create-db-instance --db-instance-identifier jdbc-cache-test-writer \
+  --db-cluster-identifier jdbc-cache-test \
+  --db-instance-class db.serverless --engine aurora-postgresql --region $AWS_REGION
+
+aws rds wait db-instance-available --db-instance-identifier jdbc-cache-test-writer --region $AWS_REGION
+```
+
+### ElastiCache for Valkey（ノードベース、TLS なし）
+
+```bash title="Terminal"
+aws elasticache create-cache-subnet-group \
+  --cache-subnet-group-name jdbc-cache-test \
+  --cache-subnet-group-description "JDBC cache test" \
+  --subnet-ids "$SUBNET_A" "$SUBNET_C" "$SUBNET_D" --region $AWS_REGION
+
+aws elasticache create-replication-group \
+  --replication-group-id jdbc-cache-test \
+  --replication-group-description "JDBC cache test - node based Valkey" \
+  --engine valkey \
+  --cache-node-type cache.t3.micro \
+  --num-cache-clusters 1 \
+  --cache-subnet-group-name jdbc-cache-test \
+  --security-group-ids $SG_CACHE \
+  --no-transit-encryption-enabled --region $AWS_REGION
+
+aws elasticache wait replication-group-available --replication-group-id jdbc-cache-test --region $AWS_REGION
+```
+
+### EC2 インスタンス
+
+```bash title="Terminal"
+AMI_ID=$(aws ec2 describe-images --owners amazon \
+  --filters "Name=name,Values=al2023-ami-2023.*-x86_64" "Name=state,Values=available" \
+  --query 'sort_by(Images, &CreationDate)[-1].ImageId' --output text --region $AWS_REGION)
+
+aws ec2 create-key-pair --key-name jdbc-cache-test --key-type ed25519 \
+  --query 'KeyMaterial' --output text > jdbc-cache-test.pem
+chmod 600 jdbc-cache-test.pem
+
+aws ec2 run-instances --image-id $AMI_ID --instance-type t3.small \
+  --key-name jdbc-cache-test --security-group-ids $SG_EC2 \
+  --subnet-id $SUBNET_A \
+  --tag-specifications 'ResourceType=instance,Tags=[{Key=Name,Value=jdbc-cache-test}]' \
+  --region $AWS_REGION
+
+ssh ec2-user@<public-ip> 'sudo dnf install -y java-21-amazon-corretto-devel maven postgresql16'
+```
+
+### テストデータ（100万行）
+
+```bash title="Terminal"
+PGPASSWORD='<password>' psql -h <aurora-endpoint> -U postgres -d postgres -c "
+CREATE TABLE products (
+  id SERIAL PRIMARY KEY,
+  name VARCHAR(100) NOT NULL,
+  category VARCHAR(50) NOT NULL,
+  price NUMERIC(10,2) NOT NULL,
+  stock INT NOT NULL DEFAULT 0
+);
+INSERT INTO products (name, category, price, stock)
+SELECT
+  'Product-' || i,
+  (ARRAY['laptop','phone','tablet','audio','camera','monitor','keyboard','mouse'])[1 + (i % 8)],
+  (random() * 500000 + 1000)::numeric(10,2),
+  (random() * 1000)::int
+FROM generate_series(1, 1000000) AS i;
+ANALYZE products;
+"
+```
+
+</details>
+
+## テストアプリケーション
+
+Remote Query Cache Plugin の設定は最小限だ。通常の JDBC 接続との違いは4点のみ。
+
+1. 接続 URL を `jdbc:aws-wrapper:postgresql://` に変更
+2. `wrapperPlugins` に `remoteQueryCache` を指定
+3. `cacheEndpointAddrRw` に ElastiCache のエンドポイントを設定
+4. `cacheUseSSL` を `false` に設定（ノードベース、TLS なしの場合。同一 VPC 内で TLS のオーバーヘッドを排除するため）
+
+```java title="Java（キャッシュ接続の核心部分）"
+Properties props = new Properties();
+props.setProperty("user", "postgres");
+props.setProperty("password", password);
+props.setProperty("wrapperPlugins", "remoteQueryCache");
+props.setProperty("cacheEndpointAddrRw", "my-cache.apne1.cache.amazonaws.com:6379");
+props.setProperty("cacheUseSSL", "false");
+
+Connection conn = DriverManager.getConnection(
+    "jdbc:aws-wrapper:postgresql://my-aurora.cluster-xxx.ap-northeast-1.rds.amazonaws.com:5432/postgres",
+    props);
+```
+
+キャッシュ対象のクエリには SQL コメントで TTL を指定する。
+
+```java title="Java（クエリヒント）"
+ResultSet rs = stmt.executeQuery(
+    "/* CACHE_PARAM(ttl=60s) */ SELECT category, COUNT(*), AVG(price) FROM products GROUP BY category");
+```
+
+ヒントのないクエリはキャッシュされず、通常通り DB に直接実行される。
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">pom.xml（全体）</summary>
+
+```xml title="pom.xml"
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+    <groupId>cachetest</groupId>
+    <artifactId>jdbc-cache-test</artifactId>
+    <version>1.0</version>
+    <properties>
+        <maven.compiler.source>21</maven.compiler.source>
+        <maven.compiler.target>21</maven.compiler.target>
+    </properties>
+    <dependencies>
+        <dependency>
+            <groupId>software.amazon.jdbc</groupId>
+            <artifactId>aws-advanced-jdbc-wrapper</artifactId>
+            <version>3.3.0</version>
+        </dependency>
+        <dependency>
+            <groupId>org.postgresql</groupId>
+            <artifactId>postgresql</artifactId>
+            <version>42.7.8</version>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.commons</groupId>
+            <artifactId>commons-pool2</artifactId>
+            <version>2.12.0</version>
+        </dependency>
+        <dependency>
+            <groupId>io.valkey</groupId>
+            <artifactId>valkey-glide</artifactId>
+            <version>2.3.0</version>
+        </dependency>
+        <dependency>
+            <groupId>org.slf4j</groupId>
+            <artifactId>slf4j-simple</artifactId>
+            <version>2.0.16</version>
+        </dependency>
+    </dependencies>
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-jar-plugin</artifactId>
+                <version>3.4.2</version>
+                <configuration>
+                    <archive><manifest>
+                        <mainClass>cachetest.QueryCacheTest</mainClass>
+                    </manifest></archive>
+                </configuration>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-dependency-plugin</artifactId>
+                <version>3.8.1</version>
+                <executions>
+                    <execution>
+                        <id>copy-deps</id><phase>package</phase>
+                        <goals><goal>copy-dependencies</goal></goals>
+                        <configuration>
+                            <outputDirectory>${project.build.directory}/lib</outputDirectory>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+        </plugins>
+    </build>
+</project>
+```
+
+</details>
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">QueryCacheTest.java（テストアプリ全体）</summary>
+
+```java title="QueryCacheTest.java"
+package cachetest;
+
+import java.sql.*;
+import java.time.Duration;
+import java.time.Instant;
+import java.util.Properties;
+
+public class QueryCacheTest {
+    static String dbEndpoint, dbPassword, cacheEndpoint;
+
+    public static void main(String[] args) throws Exception {
+        if (args.length < 3) {
+            System.err.println("Usage: QueryCacheTest <dbEndpoint> <dbPassword> <cacheEndpoint>");
+            System.exit(1);
+        }
+        dbEndpoint = args[0]; dbPassword = args[1]; cacheEndpoint = args[2];
+
+        System.out.println("=== JDBC Query Cache with Valkey (Node-Based) ===\n");
+
+        // --- Test 1: Basic cache behavior ---
+        System.out.println("--- Test 1: Basic Cache Behavior ---");
+        String q1 = "/* CACHE_PARAM(ttl=60s) */ SELECT category, COUNT(*), AVG(price)::numeric(10,2), "
+            + "MAX(price), MIN(price) FROM products GROUP BY category ORDER BY COUNT(*) DESC";
+        try (Connection conn = getCachedConnection()) {
+            for (int i = 1; i <= 6; i++) {
+                long ms = timedQuery(conn, q1);
+                System.out.printf("  Query %d: %d ms%s%n", i, ms,
+                    i == 1 ? " (cache MISS)" : " (cache HIT)");
+            }
+        }
+
+        // --- Test 2: Performance comparison ---
+        System.out.println("\n--- Test 2: Performance Comparison ---");
+        String[] queries = {
+            "SELECT category, COUNT(*), AVG(price)::numeric(10,2), MAX(price), MIN(price) "
+                + "FROM products GROUP BY category ORDER BY COUNT(*) DESC",
+            "SELECT CASE WHEN price < 100000 THEN 'budget' WHEN price < 300000 THEN 'mid' "
+                + "ELSE 'premium' END AS tier, COUNT(*), AVG(price)::numeric(10,2) "
+                + "FROM products GROUP BY tier ORDER BY COUNT(*) DESC",
+            "SELECT category, name, price, (price - AVG(price) OVER (PARTITION BY category))"
+                + "::numeric(10,2) AS diff_from_avg FROM products WHERE stock > 500 "
+                + "ORDER BY diff_from_avg DESC LIMIT 20"
+        };
+        String[] labels = {"Category stats", "Price tier", "Window function"};
+
+        for (int q = 0; q < queries.length; q++) {
+            System.out.printf("\n  [%s]%n", labels[q]);
+            long[] nc = new long[10];
+            try (Connection conn = getPlainConnection()) {
+                timedQuery(conn, queries[q]); // warmup
+                for (int i = 0; i < 10; i++) nc[i] = timedQuery(conn, queries[q]);
+            }
+            String cached = "/* CACHE_PARAM(ttl=60s) */ " + queries[q];
+            long[] wc = new long[10];
+            try (Connection conn = getCachedConnection()) {
+                timedQuery(conn, cached); // prime cache
+                Thread.sleep(200);
+                for (int i = 0; i < 10; i++) wc[i] = timedQuery(conn, cached);
+            }
+            System.out.println("    No Cache: " + stats(nc));
+            System.out.println("    Cached:   " + stats(wc));
+        }
+
+        // --- Test 2b: Light query benchmark ---
+        System.out.println("\n--- Test 2b: Light Query (3 rows) ---");
+        try (Connection plain = getPlainConnection();
+             Statement s = plain.createStatement()) {
+            s.executeUpdate("CREATE TABLE IF NOT EXISTS products_small ("
+                + "id SERIAL PRIMARY KEY, name VARCHAR(100), category VARCHAR(50), "
+                + "price NUMERIC(10,2), stock INT)");
+            s.executeUpdate("TRUNCATE products_small");
+            s.executeUpdate("INSERT INTO products_small (name, category, price, stock) VALUES "
+                + "('MacBook Pro 14', 'laptop', 248000, 50),"
+                + "('ThinkPad X1', 'laptop', 198000, 30),"
+                + "('Dell XPS 15', 'laptop', 178000, 25)");
+        }
+        String lightRaw = "SELECT * FROM products_small WHERE category = 'laptop' ORDER BY price DESC";
+        String lightCached = "/* CACHE_PARAM(ttl=60s) */ " + lightRaw;
+        long[] lnc = new long[20];
+        try (Connection conn = getPlainConnection()) {
+            timedQuery(conn, lightRaw);
+            for (int i = 0; i < 20; i++) lnc[i] = timedQuery(conn, lightRaw);
+        }
+        long[] lwc = new long[20];
+        try (Connection conn = getCachedConnection()) {
+            timedQuery(conn, lightCached);
+            Thread.sleep(200);
+            for (int i = 0; i < 20; i++) lwc[i] = timedQuery(conn, lightCached);
+        }
+        System.out.println("    No Cache: " + stats(lnc));
+        System.out.println("    Cached:   " + stats(lwc));
+        try (Connection plain = getPlainConnection();
+             Statement s = plain.createStatement()) {
+            s.executeUpdate("DROP TABLE products_small");
+        }
+
+        // --- Test 3: Staleness & TTL ---
+        System.out.println("\n--- Test 3: Staleness & TTL ---");
+        String pointQ = "/* CACHE_PARAM(ttl=10s) */ "
+            + "SELECT COUNT(*) AS cnt FROM products WHERE category = 'laptop'";
+        try (Connection cached = getCachedConnection();
+             Connection plain = getPlainConnection()) {
+            System.out.print("  1. Prime cache: ");
+            try (Statement s = cached.createStatement();
+                 ResultSet r = s.executeQuery(pointQ)) {
+                r.next(); System.out.println("count=" + r.getInt("cnt"));
+            }
+            Thread.sleep(500);
+            System.out.print("  2. Cache hit: ");
+            try (Statement s = cached.createStatement();
+                 ResultSet r = s.executeQuery(pointQ)) {
+                r.next(); System.out.println("count=" + r.getInt("cnt"));
+            }
+            System.out.println("  3. Inserting 1000 laptop rows...");
+            try (Statement s = plain.createStatement()) {
+                s.executeUpdate("INSERT INTO products (name, category, price, stock) "
+                    + "SELECT 'NewLaptop-' || i, 'laptop', 99999, 10 "
+                    + "FROM generate_series(1,1000) AS i");
+            }
+            System.out.print("  4. After insert (cache): ");
+            try (Statement s = cached.createStatement();
+                 ResultSet r = s.executeQuery(pointQ)) {
+                r.next();
+                System.out.println("count=" + r.getInt("cnt") + " (expect stale 125000)");
+            }
+            System.out.println("  5. Waiting 12s for TTL...");
+            Thread.sleep(12000);
+            System.out.print("  6. After TTL: ");
+            try (Statement s = cached.createStatement();
+                 ResultSet r = s.executeQuery(pointQ)) {
+                r.next();
+                System.out.println("count=" + r.getInt("cnt") + " (expect fresh 126000)");
+            }
+            try (Statement s = plain.createStatement()) {
+                s.executeUpdate("DELETE FROM products WHERE name LIKE 'NewLaptop-%'");
+            }
+            System.out.println("  7. Cleanup done");
+        }
+    }
+
+    static Connection getPlainConnection() throws SQLException {
+        return DriverManager.getConnection(
+            "jdbc:postgresql://" + dbEndpoint + ":5432/postgres",
+            "postgres", dbPassword);
+    }
+
+    static Connection getCachedConnection() throws SQLException {
+        Properties props = new Properties();
+        props.setProperty("user", "postgres");
+        props.setProperty("password", dbPassword);
+        props.setProperty("wrapperPlugins", "remoteQueryCache");
+        props.setProperty("cacheEndpointAddrRw", cacheEndpoint + ":6379");
+        props.setProperty("cacheUseSSL", "false");
+        return DriverManager.getConnection(
+            "jdbc:aws-wrapper:postgresql://" + dbEndpoint + ":5432/postgres", props);
+    }
+
+    static long timedQuery(Connection conn, String sql) throws SQLException {
+        Instant start = Instant.now();
+        try (Statement s = conn.createStatement();
+             ResultSet r = s.executeQuery(sql)) {
+            while (r.next()) {}
+        }
+        return Duration.between(start, Instant.now()).toMillis();
+    }
+
+    static String stats(long[] times) {
+        long sum = 0, min = Long.MAX_VALUE, max = 0;
+        for (long t : times) { sum += t; min = Math.min(min, t); max = Math.max(max, t); }
+        long[] sorted = times.clone();
+        java.util.Arrays.sort(sorted);
+        double median = sorted.length % 2 == 0
+            ? (sorted[sorted.length/2 - 1] + sorted[sorted.length/2]) / 2.0
+            : sorted[sorted.length/2];
+        return String.format("avg=%.1f, median=%.1f, min=%d, max=%d",
+            (double) sum / times.length, median, min, max);
+    }
+}
+```
+
+</details>
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">ビルドと実行</summary>
+
+```bash title="Terminal"
+# ディレクトリ構造を作成
+mkdir -p jdbc-cache-test/src/main/java/cachetest
+# pom.xml を jdbc-cache-test/ に、QueryCacheTest.java を jdbc-cache-test/src/main/java/cachetest/ に配置
+
+export JAVA_HOME=/usr/lib/jvm/java-21-amazon-corretto
+cd jdbc-cache-test && mvn package -q
+
+CP="target/jdbc-cache-test-1.0.jar"
+for jar in target/lib/*.jar; do CP="$CP:$jar"; done
+
+java -cp "$CP" cachetest.QueryCacheTest \
+  "<aurora-endpoint>" "<password>" "<cache-endpoint>"
+```
+
+</details>
+
+## 検証1: キャッシュの基本動作
+
+100万行に対するカテゴリ別集計クエリを同一コネクションで6回実行した。
+
+```text title="Output"
+Query 1: 878 ms (cache MISS)
+Query 2:  12 ms (cache HIT)
+Query 3:   4 ms (cache HIT)
+Query 4:   2 ms (cache HIT)
+Query 5:   2 ms (cache HIT)
+Query 6:   3 ms (cache HIT)
+```
+
+Query 1 は DB からの取得 + Valkey への書き込みで 878ms。Query 2 以降はキャッシュヒットで 2-12ms に短縮された。Query 2 の 12ms は Valkey 接続プールのウォームアップによるもので、Query 3 以降は安定して 2-4ms だ。
+
+[ElastiCache Serverless での検証](/ja/blog/2026/03/27/jdbc-query-cache-valkey-serverless)では初回接続で必ずタイムアウトが発生し CacheMonitor が SUSPECT 状態に陥ったが、**ノードベース（TLS なし）では初回から正常に動作した**。TLS ハンドシェイクのオーバーヘッドがないため、接続確立が高速に完了する。ElastiCache Serverless での挙動の違いは[次の記事](/ja/blog/2026/03/27/jdbc-query-cache-valkey-serverless)で詳しく検証している。
+
+## 検証2: パフォーマンス比較
+
+3種類の集計クエリについて、キャッシュなし（Plain JDBC）とキャッシュあり（Remote Query Cache Plugin）のレイテンシを10回ずつ計測した。
+
+### カテゴリ別統計（GROUP BY + 集計関数）
+
+```sql title="SQL"
+SELECT category, COUNT(*), AVG(price)::numeric(10,2), MAX(price), MIN(price)
+FROM products GROUP BY category ORDER BY COUNT(*) DESC
+```
+
+| 指標 | キャッシュなし | キャッシュあり |
+| --- | --- | --- |
+| 平均 | 389.4 ms | 4.8 ms |
+| 中央値 | 384.0 ms | 3.0 ms |
+| 最小 | 311 ms | 2 ms |
+| 最大 | 578 ms | 24 ms |
+
+**約80倍の高速化。**
+
+### 価格帯別分布（CASE + GROUP BY）
+
+```sql title="SQL"
+SELECT
+  CASE WHEN price < 100000 THEN 'budget'
+       WHEN price < 300000 THEN 'mid'
+       ELSE 'premium' END AS tier,
+  COUNT(*), AVG(price)::numeric(10,2)
+FROM products GROUP BY tier ORDER BY COUNT(*) DESC
+```
+
+| 指標 | キャッシュなし | キャッシュあり |
+| --- | --- | --- |
+| 平均 | 420.8 ms | 1.9 ms |
+| 中央値 | 393.0 ms | 2.0 ms |
+| 最小 | 346 ms | 1 ms |
+| 最大 | 669 ms | 2 ms |
+
+**約200倍の高速化。**
+
+### ウィンドウ関数（PARTITION BY + ORDER BY + LIMIT）
+
+```sql title="SQL"
+SELECT category, name, price,
+  (price - AVG(price) OVER (PARTITION BY category))::numeric(10,2) AS diff_from_avg
+FROM products WHERE stock > 500 ORDER BY diff_from_avg DESC LIMIT 20
+```
+
+| 指標 | キャッシュなし | キャッシュあり |
+| --- | --- | --- |
+| 平均 | 749.1 ms | 2.4 ms |
+| 中央値 | 707.5 ms | 2.0 ms |
+| 最小 | 626 ms | 2 ms |
+| 最大 | 1121 ms | 4 ms |
+
+**約300倍の高速化。** ウィンドウ関数を含む最も重いクエリで効果が最大になった。
+
+### 結果の考察
+
+キャッシュヒット時のレイテンシは全クエリで 1-4ms に収束している。これは元のクエリの複雑さに依存しない。プラグインはクエリ結果セットをシリアライズして Valkey に保存し、ヒット時はデシリアライズして返すだけなので、元のクエリの実行コストは関係ない。Valkey からのデータ取得時間が支配的であり、クエリが重いほどキャッシュの効果が大きくなる。
+
+### 軽量クエリではどうか
+
+参考として、3行しか返さない軽量クエリ（DB 直接で約3ms）でも同じ構成でキャッシュを試した。
+
+| 指標 | キャッシュなし | キャッシュあり |
+| --- | --- | --- |
+| 平均 | 3.3 ms | 2.8 ms |
+| 中央値 | 3.0 ms | 2.0 ms |
+| 最小 | 2 ms | 2 ms |
+| 最大 | 7 ms | 13 ms |
+
+ノードベース（TLS なし）ではキャッシュのオーバーヘッドがほぼゼロのため、軽量クエリでも性能劣化は起きない。ただし改善幅も小さいため、キャッシュの恩恵は重いクエリほど大きい。
+
+## 検証3: キャッシュの整合性と TTL
+
+DB を更新した後、キャッシュが古い値（stale data）を返すか、TTL 後に新しい値に切り替わるかを確認した。
+
+```text title="Output"
+1. Prime cache: count=125000
+2. Cache hit: count=125000
+3. Inserting 1000 laptop rows...
+4. After insert (cache): count=125000 (expect stale 125000)  ← stale data が返された
+5. Waiting 12s for TTL...
+6. After TTL: count=126000 (expect fresh 126000)  ← 新しい値に切り替わった
+7. Cleanup done
+```
+
+TTL 10秒でキャッシュしたクエリに対して:
+
+- **Step 4**: DB に1000行追加した直後、キャッシュから古い値（125000）が返された。これは期待通りの動作だ
+- **Step 6**: TTL 経過後、キャッシュが無効化され、DB から新しい値（126000）が取得された
+
+TTL の設定がキャッシュの整合性を制御する唯一の手段だ。公式ドキュメントにも「強い整合性が必要なクエリやトランザクション内の read-after-write 整合性が必要なクエリにはキャッシュを使うべきではない」と記載されている。
+
+TTL が長すぎて古いデータが問題になる場合の対処法として、ドキュメントでは以下が挙げられている。
+
+- `cacheKeyPrefix` を使ってキースペースを分離し、特定のプレフィックスのキーだけを削除する
+- Valkey サーバーで `FLUSHALL` を実行してキャッシュ全体をクリアする
+
+## まとめ
+
+- **重い集計クエリで最大300倍の高速化** — 100万行に対するウィンドウ関数クエリが 749ms → 2ms に短縮された。キャッシュヒット時のレイテンシはクエリの複雑さに依存せず 1-4ms で安定する。クエリが重いほどキャッシュの効果は大きい
+- **ノードベース（TLS なし）では初回タイムアウトが発生しない** — ElastiCache Serverless では初回接続で必ずタイムアウトが発生したが、ノードベースでは初回から正常に動作した。TLS ハンドシェイクのオーバーヘッドがないことが主因だ。詳細は[次の記事](/ja/blog/2026/03/27/jdbc-query-cache-valkey-serverless)で検証している
+- **導入は JDBC ドライバの設定変更のみ** — 接続 URL の変更、プラグイン有効化、キャッシュエンドポイント設定の3点だけ。アプリケーションコードの変更はクエリへのコメントヒント追加のみで、既存のコードベースへの影響は最小限だ
+- **TTL がキャッシュ整合性の唯一の制御手段** — データ更新後、TTL が切れるまで古い値が返される。強い整合性が必要なクエリにはキャッシュヒントを付けないこと。TTL は「許容できる古さ」に基づいて設定する
+
+## クリーンアップ
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">リソース削除コマンド</summary>
+
+```bash title="Terminal"
+# Aurora
+aws rds delete-db-instance --db-instance-identifier jdbc-cache-test-writer \
+  --skip-final-snapshot --region ap-northeast-1
+aws rds wait db-instance-deleted --db-instance-identifier jdbc-cache-test-writer --region ap-northeast-1
+aws rds delete-db-cluster --db-cluster-identifier jdbc-cache-test \
+  --skip-final-snapshot --region ap-northeast-1
+
+# ElastiCache
+aws elasticache delete-replication-group --replication-group-id jdbc-cache-test \
+  --no-retain-primary-cluster --region ap-northeast-1
+
+# EC2
+aws ec2 terminate-instances --instance-ids <instance-id> --region ap-northeast-1
+
+# 削除完了を待ってからネットワークリソースを削除
+aws ec2 delete-key-pair --key-name jdbc-cache-test --region ap-northeast-1
+aws ec2 delete-security-group --group-id <sg-aurora> --region ap-northeast-1
+aws ec2 delete-security-group --group-id <sg-cache> --region ap-northeast-1
+aws ec2 delete-security-group --group-id <sg-ec2> --region ap-northeast-1
+aws rds delete-db-subnet-group --db-subnet-group-name jdbc-cache-test --region ap-northeast-1
+aws elasticache delete-cache-subnet-group --cache-subnet-group-name jdbc-cache-test --region ap-northeast-1
+aws ec2 detach-internet-gateway --internet-gateway-id <igw-id> --vpc-id <vpc-id> --region ap-northeast-1
+aws ec2 delete-internet-gateway --internet-gateway-id <igw-id> --region ap-northeast-1
+aws ec2 delete-subnet --subnet-id <subnet-a> --region ap-northeast-1
+aws ec2 delete-subnet --subnet-id <subnet-c> --region ap-northeast-1
+aws ec2 delete-subnet --subnet-id <subnet-d> --region ap-northeast-1
+aws ec2 delete-vpc --vpc-id <vpc-id> --region ap-northeast-1
+```
+
+</details>

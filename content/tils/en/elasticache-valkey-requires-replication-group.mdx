@@ -1,0 +1,39 @@
+---
+title: "ElastiCache for Valkey requires CreateReplicationGroup, not CreateCacheCluster"
+description: "aws elasticache create-cache-cluster --engine valkey fails with InvalidParameterValue. Valkey engine requires the CreateReplicationGroup API even for single-node clusters."
+date: "2026-03-27"
+published: true
+tags: ["aws", "elasticache", "valkey"]
+---
+
+Hit this while setting up a node-based ElastiCache for Valkey cluster for [JDBC Wrapper cache testing](/en/blog/2026/03/27/jdbc-query-cache-valkey-node-based).
+
+Tried `create-cache-cluster` like I would for Redis OSS — didn't work.
+
+```bash title="Terminal"
+aws elasticache create-cache-cluster \
+  --cache-cluster-id my-valkey \
+  --engine valkey \
+  --cache-node-type cache.t3.micro \
+  --num-cache-nodes 1
+```
+
+```text title="Output"
+An error occurred (InvalidParameterValue) when calling the CreateCacheCluster
+operation: This API doesn't support Valkey engine. Please use
+CreateReplicationGroup API for Valkey cluster creation.
+```
+
+Valkey requires `create-replication-group` even for a single node.
+
+```bash title="Terminal"
+aws elasticache create-replication-group \
+  --replication-group-id my-valkey \
+  --replication-group-description "Single node Valkey" \
+  --engine valkey \
+  --cache-node-type cache.t3.micro \
+  --num-cache-clusters 1 \
+  --no-transit-encryption-enabled
+```
+
+The error message is helpful enough, but easy to miss when migrating scripts from Redis OSS.

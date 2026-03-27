@@ -1,20 +1,20 @@
 ---
-title: "Testing AWS JDBC Wrapper's Valkey Query Cache — The ElastiCache Serverless Timeout Pitfall"
-description: "Verified the Remote Query Cache Plugin in AWS Advanced JDBC Wrapper 3.3.0 with ElastiCache for Valkey Serverless. Cache hits stabilize at ~105ms, but the first connection always times out, pushing CacheMonitor into SUSPECT state."
+title: "JDBC Wrapper Valkey Cache Test — The ElastiCache Serverless timeout pitfall"
+description: "Verified the Remote Query Cache Plugin in AWS Advanced JDBC Wrapper 3.3.0 with ElastiCache for Valkey Serverless. The first connection always times out, pushing CacheMonitor into SUSPECT state — a Serverless-specific issue not seen with node-based clusters."
 date: 2026-03-27
 published: true
 featured: false
 categories: [infrastructure]
 tags: ["aws", "aurora", "postgresql", "elasticache", "valkey", "java", "jdbc", "database"]
+series: "jdbc-query-cache-valkey"
+seriesOrder: 2
 ---
 
 ## Introduction
 
-On March 26, 2026, AWS [announced that the AWS Advanced JDBC Wrapper now supports automatic query caching with Valkey](https://aws.amazon.com/about-aws/whats-new/2026/03/aws-jdbc-caching-with-valkey/). The feature lets you cache JDBC query results in ElastiCache with minimal code changes — just configure the driver and add SQL comment hints like `/* CACHE_PARAM(ttl=300s) */` to queries you want cached.
+In the [previous article](/en/blog/2026/03/27/jdbc-query-cache-valkey-node-based), we verified that the Remote Query Cache Plugin with node-based ElastiCache for Valkey and 1 million rows can improve query latency by up to 300x.
 
-Previously, implementing query caching required manually writing store/retrieve logic for each query. The Remote Query Cache Plugin absorbs this at the JDBC driver level.
-
-This article shares the results of testing the plugin with Aurora PostgreSQL Serverless v2 and ElastiCache for Valkey Serverless. The key finding: **the first connection to ElastiCache Serverless always times out, causing CacheMonitor to enter an unstable state**. See the official docs at [Caching database query results](https://docs.aws.amazon.com/AmazonElastiCache/latest/dg/caching-database-query-results.html) and [Remote Query Cache Plugin](https://github.com/aws/aws-advanced-jdbc-wrapper/blob/main/docs/using-the-jdbc-driver/using-plugins/UsingTheRemoteQueryCachePlugin.md).
+This article shares the results of testing the same plugin with ElastiCache for Valkey **Serverless**. The key finding: **the first connection to ElastiCache Serverless always times out, causing CacheMonitor to enter an unstable state**. See the official docs at [Caching database query results](https://docs.aws.amazon.com/AmazonElastiCache/latest/dg/caching-database-query-results.html) and [Remote Query Cache Plugin](https://github.com/aws/aws-advanced-jdbc-wrapper/blob/main/docs/using-the-jdbc-driver/using-plugins/UsingTheRemoteQueryCachePlugin.md).
 
 ## Test Environment
 
@@ -77,7 +77,8 @@ SG_AURORA=$(aws ec2 create-security-group --group-name jdbc-cache-test-aurora \
 SG_CACHE=$(aws ec2 create-security-group --group-name jdbc-cache-test-cache \
   --description "ElastiCache" --vpc-id $VPC_ID --query 'GroupId' --output text --region ap-northeast-1)
 
-aws ec2 authorize-security-group-ingress --group-id $SG_EC2 --protocol tcp --port 22 --cidr 0.0.0.0/0
+MY_IP="$(curl -s https://checkip.amazonaws.com)/32"
+aws ec2 authorize-security-group-ingress --group-id $SG_EC2 --protocol tcp --port 22 --cidr $MY_IP
 aws ec2 authorize-security-group-ingress --group-id $SG_AURORA --protocol tcp --port 5432 --source-group $SG_EC2
 aws ec2 authorize-security-group-ingress --group-id $SG_CACHE --protocol tcp --port 6379 --source-group $SG_EC2
 ```
@@ -169,6 +170,8 @@ The plugin requires only three changes from a standard JDBC connection:
 2. Set `wrapperPlugins` to `remoteQueryCache`
 3. Set `cacheEndpointAddrRw` to the ElastiCache endpoint
 
+ElastiCache Serverless requires TLS, and `cacheUseSSL` defaults to `true`, so no explicit setting is needed. In the [node-based article](/en/blog/2026/03/27/jdbc-query-cache-valkey-node-based), we set `cacheUseSSL=false` to disable TLS — that's not an option with Serverless.
+
 ```java title="Java (cache connection setup)"
 Properties props = new Properties();
 props.setProperty("user", "postgres");
@@ -191,36 +194,148 @@ ResultSet rs = stmt.executeQuery(
 Queries without the hint execute directly against the database as usual.
 
 <details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
-<summary className="cursor-pointer font-medium">pom.xml (dependencies)</summary>
+<summary className="cursor-pointer font-medium">pom.xml (full)</summary>
 
 ```xml title="pom.xml"
-<dependencies>
-    <dependency>
-        <groupId>software.amazon.jdbc</groupId>
-        <artifactId>aws-advanced-jdbc-wrapper</artifactId>
-        <version>3.3.0</version>
-    </dependency>
-    <dependency>
-        <groupId>org.postgresql</groupId>
-        <artifactId>postgresql</artifactId>
-        <version>42.7.8</version>
-    </dependency>
-    <dependency>
-        <groupId>org.apache.commons</groupId>
-        <artifactId>commons-pool2</artifactId>
-        <version>2.12.0</version>
-    </dependency>
-    <dependency>
-        <groupId>io.valkey</groupId>
-        <artifactId>valkey-glide</artifactId>
-        <version>2.3.0</version>
-    </dependency>
-</dependencies>
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+    <groupId>cachetest</groupId>
+    <artifactId>jdbc-cache-test</artifactId>
+    <version>1.0</version>
+    <properties>
+        <maven.compiler.source>21</maven.compiler.source>
+        <maven.compiler.target>21</maven.compiler.target>
+    </properties>
+    <dependencies>
+        <dependency>
+            <groupId>software.amazon.jdbc</groupId>
+            <artifactId>aws-advanced-jdbc-wrapper</artifactId>
+            <version>3.3.0</version>
+        </dependency>
+        <dependency>
+            <groupId>org.postgresql</groupId>
+            <artifactId>postgresql</artifactId>
+            <version>42.7.8</version>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.commons</groupId>
+            <artifactId>commons-pool2</artifactId>
+            <version>2.12.0</version>
+        </dependency>
+        <dependency>
+            <groupId>io.valkey</groupId>
+            <artifactId>valkey-glide</artifactId>
+            <version>2.3.0</version>
+        </dependency>
+        <dependency>
+            <groupId>org.slf4j</groupId>
+            <artifactId>slf4j-simple</artifactId>
+            <version>2.0.16</version>
+        </dependency>
+    </dependencies>
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-jar-plugin</artifactId>
+                <version>3.4.2</version>
+                <configuration>
+                    <archive><manifest>
+                        <mainClass>cachetest.QueryCacheTest</mainClass>
+                    </manifest></archive>
+                </configuration>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-dependency-plugin</artifactId>
+                <version>3.8.1</version>
+                <executions>
+                    <execution>
+                        <id>copy-deps</id><phase>package</phase>
+                        <goals><goal>copy-dependencies</goal></goals>
+                        <configuration>
+                            <outputDirectory>${project.build.directory}/lib</outputDirectory>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+        </plugins>
+    </build>
+</project>
 ```
 
 </details>
 
-## Test 1: Basic Cache Behavior
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">QueryCacheTest.java (full test application)</summary>
+
+```java title="QueryCacheTest.java"
+package cachetest;
+
+import java.sql.*;
+import java.time.Duration;
+import java.time.Instant;
+import java.util.Properties;
+
+public class QueryCacheTest {
+    public static void main(String[] args) throws Exception {
+        String dbEndpoint = args[0], dbPassword = args[1], cacheEndpoint = args[2];
+
+        Properties props = new Properties();
+        props.setProperty("user", "postgres");
+        props.setProperty("password", dbPassword);
+        props.setProperty("wrapperPlugins", "remoteQueryCache");
+        props.setProperty("cacheEndpointAddrRw", cacheEndpoint + ":6379");
+        // Serverless requires TLS — cacheUseSSL defaults to true
+
+        String url = "jdbc:aws-wrapper:postgresql://" + dbEndpoint + ":5432/postgres";
+        String query = "/* CACHE_PARAM(ttl=60s) */ SELECT * FROM products "
+            + "WHERE category = 'laptop' ORDER BY price DESC";
+
+        System.out.println("=== Cache Behavior Test (ElastiCache Serverless) ===");
+        try (Connection conn = DriverManager.getConnection(url, props)) {
+            for (int i = 1; i <= 8; i++) {
+                Instant start = Instant.now();
+                try (Statement s = conn.createStatement();
+                     ResultSet r = s.executeQuery(query)) {
+                    int count = 0;
+                    while (r.next()) count++;
+                    long ms = Duration.between(start, Instant.now()).toMillis();
+                    System.out.printf("  Query %d: %d rows, %d ms%n", i, count, ms);
+                }
+                if (i <= 2) Thread.sleep(1000);
+            }
+        }
+    }
+}
+```
+
+</details>
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">Build and run</summary>
+
+```bash title="Terminal"
+# Create directory structure
+mkdir -p jdbc-cache-test/src/main/java/cachetest
+# Place pom.xml in jdbc-cache-test/ and QueryCacheTest.java in jdbc-cache-test/src/main/java/cachetest/
+
+export JAVA_HOME=/usr/lib/jvm/java-21-amazon-corretto
+cd jdbc-cache-test && mvn package -q
+
+CP="target/jdbc-cache-test-1.0.jar"
+for jar in target/lib/*.jar; do CP="$CP:$jar"; done
+
+java -cp "$CP" cachetest.QueryCacheTest \
+  "<aurora-endpoint>" "<password>" "<cache-serverless-endpoint>"
+```
+
+</details>
+
+## Test: Initial Connection and Cache Behavior
 
 Ran the same query 8 times on a single connection to observe cache behavior.
 
@@ -242,7 +357,7 @@ Query 1 took ~10.5 seconds. The logs reveal a `TimeoutException` on the first ca
   READ failed: CONNECTION - TimeoutException: Request timed out
 ```
 
-Query 1 fell back to the database (cache miss), while writing the result to the cache in the background. Queries 2-3 at 7ms are suspiciously fast — the CacheMonitor was still in SUSPECT state, so the plugin bypassed the cache entirely and queried the database directly. Queries 5-8 at 90-216ms represent actual cache hit latency.
+Query 1 fell back to the database (cache miss), while writing the result to the cache in the background. Queries 2-3 at 7ms are suspiciously fast — the CacheMonitor was still in SUSPECT state, so the plugin bypassed the cache entirely and queried the database directly. After the CacheMonitor's periodic health check (runs every few seconds) succeeded and recovered to HEALTHY, Queries 5-8 at 90-216ms represent actual cache hit latency.
 
 Additionally, the CacheMonitor health checks consistently failed with a pool borrow timeout:
 
@@ -253,56 +368,14 @@ SEVERE: Non-recoverable error (DATA) for jdbc-cache-test-xxx:6379:
 
 The internal borrow timeout is hardcoded at 100ms, which is shorter than the TLS handshake time for ElastiCache Serverless.
 
-## Test 2: Performance Comparison
-
-Compared latency over 20 iterations (after 3 warmup rounds) between plain JDBC and the cache plugin.
-
-| Metric | No Cache | Cached |
-| --- | --- | --- |
-| Average | 2.1 ms | 106.8 ms |
-| Median | 2.0 ms | 105.0 ms |
-| Min | 2 ms | 105 ms |
-| Max | 3 ms | 132 ms |
-
-**The cached path was ~50x slower** — an unexpected result.
-
-This is specific to the test environment: Aurora Serverless v2 and EC2 are in the same VPC, and the test data is only 10 rows, so direct DB queries complete in 2ms. The TLS overhead to ElastiCache Serverless adds ~100ms per cache operation.
-
-Query caching delivers value when:
-
-- **Queries are expensive** (aggregations, JOINs, non-indexed lookups taking hundreds of ms)
-- **Database CPU pressure needs relief** (high-concurrency read offloading)
-- **Network latency between app and DB is significant** (cross-AZ or cross-region)
-
-For lightweight queries in the same VPC, the cache overhead dominates.
-
-## Test 3: Cache Staleness and TTL
-
-Updated the database after caching a query to check whether stale data would be returned.
-
-```text title="Output"
-Step 1: Prime cache
-  Query 1: MacBook Pro 14 = ¥248000.00  (cache MISS → fetched from DB, written to cache)
-  Query 2: MacBook Pro 14 = ¥248000.00  (cache HIT)
-Step 2: Update price in DB (248000 -> 228000)
-Step 3: Verify DB has new value
-  DB value: ¥228000.00
-Step 4: Read from cache (expect stale 248000)
-  Cached value: ¥228000.00  ← Fresh value, not stale
-```
-
-**The cache did not return stale data.** The logs show that at Step 4, the CacheMonitor health check error (`Timeout waiting for idle object`) caused the cache read to be skipped, falling back to the database.
-
-When CacheMonitor is unstable, the plugin automatically bypasses the cache and returns results directly from the database. This is correct fail-safe behavior, but it means **you can't tell from the application side whether the cache is actually being used** — only latency changes reveal it.
-
 ## Summary
 
 - **The first connection always times out** — The TLS handshake to ElastiCache Serverless exceeds the plugin's internal connection timeout (default 2s). Even increasing `cacheConnectionTimeoutMs` to 10s or 30s doesn't help because the Valkey Glide client has its own timeout. The first query always falls back to the database as a cache miss, adding significant latency at application startup
 - **CacheMonitor health checks consistently fail** — The internal connection pool borrow timeout is fixed at 100ms, shorter than ElastiCache Serverless TLS connection establishment. Health checks always report `Non-recoverable error (DATA)`, but the data-path cache reads/writes use a separate path and still function. However, the unstable health state causes intermittent cache bypasses
-- **Lightweight queries are slower with caching** — For queries completing in 2ms within the same VPC, cache hits add ~105ms of TLS overhead. Query caching is designed for expensive queries (hundreds of ms or more) or high-concurrency DB offloading scenarios
+- **Cache hit latency is ~90-216ms** — Compared to 2-4ms with node-based (no TLS), this is significantly slower. TLS connection overhead dominates. For heavy queries (hundreds of ms or more), caching still provides a benefit, but for lightweight queries the cache overhead may exceed the query time itself
 - **Fail-safe behavior works correctly** — When the cache is unhealthy, the plugin automatically falls back to the database. With `failWhenCacheDown` set to `false` (default), cache issues never cascade into application failures
 
-With ElastiCache Serverless, the initial connection timeout and CacheMonitor instability are significant concerns. A node-based ElastiCache cluster (without TLS, or with pre-warmed connections) may mitigate these issues. I strongly recommend testing with your actual query patterns and latency requirements before production adoption.
+With ElastiCache Serverless, the initial connection timeout and CacheMonitor instability are significant concerns. As confirmed in the [node-based article](/en/blog/2026/03/27/jdbc-query-cache-valkey-node-based), a node-based ElastiCache cluster (without TLS) does not exhibit these issues and works correctly from the first query. I strongly recommend testing with your actual query patterns and latency requirements before production adoption.
 
 ## Cleanup
 
