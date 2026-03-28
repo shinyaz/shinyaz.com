@@ -26,12 +26,9 @@ This article implements TR-31 key export and import with the Java SDK. We wrap a
 
 ## How TR-31 Key Exchange Works
 
-TR-31 (ANSI X9 TR-31) is an industry standard format for securely exchanging symmetric keys. Key material is encrypted with a KEK, and key attributes (usage, algorithm, operation modes) are included in the key block header.
+In payment cryptographic processing, keys must be securely moved between partners and HSMs. Transferring key material in plaintext is not acceptable, so keys are wrapped with a "key encryption key" (KEK) for transport.
 
-Flow:
-1. Sender wraps the key with KEK (export)
-2. Transfer the key block
-3. Receiver unwraps with the same KEK (import)
+TR-31 (ANSI X9 TR-31) is the industry standard format for this key exchange. Key material is encrypted with a KEK, and key attributes (usage, algorithm, operation modes) are included in the key block header. The receiver decrypts the key block with the same KEK and automatically restores the attributes from the header.
 
 
 ## Source Code and Build
@@ -146,6 +143,14 @@ mvn exec:java -Dexec.mainClass=demo.KeyExchangeDemo
 
 ## Verification: CVV Key Export and Import
 
+The following 5 steps perform export → import → identity verification:
+
+1. Create a KEK (Key Encryption Key)
+2. Create a CVV key and generate CVV2 (baseline value before export)
+3. Export the CVV key via TR-31 wrapped with KEK
+4. Import the key block with the same KEK via TR-31
+5. Generate CVV2 with the imported key and confirm it matches the baseline
+
 ### Step 1: Create KEK
 
 The KEK uses `TR31_K0_KEY_ENCRYPTION_KEY` with Encrypt, Decrypt, Wrap, and Unwrap modes.
@@ -163,6 +168,34 @@ var kek = controlPlane.createKey(CreateKeyRequest.builder().exportable(true)
 ```
 
 ### Step 2: Create CVV Key and Generate CVV2
+
+Create a CVV key and generate CVV2 as the baseline value. This value should remain the same after export → import.
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">CVV key creation and CVV2 generation code</summary>
+
+```java title="Java"
+var cvk = controlPlane.createKey(CreateKeyRequest.builder().exportable(true)
+        .keyAttributes(KeyAttributes.builder()
+                .keyUsage(KeyUsage.TR31_C0_CARD_VERIFICATION_KEY)
+                .keyClass(KeyClass.SYMMETRIC_KEY)
+                .keyAlgorithm(KeyAlgorithm.TDES_2_KEY)
+                .keyModesOfUse(KeyModesOfUse.builder()
+                        .generate(true).verify(true).build())
+                .build()).build()).key();
+
+var cvv2 = dataPlane.generateCardValidationData(
+        GenerateCardValidationDataRequest.builder()
+                .keyIdentifier(cvk.keyArn())
+                .primaryAccountNumber("4111111111111111")
+                .validationDataLength(3)
+                .generationAttributes(CardGenerationAttributes.builder()
+                        .cardVerificationValue2(CardVerificationValue2.builder()
+                                .cardExpiryDate("0328").build())
+                        .build()).build());
+```
+
+</details>
 
 ```text title="Output"
 [CVK] TDES_2KEY KCV:B85317
@@ -187,7 +220,15 @@ var keyBlock = exportResp.wrappedKey().keyMaterial();
 WrappedKeyBlock: D0112C0TC00E0000A087CF3DCE5CDECCE24F3273...
 ```
 
-The header `D0112C0TC00E0000` contains key attributes. `C0` indicates `TR31_C0_CARD_VERIFICATION_KEY`.
+The header contains key attributes:
+
+- `D` — Key block version (AES KEK)
+- `0112` — Total key block length
+- `C0` — KeyUsage (`TR31_C0_CARD_VERIFICATION_KEY`)
+- `T` — Exportability (exportable)
+- `C00E0000` — Algorithm and mode information
+
+Attributes don't need to be specified during import because they're automatically read from the header.
 
 ### Step 4: TR-31 Import
 

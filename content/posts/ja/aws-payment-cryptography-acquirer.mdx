@@ -30,6 +30,8 @@ seriesOrder: 3
 
 ## アクワイアラの暗号処理の全体像
 
+アクワイアラは端末から受け取った決済データを、決済ネットワークやイシュアに中継する役割を担う。その過程で、端末の鍵で暗号化された PIN をネットワークの鍵に変換したり、データの改ざんがないことを MAC で検証したりする。
+
 | 処理 | API | 必要な鍵 | 目的 |
 |---|---|---|---|
 | PIN 変換 | TranslatePinData | incoming PEK + outgoing PEK | 鍵を切り替えて PIN を中継 |
@@ -291,6 +293,27 @@ PIN ブロックの値が変わっている（`D7608BA7908F181D` → `F000A8F1F0
 
 変換後の PIN ブロックが PEK-B で正しく復号でき、元の PIN と同じ PVV で検証できることを確認する。
 
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">VerifyPinData のコード</summary>
+
+```java title="Java"
+dataPlane.verifyPinData(VerifyPinDataRequest.builder()
+        .verificationKeyIdentifier(pvkArn)
+        .encryptionKeyIdentifier(pekBArn)
+        .primaryAccountNumber("4111111111111111")
+        .pinBlockFormat(PinBlockFormatForPinData.ISO_FORMAT_0)
+        .encryptedPinBlock(translateResp.pinBlock())
+        .verificationAttributes(PinVerificationAttributes.builder()
+                .visaPin(VisaPinVerification.builder()
+                        .pinVerificationKeyIndex(1)
+                        .verificationValue(pinResp.pinData().verificationValue())
+                        .build())
+                .build())
+        .build());
+```
+
+</details>
+
 ```text title="Output"
 Step 3 - PIN 検証（PEK-B + PVV）: 成功
   → PIN は平文に戻されることなく PEK-A → PEK-B に変換された
@@ -335,7 +358,35 @@ MAC 検証（正しいメッセージ）: 成功
 MAC 検証（改ざんメッセージ）: 失敗 — INVALID_MAC
 ```
 
-検証では、元のメッセージ `48656C6C6F576F726C64`（"HelloWorld"）の最後の 1 バイトを `64` → `65` に変更して改ざんをシミュレートした。1 バイトの変更でも MAC 検証が失敗し、トランザクションデータの改ざんを検知できる。
+検証では、元のメッセージ `48656C6C6F576F726C64`（"HelloWorld"）の最後の 1 バイトを `64` → `65` に変更して改ざんをシミュレートした。
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">VerifyMac のコード（正常系・改ざん系）</summary>
+
+```java title="Java"
+// 正しいメッセージで検証（成功）
+dataPlane.verifyMac(VerifyMacRequest.builder()
+        .keyIdentifier(macKeyArn)
+        .messageData("48656C6C6F576F726C64")
+        .mac(macResp.mac())
+        .verificationAttributes(MacAttributes.builder()
+                .algorithm(MacAlgorithm.CMAC).build())
+        .build());
+
+// 改ざんメッセージで検証（最後の 1 バイトを 64→65 に変更）
+dataPlane.verifyMac(VerifyMacRequest.builder()
+        .keyIdentifier(macKeyArn)
+        .messageData("48656C6C6F576F726C65")  // 末尾 64→65
+        .mac(macResp.mac())
+        .verificationAttributes(MacAttributes.builder()
+                .algorithm(MacAlgorithm.CMAC).build())
+        .build());
+// → VerificationFailedException: INVALID_MAC
+```
+
+</details>
+
+1 バイトの変更でも MAC 検証が失敗し、トランザクションデータの改ざんを検知できる。
 
 ## アクワイアラ処理の API と鍵の見取り図
 

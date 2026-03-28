@@ -26,12 +26,9 @@ seriesExtra: true
 
 ## TR-31 鍵交換の仕組み
 
-TR-31（ANSI X9 TR-31）は、対称鍵を安全に交換するための業界標準フォーマットである。鍵素材を KEK で暗号化し、鍵の属性（用途、アルゴリズム、操作モード）をヘッダーに含めたキーブロックとして転送する。
+決済暗号処理では、パートナー間や HSM 間で鍵を安全に移動する必要がある。鍵素材を平文で転送するのはセキュリティ上許容されないため、「鍵を暗号化するための鍵」（KEK: Key Encryption Key）で包んで転送する。
 
-フロー：
-1. 送信側が KEK で鍵を包む（エクスポート）
-2. キーブロックを転送
-3. 受信側が同じ KEK で鍵を取り出す（インポート）
+TR-31（ANSI X9 TR-31）は、この鍵交換のための業界標準フォーマットである。鍵素材を KEK で暗号化し、鍵の属性（用途、アルゴリズム、操作モード）をヘッダーに含めたキーブロックとして転送する。受信側は同じ KEK でキーブロックを復号し、ヘッダーから属性を自動的に復元する。
 
 
 ## ソースコードとビルド
@@ -153,6 +150,14 @@ mvn exec:java -Dexec.mainClass=demo.KeyExchangeDemo
 
 ## 検証：CVV 鍵のエクスポートとインポート
 
+以下の 5 ステップで、鍵のエクスポート→インポート→同一性検証を行う。
+
+1. KEK（鍵暗号化鍵）を作成
+2. CVV 鍵を作成し、CVV2 を生成（エクスポート前の基準値）
+3. CVV 鍵を KEK で TR-31 エクスポート
+4. キーブロックを同じ KEK で TR-31 インポート
+5. インポートした鍵で CVV2 を生成し、基準値と一致することを確認
+
 ### Step 1：KEK の作成
 
 KEK は `TR31_K0_KEY_ENCRYPTION_KEY` で作成する。他の鍵を包む/取り出すために Encrypt, Decrypt, Wrap, Unwrap が必要。
@@ -170,6 +175,34 @@ var kek = controlPlane.createKey(CreateKeyRequest.builder().exportable(true)
 ```
 
 ### Step 2：CVV 鍵の作成と CVV2 生成
+
+入門編と同じ方法で CVV 鍵を作成し、CVV2 を生成する。この値がエクスポート→インポート後も同じであることを確認する基準値になる。
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">CVV 鍵の作成と CVV2 生成コード</summary>
+
+```java title="Java"
+var cvk = controlPlane.createKey(CreateKeyRequest.builder().exportable(true)
+        .keyAttributes(KeyAttributes.builder()
+                .keyUsage(KeyUsage.TR31_C0_CARD_VERIFICATION_KEY)
+                .keyClass(KeyClass.SYMMETRIC_KEY)
+                .keyAlgorithm(KeyAlgorithm.TDES_2_KEY)
+                .keyModesOfUse(KeyModesOfUse.builder()
+                        .generate(true).verify(true).build())
+                .build()).build()).key();
+
+var cvv2 = dataPlane.generateCardValidationData(
+        GenerateCardValidationDataRequest.builder()
+                .keyIdentifier(cvk.keyArn())
+                .primaryAccountNumber("4111111111111111")
+                .validationDataLength(3)
+                .generationAttributes(CardGenerationAttributes.builder()
+                        .cardVerificationValue2(CardVerificationValue2.builder()
+                                .cardExpiryDate("0328").build())
+                        .build()).build());
+```
+
+</details>
 
 ```text title="Output"
 [CVK] TDES_2KEY KCV:B85317
@@ -196,7 +229,15 @@ var keyBlock = exportResp.wrappedKey().keyMaterial();
 WrappedKeyBlock: D0112C0TC00E0000A087CF3DCE5CDECCE24F3273...
 ```
 
-キーブロックの先頭 `D0112C0TC00E0000` がヘッダーで、鍵の属性が含まれている。`C0` は `TR31_C0_CARD_VERIFICATION_KEY` を示す。
+キーブロックの先頭がヘッダーで、鍵の属性が含まれている。
+
+- `D` — キーブロックバージョン（AES KEK を使用）
+- `0112` — キーブロック全体の長さ
+- `C0` — KeyUsage（`TR31_C0_CARD_VERIFICATION_KEY`）
+- `T` — Exportability（エクスポート可能）
+- `C00E0000` — アルゴリズムとモード情報
+
+インポート時にこれらの属性を個別に指定する必要がないのは、ヘッダーから自動的に読み取られるためである。
 
 ### Step 4：TR-31 インポート
 

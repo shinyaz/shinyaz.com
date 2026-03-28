@@ -30,6 +30,8 @@ The introductory article taught "one key, one purpose." The issuer edition showe
 
 ## Acquirer Cryptographic Operations Overview
 
+Acquirers relay payment data from terminals to payment networks and issuers. In that process, they translate PINs encrypted with the terminal's key to the network's key, and verify data integrity using MACs.
+
 | Operation | API | Required Keys | Purpose |
 |---|---|---|---|
 | PIN translation | TranslatePinData | incoming PEK + outgoing PEK | Relay PIN by switching keys |
@@ -278,6 +280,27 @@ Key points:
 
 ### Step 3: Verify translated PIN block with PEK-B + PVV
 
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">VerifyPinData code</summary>
+
+```java title="Java"
+dataPlane.verifyPinData(VerifyPinDataRequest.builder()
+        .verificationKeyIdentifier(pvkArn)
+        .encryptionKeyIdentifier(pekBArn)
+        .primaryAccountNumber("4111111111111111")
+        .pinBlockFormat(PinBlockFormatForPinData.ISO_FORMAT_0)
+        .encryptedPinBlock(translateResp.pinBlock())
+        .verificationAttributes(PinVerificationAttributes.builder()
+                .visaPin(VisaPinVerification.builder()
+                        .pinVerificationKeyIndex(1)
+                        .verificationValue(pinResp.pinData().verificationValue())
+                        .build())
+                .build())
+        .build());
+```
+
+</details>
+
 ```text title="Output"
 Step 3 - PIN verification (PEK-B + PVV): Success
   → PIN was translated from PEK-A to PEK-B without ever being exposed as plaintext
@@ -315,7 +338,35 @@ MAC verification (correct message): Success
 MAC verification (tampered message): Failed — INVALID_MAC
 ```
 
-The verification tampers the original message `48656C6C6F576F726C64` ("HelloWorld") by changing the last byte from `64` to `65`. Even this single byte change causes MAC verification to fail, detecting any data tampering during transmission.
+The verification tampers the original message `48656C6C6F576F726C64` ("HelloWorld") by changing the last byte from `64` to `65`.
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">VerifyMac code (correct + tampered)</summary>
+
+```java title="Java"
+// Verify with correct message (success)
+dataPlane.verifyMac(VerifyMacRequest.builder()
+        .keyIdentifier(macKeyArn)
+        .messageData("48656C6C6F576F726C64")
+        .mac(macResp.mac())
+        .verificationAttributes(MacAttributes.builder()
+                .algorithm(MacAlgorithm.CMAC).build())
+        .build());
+
+// Verify with tampered message (last byte 64→65)
+dataPlane.verifyMac(VerifyMacRequest.builder()
+        .keyIdentifier(macKeyArn)
+        .messageData("48656C6C6F576F726C65")
+        .mac(macResp.mac())
+        .verificationAttributes(MacAttributes.builder()
+                .algorithm(MacAlgorithm.CMAC).build())
+        .build());
+// → VerificationFailedException: INVALID_MAC
+```
+
+</details>
+
+Even this single byte change causes MAC verification to fail, detecting any data tampering during transmission.
 
 ## Acquirer Operations: API and Key Map
 
