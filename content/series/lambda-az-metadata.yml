@@ -1,3 +1,5 @@
 name: Lambda AZ Metadata
 slug: lambda-az-metadata
 nameJa: Lambda AZ メタデータ
+description: Explore Lambda AZ metadata for same-AZ routing — reduce cross-AZ data transfer costs with Powertools
+descriptionJa: Lambda AZ メタデータで同一 AZ ルーティングを実現 — Powertools でクロス AZ データ転送コストを削減

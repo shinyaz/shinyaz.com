@@ -1,3 +1,5 @@
 name: EKS ArgoCD Capability
 slug: eks-argocd-capability
 nameJa: EKS ArgoCD Capability 構築
+description: Set up ArgoCD on EKS using the built-in ArgoCD capability and eksctl
+descriptionJa: EKS 組み込みの ArgoCD Capability と eksctl で ArgoCD 環境を構築する

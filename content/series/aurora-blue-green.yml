@@ -1,3 +1,5 @@
 name: Aurora Blue/Green
 slug: aurora-blue-green
 nameJa: Aurora Blue/Green 実践検証
+description: Hands-on verification of Aurora Blue/Green Deployments — downtime measurement, JDBC plugin behavior, and MySQL vs PostgreSQL comparison
+descriptionJa: Aurora Blue/Green Deployments の実践検証 — ダウンタイム計測、JDBC プラグインの挙動、MySQL vs PostgreSQL の比較

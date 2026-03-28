@@ -102,12 +102,21 @@ export function getSeriesPosts(post: Post): Post[] {
     .sort((a, b) => (a.seriesOrder ?? 0) - (b.seriesOrder ?? 0));
 }
 
-export function getSeriesTitle(slug: string, locale: Locale): { name: string; suffix: string } | undefined {
+export function getSeriesTitle(slug: string, locale: Locale): { name: string; suffix: string; description?: string } | undefined {
   const s = series.find((item) => item.slug === slug);
   if (!s) return undefined;
   const name = locale === "ja" && s.nameJa ? s.nameJa : s.name;
+  const description = locale === "ja" && s.descriptionJa ? s.descriptionJa : s.description;
   const { seriesSuffix } = getDictionary(locale).series;
-  return { name, suffix: seriesSuffix };
+  return { name, suffix: seriesSuffix, description };
+}
+
+export function getAllSeries() {
+  return series;
+}
+
+export function getSeriesPostCount(seriesSlug: string, locale: Locale): number {
+  return getPublishedPosts(locale).filter((p) => p.series === seriesSlug).length;
 }
 
 export function getRelatedPosts(post: Post, limit = 3): Post[] {

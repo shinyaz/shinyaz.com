@@ -55,6 +55,7 @@ export function MobileNav({ locale, t }: MobileNavProps) {
   const navLinks = [
     { href: `/${locale}/blog`, label: t.nav.blog },
     { href: `/${locale}/til`, label: t.nav.til },
+    { href: `/${locale}/series`, label: t.nav.series },
     { href: `/${locale}/projects`, label: t.nav.projects },
     { href: `/${locale}/uses`, label: t.nav.uses },
     { href: `/${locale}/now`, label: t.nav.now },

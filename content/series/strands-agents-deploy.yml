@@ -1,3 +1,5 @@
 name: Strands Agents SDK デプロイ
 slug: strands-agents-deploy
 nameJa: Strands Agents SDK デプロイ
+description: Deploy Strands agents to production — Docker HTTP API, Lambda serverless, AgentCore managed, and OpenTelemetry observability
+descriptionJa: Strands エージェントを本番環境にデプロイ — Docker HTTP API、Lambda サーバーレス、AgentCore マネージド、OpenTelemetry オブザーバビリティ

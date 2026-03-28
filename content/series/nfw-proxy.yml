@@ -1,3 +1,5 @@
 name: Network Firewall Proxy
 slug: nfw-proxy
 nameJa: Network Firewall Proxy 検証
+description: Use AWS Network Firewall as a forward proxy — domain filtering, TLS interception, and multi-VPC with PrivateLink
+descriptionJa: AWS Network Firewall をフォワードプロキシとして使う — ドメインフィルタリング、TLS インターセプション、PrivateLink マルチ VPC

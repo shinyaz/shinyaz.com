@@ -21,6 +21,7 @@ export const en = {
     empty: "No posts found.",
     browseCategories: "Categories",
     browseTags: "Tags",
+    browseSeries: "Series",
   },
   til: {
     title: "TIL",
@@ -31,6 +32,7 @@ export const en = {
   nav: {
     blog: "Blog",
     til: "TIL",
+    series: "Series",
     projects: "Projects",
     uses: "Uses",
     now: "Now",
@@ -92,6 +94,9 @@ export const en = {
     extra: "Extra",
     prev: "Previous",
     next: "Next",
+    indexTitle: "Series",
+    indexDescription: "Multi-part article series covering topics in depth",
+    postCount: "{count} posts",
   },
   relatedPosts: {
     title: "Related Posts",

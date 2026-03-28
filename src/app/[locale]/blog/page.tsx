@@ -59,6 +59,12 @@ export default async function BlogPage({ params, searchParams }: BlogPageProps) 
             {t.blog.browseCategories}
           </Link>
           <Link
+            href={`/${locale}/series`}
+            className="inline-block rounded-full border border-border px-3 py-1 text-sm text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
+          >
+            {t.blog.browseSeries}
+          </Link>
+          <Link
             href={`/${locale}/tag`}
             className="inline-block rounded-full border border-border px-3 py-1 text-sm text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
           >

@@ -1,3 +1,5 @@
 name: JDBC Wrapper Valkey Cache
 slug: jdbc-query-cache-valkey
 nameJa: JDBC Wrapper Valkey キャッシュ検証
+description: Verify query result caching with AWS JDBC Wrapper and Amazon ElastiCache for Valkey — Serverless and node-based configurations
+descriptionJa: AWS JDBC Wrapper と Amazon ElastiCache for Valkey でクエリ結果キャッシュを検証 — Serverless とノードベース構成

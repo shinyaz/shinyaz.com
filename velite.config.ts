@@ -90,6 +90,8 @@ const series = defineCollection({
     name: s.string().max(100),
     slug: s.slug("series"),
     nameJa: s.string().max(100).optional(),
+    description: s.string().max(200).optional(),
+    descriptionJa: s.string().max(200).optional(),
   }),
 });
 
