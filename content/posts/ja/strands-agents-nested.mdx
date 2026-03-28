@@ -1,0 +1,364 @@
+---
+title: "Strands Agents SDK マルチエージェント — Swarm と Graph をネストして組み合わせる"
+description: "Strands Agents SDK で Swarm を Graph のノードとして埋め込み、自律協調と構造化ワークフローを組み合わせる。ネスト構成の実行結果とマルチエージェント Hooks によるノード監視をコードで確認する。"
+date: 2026-04-05
+published: false
+featured: false
+categories: [ai-agents]
+tags: ["strands-agents", "bedrock", "python", "ai-agents", "graph", "swarm"]
+series: "strands-agents-multi-agent-patterns"
+seriesOrder: 3
+---
+
+## はじめに
+
+[第 1 回](/ja/blog/2026/04/05/strands-agents-swarm)で Swarm の自律協調を、[第 2 回](/ja/blog/2026/04/05/strands-agents-graph)で Graph の構造化ワークフローを学んだ。しかし、実際のタスクでは「リサーチは複数の専門家が自律的に協調し、全体のフローは構造化したい」のように、両方を組み合わせたい場面がある。
+
+Swarm を Graph のノードとして埋め込むだけで、自律協調と構造化ワークフローを組み合わせられる。
+
+この記事では以下を試す。
+
+1. **ネスト構成** — Swarm を Graph のノードに埋め込む
+2. **マルチエージェント Hooks** — ノードの実行を監視する
+3. **共有状態** — `invocation_state` でエージェント間にデータを渡す
+
+公式ドキュメントは [Graph](https://strandsagents.com/docs/user-guide/concepts/multi-agent/graph/) を参照。
+
+## セットアップ
+
+[第 1 回](/ja/blog/2026/04/05/strands-agents-swarm)の環境をそのまま使う。以降の例ではすべて同じモデル設定を使う。各例は独立した `.py` ファイルとして実行できる。共通設定を先頭に書き、その下に各例のコードを追加する形だ。
+
+```python title="Python (共通設定)"
+from strands import Agent
+from strands.models import BedrockModel
+from strands.multiagent import Swarm, GraphBuilder
+
+bedrock_model = BedrockModel(
+    model_id="us.anthropic.claude-sonnet-4-20250514-v1:0",
+    region_name="us-east-1",
+)
+```
+
+## ネスト構成 — Swarm を Graph のノードに
+
+「医療と技術の専門家チームが自律的にリサーチし、その結果をレポートライターがまとめる」というワークフローを作る。リサーチ部分は Swarm で自律協調、全体フローは Graph で構造化する。
+
+`GraphBuilder.add_node` にはエージェントだけでなく、Swarm や Graph などのマルチエージェントシステムも渡せる。
+
+```python title="Python (Graph 構築と実行)"
+# Graph: research_swarm -> report_writer
+builder = GraphBuilder()
+builder.add_node(research_swarm, "research_team")
+builder.add_node(report_writer, "report")
+builder.add_edge("research_team", "report")
+builder.set_entry_point("research_team")
+
+graph = builder.build()
+result = graph("What is the impact of AI on healthcare?")
+```
+
+`add_node(research_swarm, "research_team")` — Swarm をそのまま Graph のノードとして登録するだけだ。Graph は `research_team` ノードを実行する際に内部で Swarm を起動し、Swarm が完了したら結果を次のノード（`report`）に渡す。
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">01_nested.py 全体コード（コピペ用）</summary>
+
+```python title="01_nested.py"
+from strands import Agent
+from strands.models import BedrockModel
+from strands.multiagent import Swarm, GraphBuilder
+
+bedrock_model = BedrockModel(
+    model_id="us.anthropic.claude-sonnet-4-20250514-v1:0",
+    region_name="us-east-1",
+)
+
+medical_researcher = Agent(
+    name="medical_researcher", model=bedrock_model,
+    system_prompt="You are a medical research specialist. Research the medical aspects and hand off to another researcher.",
+    callback_handler=None,
+)
+tech_researcher = Agent(
+    name="tech_researcher", model=bedrock_model,
+    system_prompt="You are a technology research specialist. Research the technology aspects. Provide your findings without handing off.",
+    callback_handler=None,
+)
+research_swarm = Swarm(
+    [medical_researcher, tech_researcher],
+    entry_point=medical_researcher,
+    max_handoffs=5, max_iterations=5,
+)
+
+report_writer = Agent(
+    name="report_writer", model=bedrock_model,
+    system_prompt="You are a report writing specialist. Write a concise 2-3 sentence summary combining all research.",
+    callback_handler=None,
+)
+
+builder = GraphBuilder()
+builder.add_node(research_swarm, "research_team")
+builder.add_node(report_writer, "report")
+builder.add_edge("research_team", "report")
+builder.set_entry_point("research_team")
+
+graph = builder.build()
+result = graph("What is the impact of AI on healthcare?")
+
+print(f"Status: {result.status}")
+print(f"Execution order: {[node.node_id for node in result.execution_order]}")
+
+for node_id, node_result in result.results.items():
+    print(f"\n--- {node_id} ---")
+    print(f"  Status: {node_result.status}")
+    print(f"  Time: {node_result.execution_time}ms")
+    if node_result.result and hasattr(node_result.result, 'node_history'):
+        print(f"  Swarm history: {[n.node_id for n in node_result.result.node_history]}")
+    if node_result.result and hasattr(node_result.result, 'message') and node_result.result.message:
+        for block in node_result.result.message.get('content', []):
+            if 'text' in block:
+                print(f"  Output: {block['text'][:150]}...")
+                break
+```
+
+</details>
+
+```bash title="Terminal"
+python -u 01_nested.py
+```
+
+### 実行結果
+
+```text title="Output"
+Status: Status.COMPLETED
+Execution order: ['research_team', 'report']
+
+--- research_team ---
+  Status: Status.COMPLETED
+  Time: 35212ms
+  Swarm history: ['medical_researcher', 'tech_researcher']
+
+--- report ---
+  Status: Status.COMPLETED
+  Time: 3117ms
+  Output: AI is fundamentally transforming healthcare through advanced technologies including deep neural netwo...
+```
+
+Graph の `execution_order` は `['research_team', 'report']` の 2 ステップだが、`research_team` ノードの内部では Swarm が `medical_researcher → tech_researcher` のハンドオフを実行している。`node_result.result.node_history` でネスト内のハンドオフ履歴を確認できる。
+
+## マルチエージェント Hooks — ノードの実行を監視する
+
+「Graph のどのノードがいつ開始・完了したかをリアルタイムでログに記録する」というシナリオを試す。
+
+[実践第 3 回](/ja/blog/2026/03/29/strands-agents-hooks)で学んだ Hooks は、マルチエージェントシステムにも使える。`BeforeNodeCallEvent` と `AfterNodeCallEvent` で Graph のノード実行を監視できる。以下のコードは前のセクションで作った `graph` に Hooks を追加する例だ（全体コードは折りたたみ内の `02_hooks.py` を参照）。
+
+```python title="Python"
+from strands.hooks import BeforeNodeCallEvent, AfterNodeCallEvent
+
+def on_node_start(event: BeforeNodeCallEvent) -> None:
+    print(f"[HOOK] Node starting: {event.node_id}")
+
+def on_node_end(event: AfterNodeCallEvent) -> None:
+    print(f"[HOOK] Node completed: {event.node_id}")
+
+graph.hooks.add_callback(BeforeNodeCallEvent, on_node_start)
+graph.hooks.add_callback(AfterNodeCallEvent, on_node_end)
+
+result = graph("What is Amazon S3?")
+```
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">02_hooks.py 全体コード（コピペ用）</summary>
+
+```python title="02_hooks.py"
+from strands import Agent
+from strands.models import BedrockModel
+from strands.multiagent import GraphBuilder
+from strands.hooks import BeforeNodeCallEvent, AfterNodeCallEvent
+
+bedrock_model = BedrockModel(
+    model_id="us.anthropic.claude-sonnet-4-20250514-v1:0",
+    region_name="us-east-1",
+)
+
+researcher = Agent(
+    name="researcher", model=bedrock_model,
+    system_prompt="You are a research specialist. Provide key facts in bullet points.",
+    callback_handler=None,
+)
+writer = Agent(
+    name="writer", model=bedrock_model,
+    system_prompt="You are a writing specialist. Write a 2-sentence summary.",
+    callback_handler=None,
+)
+
+builder = GraphBuilder()
+builder.add_node(researcher, "research")
+builder.add_node(writer, "report")
+builder.add_edge("research", "report")
+builder.set_entry_point("research")
+graph = builder.build()
+
+def on_node_start(event: BeforeNodeCallEvent) -> None:
+    print(f"[HOOK] Node starting: {event.node_id}")
+
+def on_node_end(event: AfterNodeCallEvent) -> None:
+    print(f"[HOOK] Node completed: {event.node_id}")
+
+graph.hooks.add_callback(BeforeNodeCallEvent, on_node_start)
+graph.hooks.add_callback(AfterNodeCallEvent, on_node_end)
+
+result = graph("What is Amazon S3?")
+print(f"\nStatus: {result.status}")
+print(f"Execution order: {[node.node_id for node in result.execution_order]}")
+```
+
+</details>
+
+```bash title="Terminal"
+python -u 02_hooks.py
+```
+
+### 実行結果
+
+```text title="Output"
+[HOOK] Node starting: research
+[HOOK] Node completed: research
+[HOOK] Node starting: report
+[HOOK] Node completed: report
+
+Status: Status.COMPLETED
+Execution order: ['research', 'report']
+```
+
+実践第 3 回の `BeforeToolCallEvent` / `AfterToolCallEvent` がツール単位の監視だったのに対し、`BeforeNodeCallEvent` / `AfterNodeCallEvent` はノード（= エージェント）単位の監視だ。本番環境では、ノードの実行時間のログ記録や、特定ノードの条件付きスキップなどに活用できる。
+
+
+## 共有状態 — invocation_state でエージェント間にデータを渡す
+
+「ユーザーのロールに応じて、各エージェントのツールが権限チェックを行う」というシナリオを試す。ユーザー情報は LLM のプロンプトには含めず、ツール内でのみ参照する。
+
+Swarm や Graph では、`invocation_state` パラメータでエージェント間に共有データを渡せる。LLM のプロンプトには含まれず、ツール内で `ToolContext` 経由でアクセスする。
+
+```python title="Python (実行)"
+result = swarm(
+    "What is Amazon S3? Keep it brief.",
+    invocation_state={"user_id": "user-123", "role": "admin"},
+)
+```
+
+ツール側では `@tool(context=True)` と `ToolContext` で `invocation_state` にアクセスする。
+
+```python title="Python (ツール定義)"
+@tool(context=True)
+def check_permissions(action: str, tool_context: ToolContext) -> str:
+    """Check if the current user has permission to perform an action.
+
+    Args:
+        action: The action to check permissions for
+
+    Returns:
+        str: Permission check result
+    """
+    user_id = tool_context.invocation_state.get("user_id", "unknown")
+    role = tool_context.invocation_state.get("role", "guest")
+    return f"User {user_id} (role: {role}) - permission for '{action}': {'granted' if role == 'admin' else 'denied'}"
+```
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">03_shared_state.py 全体コード（コピペ用）</summary>
+
+```python title="03_shared_state.py"
+from strands import Agent, tool, ToolContext
+from strands.models import BedrockModel
+from strands.multiagent import Swarm
+
+bedrock_model = BedrockModel(
+    model_id="us.anthropic.claude-sonnet-4-20250514-v1:0",
+    region_name="us-east-1",
+)
+
+@tool(context=True)
+def check_permissions(action: str, tool_context: ToolContext) -> str:
+    """Check if the current user has permission to perform an action.
+
+    Args:
+        action: The action to check permissions for
+
+    Returns:
+        str: Permission check result
+    """
+    user_id = tool_context.invocation_state.get("user_id", "unknown")
+    role = tool_context.invocation_state.get("role", "guest")
+    result = f"User {user_id} (role: {role}) - permission for '{action}': {'granted' if role == 'admin' else 'denied'}"
+    print(f"[TOOL] {result}")
+    return result
+
+researcher = Agent(
+    name="researcher", model=bedrock_model,
+    system_prompt="Check permissions for 'read_data' first, then research the topic briefly. Hand off to the writer when done.",
+    tools=[check_permissions], callback_handler=None,
+)
+writer = Agent(
+    name="writer", model=bedrock_model,
+    system_prompt="Check permissions for 'write_report' first, then write a 1-sentence summary. Do not hand off.",
+    tools=[check_permissions], callback_handler=None,
+)
+
+swarm = Swarm([researcher, writer], entry_point=researcher, max_handoffs=5, max_iterations=5)
+
+print("=== Admin user ===")
+result1 = swarm(
+    "What is Amazon S3? Keep it brief.",
+    invocation_state={"user_id": "user-123", "role": "admin"},
+)
+print(f"Status: {result1.status}")
+
+print("\n=== Guest user ===")
+swarm2 = Swarm(
+    [
+        Agent(name="r", model=bedrock_model, system_prompt="Check permissions for 'read_data' first, then research briefly. Hand off to writer.", tools=[check_permissions], callback_handler=None),
+        Agent(name="w", model=bedrock_model, system_prompt="Check permissions for 'write_report' first, then write a 1-sentence summary. Do not hand off.", tools=[check_permissions], callback_handler=None),
+    ],
+    max_handoffs=5, max_iterations=5,
+)
+result2 = swarm2(
+    "What is Amazon S3? Keep it brief.",
+    invocation_state={"user_id": "user-456", "role": "guest"},
+)
+print(f"Status: {result2.status}")
+```
+
+</details>
+
+```bash title="Terminal"
+python -u 03_shared_state.py
+```
+
+### 実行結果
+
+```text title="Output"
+=== Admin user ===
+[TOOL] User user-123 (role: admin) - permission for 'read_data': granted
+[TOOL] User user-123 (role: admin) - permission for 'write_report': granted
+Status: Status.COMPLETED
+
+=== Guest user ===
+[TOOL] User user-456 (role: guest) - permission for 'read_data': denied
+[TOOL] User user-456 (role: guest) - permission for 'write_report': denied
+Status: Status.COMPLETED
+```
+
+`invocation_state` に渡した `user_id` と `role` が、Swarm 内の全エージェントのツールに正しく伝播されている。admin ユーザーは `granted`、guest ユーザーは `denied` と、同じ Swarm でも呼び出し時の状態に応じて動作が変わる。
+
+この仕組みは以下の場面で有用だ。
+
+- **認証情報の共有** — ユーザー ID やロールをエージェント間で共有する
+- **設定の注入** — デバッグモードやリージョン設定を全エージェントに渡す
+- **外部リソースの共有** — データベース接続やキャッシュオブジェクトを渡す（LLM のプロンプトには含まれない）
+
+## まとめ
+
+- **Swarm を Graph のノードとして埋め込むだけでネスト構成が実現する** — `add_node` に Swarm を渡すだけ。Graph は内部で Swarm を起動し、完了したら結果を次のノードに渡す。
+- **`node_result.result.node_history` でネスト内のハンドオフ履歴を確認できる** — Graph のノードとして実行された Swarm の内部動作を追跡できる。
+- **マルチエージェント Hooks でノード実行を監視できる** — `BeforeNodeCallEvent` / `AfterNodeCallEvent` で、Graph のノード開始・完了をリアルタイムで監視する。実践第 3 回の Hooks の知識がそのまま活きる。
+- **自律協調と構造化を組み合わせられる** — リサーチは Swarm で自律的に、全体フローは Graph で構造化。タスクの性質に応じてパターンを組み合わせる。
+- **`invocation_state` でエージェント間に共有データを渡せる** — LLM のプロンプトには含まれず、ツール内で `ToolContext` 経由でアクセスする。認証情報や設定の注入に有用。

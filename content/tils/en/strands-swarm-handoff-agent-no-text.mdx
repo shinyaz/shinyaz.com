@@ -1,0 +1,28 @@
+---
+title: "Swarm agents that hand off produce no text output"
+description: "In Strands Agents SDK Swarm, agents that hand off via handoff_to_agent have no text block in their result. The final text output comes from the last agent that didn't hand off."
+date: 2026-04-05
+published: false
+tags: ["strands-agents", "bedrock", "python", "swarm"]
+---
+
+Trying to extract per-node output from a Swarm result, the `researcher` that handed off had no text output and caused an `IndexError`.
+
+```text title="Output"
+--- researcher ---
+  Status: Status.COMPLETED
+
+--- writer ---
+  Status: Status.COMPLETED
+  Output: Amazon Bedrock is a fully managed AWS service...
+```
+
+The researcher calls `handoff_to_agent` to hand off, so it finishes without generating a text block. The `content` in `result.message` only contains tool-use blocks, with no block having a `text` key.
+
+The final text output comes from the last agent that didn't hand off (`writer` in this case). When extracting output from `result.results`, always check for text block existence:
+
+```python title="Python"
+for block in msg.get('content', []):
+    if 'text' in block:  # This check is required
+        print(block['text'])
+```

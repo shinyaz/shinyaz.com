@@ -1,0 +1,17 @@
+---
+title: "Cyclic Graph requires explicit set_entry_point"
+description: "Strands Agents SDK Graph with cycles (feedback loops) fails build() auto-detection with ValueError. Use set_entry_point to specify the starting node explicitly."
+date: 2026-04-05
+published: false
+tags: ["strands-agents", "bedrock", "python", "graph"]
+---
+
+Adding a feedback loop (reverse edge `reviewer → draft_writer`) to a Graph and calling `build()` immediately threw a `ValueError`.
+
+```text title="Output"
+ValueError: No entry points found - all nodes have dependencies
+```
+
+DAG (acyclic) graphs worked fine, but adding a cycle broke it. `GraphBuilder.build()` auto-detects entry points by finding nodes with no incoming edges. With cycles, all nodes have incoming edges, so detection fails.
+
+Fix with `builder.set_entry_point("draft_writer")`. For cyclic graphs, you also need `set_max_node_executions` (prevent infinite loops) and `reset_on_revisit(True)` (reset state on revisit). Remember these three as a set.

@@ -1,0 +1,385 @@
+---
+title: "Strands Agents SDK マルチエージェント — Swarm でエージェントを自律的に協調させる"
+description: "Strands Agents SDK の Swarm パターンを実際に動かし、エージェント同士が自律的にハンドオフしながらタスクを遂行する仕組みをコードと実行結果で確認する。Agents as Tools との違いも比較する。"
+date: 2026-04-05
+published: false
+featured: false
+categories: [ai-agents]
+tags: ["strands-agents", "bedrock", "python", "ai-agents", "swarm"]
+series: "strands-agents-multi-agent-patterns"
+seriesOrder: 1
+---
+
+## はじめに
+
+[入門シリーズ](/ja/blog/2026/03/03/strands-agents-quickstart)ではエージェントの基本を、[実践シリーズ](/ja/blog/2026/03/29/strands-agents-structured-output)ではエージェントの出力制御や動作監視を学んだ。入門第 5 回では [Agents as Tools](/ja/blog/2026/03/03/strands-agents-multi-agent) パターンで複数エージェントを協調させたが、あのパターンはオーケストレーターがすべてを制御していた。
+
+`Swarm` にエージェントを渡すだけで、エージェント同士が自律的にハンドオフしながらタスクを遂行する。
+
+この記事では以下を試す。
+
+1. **基本** — Swarm の作成と実行
+2. **ハンドオフの仕組み** — 共有コンテキストと自律的なハンドオフ
+3. **4 エージェントの Swarm** — 自律的なルート選択
+4. **安全機構** — `max_handoffs` の動作確認
+
+公式ドキュメントは [Swarm](https://strandsagents.com/docs/user-guide/concepts/multi-agent/swarm/) を参照。
+
+## セットアップ
+
+[入門シリーズ](/ja/blog/2026/03/03/strands-agents-quickstart)の環境をそのまま使う。新規の場合は以下を実行する。
+
+```bash title="Terminal"
+mkdir my_agent && cd my_agent
+python -m venv .venv
+source .venv/bin/activate
+pip install strands-agents strands-agents-tools
+```
+
+以降の例ではすべて同じモデル設定を使う。各例は独立した `.py` ファイルとして実行できる。共通設定を先頭に書き、その下に各例のコードを追加する形だ。
+
+```python title="Python (共通設定)"
+from strands import Agent
+from strands.models import BedrockModel
+from strands.multiagent import Swarm
+
+bedrock_model = BedrockModel(
+    model_id="us.anthropic.claude-sonnet-4-20250514-v1:0",
+    region_name="us-east-1",
+)
+```
+
+## 基本 — Swarm の作成と実行
+
+「あるトピックをリサーチして、その結果を要約する」というタスクを、researcher と writer の 2 エージェントに任せてみる。
+
+Agents as Tools ではオーケストレーターが `@tool` でラップされた専門エージェントを呼び出していた。Swarm ではエージェントをリストで渡すだけで、エージェント同士が自律的にハンドオフする。
+
+```python title="Python"
+researcher = Agent(
+    name="researcher",
+    model=bedrock_model,
+    system_prompt="You are a research specialist. Research the given topic and hand off to the writer when you have enough information.",
+    callback_handler=None,
+)
+
+writer = Agent(
+    name="writer",
+    model=bedrock_model,
+    system_prompt="You are a writing specialist. Write a concise summary based on the research provided. Do not hand off to another agent.",
+    callback_handler=None,
+)
+
+swarm = Swarm(
+    [researcher, writer],
+    entry_point=researcher,
+    max_handoffs=10,
+    max_iterations=10,
+)
+
+result = swarm("What is Amazon Bedrock? Summarize in 2-3 sentences.")
+```
+
+`Swarm` のコンストラクタに渡すのはエージェントのリストだけだ。`entry_point` で最初に実行するエージェントを指定する。`max_handoffs` と `max_iterations` はハンドオフ回数と総イテレーション数の上限で、無限ループを防ぐ安全機構だ。各エージェントの `callback_handler=None` はコンソールへのストリーミング出力を無効にする設定で、以降の例でもすべて同じ設定を使う。
+
+Agents as Tools との違いを整理する。
+
+| | Agents as Tools | Swarm |
+|---|---|---|
+| 制御方式 | オーケストレーターが判断 | エージェント同士が自律判断 |
+| ハンドオフ | `@tool` 経由で呼び出し | `handoff_to_agent` ツールが自動注入 |
+| コンテキスト共有 | オーケストレーターが中継 | 共有コンテキストが自動管理 |
+| コード量 | `@tool` ラッパーが必要 | エージェントをリストで渡すだけ |
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">01_swarm_basic.py 全体コード（コピペ用）</summary>
+
+```python title="01_swarm_basic.py"
+from strands import Agent
+from strands.models import BedrockModel
+from strands.multiagent import Swarm
+
+bedrock_model = BedrockModel(
+    model_id="us.anthropic.claude-sonnet-4-20250514-v1:0",
+    region_name="us-east-1",
+)
+
+researcher = Agent(
+    name="researcher",
+    model=bedrock_model,
+    system_prompt="You are a research specialist. Research the given topic and hand off to the writer when you have enough information.",
+    callback_handler=None,
+)
+
+writer = Agent(
+    name="writer",
+    model=bedrock_model,
+    system_prompt="You are a writing specialist. Write a concise summary based on the research provided. Do not hand off to another agent.",
+    callback_handler=None,
+)
+
+swarm = Swarm(
+    [researcher, writer],
+    entry_point=researcher,
+    max_handoffs=10,
+    max_iterations=10,
+)
+
+result = swarm("What is Amazon Bedrock? Summarize in 2-3 sentences.")
+
+print(f"Status: {result.status}")
+print(f"Node history: {[node.node_id for node in result.node_history]}")
+print(f"Execution count: {result.execution_count}")
+print(f"Execution time: {result.execution_time}ms")
+
+for node_id, node_result in result.results.items():
+    print(f"\n--- {node_id} ---")
+    print(f"  Status: {node_result.status}")
+    if node_result.result and node_result.result.message:
+        for block in node_result.result.message.get('content', []):
+            if 'text' in block:
+                print(f"  Output: {block['text'][:150]}...")
+                break
+```
+
+</details>
+
+```bash title="Terminal"
+python -u 01_swarm_basic.py
+```
+
+### 実行結果
+
+```text title="Output"
+Status: Status.COMPLETED
+Node history: ['researcher', 'writer']
+Execution count: 2
+Execution time: 12314ms
+
+--- researcher ---
+  Status: Status.COMPLETED
+
+--- writer ---
+  Status: Status.COMPLETED
+  Output: Amazon Bedrock is a fully managed AWS service that provides access to foundation models from leading AI companies...
+```
+
+`researcher` が最初に実行され、リサーチが完了すると `writer` にハンドオフした。`node_history` で実行順序が確認できる。
+
+注目すべきは `researcher` のテキスト出力が空である点だ。researcher はテキストを返す代わりに `handoff_to_agent` ツールを呼び出して writer にハンドオフした。最終的なテキスト出力は、ハンドオフせずに終了した `writer` が生成する。
+
+## ハンドオフの仕組み
+
+Swarm は各エージェントに `handoff_to_agent` というツールを自動的に注入する。エージェントは「次にどのエージェントに任せるか」を自律的に判断し、このツールを呼び出してハンドオフする。
+
+Swarm が管理する共有コンテキストには以下が含まれる。
+
+- **元のタスク** — ユーザーが渡した入力
+- **ハンドオフ履歴** — どのエージェントがどの順序で実行されたか
+- **共有知識** — 各エージェントが蓄積した情報
+- **利用可能なエージェント一覧** — ハンドオフ先の候補
+
+各エージェントはこのコンテキストを参照して、次にどのエージェントにハンドオフすべきかを判断する。開発者がハンドオフのロジックを書く必要はない。
+
+`result` オブジェクトの主要なフィールドを整理する。
+
+| フィールド | 説明 |
+|---|---|
+| `result.status` | 実行ステータス（`COMPLETED`, `FAILED` など） |
+| `result.node_history` | 実行されたノードの履歴（順序付き） |
+| `result.execution_count` | 総実行回数 |
+| `result.execution_time` | 総実行時間（ミリ秒） |
+| `result.results` | 各ノードの個別結果（`node_id` → `NodeResult`） |
+
+`node_history` が `['researcher', 'writer']` であることから、researcher → writer の順序でハンドオフが行われたことが分かる。エージェントが 3 つ以上ある場合、LLM の判断によってハンドオフの順序が変わる可能性がある。
+
+
+## 4 エージェントの Swarm — 自律的なルート選択
+
+「REST API を設計する」というタスクを、researcher → architect → coder → reviewer の 4 エージェントに任せてみる。2 エージェントの例ではハンドオフの順序が固定的だったが、エージェントが増えると LLM が自律的にルートを選ぶ。
+
+```python title="Python"
+researcher = Agent(
+    name="researcher", model=bedrock_model,
+    system_prompt="You are a research specialist. Research the topic and hand off to the most appropriate next agent.",
+    callback_handler=None,
+)
+architect = Agent(
+    name="architect", model=bedrock_model,
+    system_prompt="You are a system architecture specialist. Design a high-level architecture. Hand off to the coder when done.",
+    callback_handler=None,
+)
+coder = Agent(
+    name="coder", model=bedrock_model,
+    system_prompt="You are a coding specialist. Write pseudocode based on the architecture. Hand off to the reviewer when done.",
+    callback_handler=None,
+)
+reviewer = Agent(
+    name="reviewer", model=bedrock_model,
+    system_prompt="You are a code review specialist. Review and provide a final summary. Do not hand off.",
+    callback_handler=None,
+)
+
+swarm = Swarm(
+    [researcher, architect, coder, reviewer],
+    entry_point=researcher,
+    max_handoffs=10,
+    max_iterations=10,
+)
+
+result = swarm("Design a simple REST API for a todo app")
+```
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">02_swarm_team.py 全体コード（コピペ用）</summary>
+
+```python title="02_swarm_team.py"
+from strands import Agent
+from strands.models import BedrockModel
+from strands.multiagent import Swarm
+
+bedrock_model = BedrockModel(
+    model_id="us.anthropic.claude-sonnet-4-20250514-v1:0",
+    region_name="us-east-1",
+)
+
+researcher = Agent(
+    name="researcher", model=bedrock_model,
+    system_prompt="You are a research specialist. Research the topic and hand off to the most appropriate next agent.",
+    callback_handler=None,
+)
+architect = Agent(
+    name="architect", model=bedrock_model,
+    system_prompt="You are a system architecture specialist. Design a high-level architecture. Hand off to the coder when done.",
+    callback_handler=None,
+)
+coder = Agent(
+    name="coder", model=bedrock_model,
+    system_prompt="You are a coding specialist. Write pseudocode based on the architecture. Hand off to the reviewer when done.",
+    callback_handler=None,
+)
+reviewer = Agent(
+    name="reviewer", model=bedrock_model,
+    system_prompt="You are a code review specialist. Review and provide a final summary. Do not hand off.",
+    callback_handler=None,
+)
+
+swarm = Swarm(
+    [researcher, architect, coder, reviewer],
+    entry_point=researcher,
+    max_handoffs=10, max_iterations=10,
+)
+
+result = swarm("Design a simple REST API for a todo app")
+
+print(f"Status: {result.status}")
+print(f"Node history: {[n.node_id for n in result.node_history]}")
+print(f"Execution count: {result.execution_count}")
+print(f"Execution time: {result.execution_time}ms")
+```
+
+</details>
+
+```bash title="Terminal"
+python -u 02_swarm_team.py
+```
+
+### 実行結果
+
+```text title="Output"
+Status: Status.COMPLETED
+Node history: ['researcher', 'architect', 'coder', 'reviewer']
+Execution count: 4
+Execution time: 83638ms
+```
+
+4 エージェントが `researcher → architect → coder → reviewer` の順序で自律的にハンドオフした。この順序は開発者が指定したものではなく、各エージェントが共有コンテキストを参照して「次に誰に任せるか」を判断した結果だ。タスクの内容によっては、researcher が直接 coder にハンドオフする可能性もある。
+
+## 安全機構 — max_handoffs の動作確認
+
+「`max_handoffs` を小さく設定して、上限に達した場合にどうなるか」を確認する。
+
+先ほどの 4 エージェント Swarm で `max_handoffs=2` に制限する。
+
+```python title="Python"
+swarm = Swarm(
+    [researcher, architect, coder, reviewer],
+    entry_point=researcher,
+    max_handoffs=2,
+    max_iterations=10,
+)
+
+result = swarm("Design a simple REST API for a todo app")
+```
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">03_swarm_limit.py 全体コード（コピペ用）</summary>
+
+```python title="03_swarm_limit.py"
+from strands import Agent
+from strands.models import BedrockModel
+from strands.multiagent import Swarm
+
+bedrock_model = BedrockModel(
+    model_id="us.anthropic.claude-sonnet-4-20250514-v1:0",
+    region_name="us-east-1",
+)
+
+researcher = Agent(
+    name="researcher", model=bedrock_model,
+    system_prompt="You are a research specialist. Research the topic and hand off to the architect.",
+    callback_handler=None,
+)
+architect = Agent(
+    name="architect", model=bedrock_model,
+    system_prompt="You are an architecture specialist. Design architecture and hand off to the coder.",
+    callback_handler=None,
+)
+coder = Agent(
+    name="coder", model=bedrock_model,
+    system_prompt="You are a coding specialist. Write code and hand off to the reviewer.",
+    callback_handler=None,
+)
+reviewer = Agent(
+    name="reviewer", model=bedrock_model,
+    system_prompt="You are a review specialist. Review and provide final summary. Do not hand off.",
+    callback_handler=None,
+)
+
+swarm = Swarm(
+    [researcher, architect, coder, reviewer],
+    entry_point=researcher,
+    max_handoffs=2, max_iterations=10,
+)
+
+result = swarm("Design a simple REST API for a todo app")
+
+print(f"Status: {result.status}")
+print(f"Node history: {[n.node_id for n in result.node_history]}")
+print(f"Execution count: {result.execution_count}")
+```
+
+</details>
+
+```bash title="Terminal"
+python -u 03_swarm_limit.py
+```
+
+### 実行結果
+
+```text title="Output"
+Status: Status.FAILED
+Node history: ['researcher', 'architect']
+Execution count: 2
+```
+
+`max_handoffs=2` のため、researcher → architect の 2 回で上限に達し、`Status.FAILED` で停止した。coder と reviewer には到達していない。
+
+本番環境では、タスクに必要なハンドオフ回数を見積もって `max_handoffs` を設定する必要がある。小さすぎるとタスクが完了せず、大きすぎると無限ループのリスクが増える。`max_iterations` はハンドオフだけでなくエージェントの総実行回数（ハンドオフ + 各エージェント内のループ）を制限するパラメータで、`max_handoffs` と組み合わせて使う。
+
+## まとめ
+
+- **`Swarm` にエージェントを渡すだけで自律的な協調が実現する** — `@tool` ラッパーやオーケストレーターは不要。エージェントのリストと `entry_point` を指定するだけ。
+- **ハンドオフは `handoff_to_agent` ツールで自動管理される** — 各エージェントに自動注入されるツールで、エージェントが自律的にハンドオフ先を判断する。開発者がハンドオフロジックを書く必要はない。
+- **`node_history` で実行順序を追跡できる** — どのエージェントがどの順序で実行されたかを確認でき、デバッグや最適化に活用できる。
+- **`max_handoffs` と `max_iterations` で安全性を確保する** — 無限ループを防ぐ上限設定。本番環境では必ず設定すべきパラメータ。

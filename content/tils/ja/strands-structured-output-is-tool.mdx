@@ -6,7 +6,7 @@ published: false
 tags: ["strands-agents", "bedrock", "python", "structured-output"]
 ---
 
-Strands Agents SDK の Structured Output で `ConversionResult` という Pydantic モデルを `structured_output_model` に渡したところ、メトリクスに見慣れないツール名が表示された。
+Strands Agents SDK の Structured Output で `ConversionResult` という Pydantic モデルを `structured_output_model` に渡したところ、メトリクスに見慣れないツール名が表示されて驚いた。
 
 ```text title="Output"
 tool_usage:
@@ -14,8 +14,8 @@ tool_usage:
   ConversionResult: calls=1, success=1
 ```
 
-`ConversionResult` がツールとして計上されている。Structured Output は内部的に Pydantic モデルをツール仕様に変換して LLM に登録する仕組みだった。LLM は通常のツール呼び出しと同じ方法で構造化データを出力し、SDK がバリデーションする。
+`ConversionResult` がツールとして計上されている。自分で定義したツールではないのに、なぜ `tool_usage` に出てくるのか。
 
-つまりエージェントループは「LLM → `get_exchange_rate` 呼び出し → 結果を受け取り → `ConversionResult` ツール呼び出し → バリデーション成功 → 完了」という流れになる。
+調べてみると、Structured Output は内部的に Pydantic モデルをツール仕様に変換して LLM に登録する仕組みだった。LLM は通常のツール呼び出しと同じ方法で構造化データを出力し、SDK がバリデーションする。つまりエージェントループは「LLM → `get_exchange_rate` 呼び出し → 結果を受け取り → `ConversionResult` ツール呼び出し → バリデーション成功 → 完了」という流れになる。
 
-デバッグ時に `tool_usage` に Pydantic モデル名が出ていたら、Structured Output の内部動作だと分かっていれば混乱しない。`call_count` や `error_count` でバリデーションの成功率も確認できる。
+デバッグ時に `tool_usage` に Pydantic モデル名が出ていたら、Structured Output の内部動作だと分かっていれば混乱しない。`call_count` や `error_count` でバリデーションの成功率も確認できるので、リトライが多発していないかのチェックにも使える。

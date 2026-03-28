@@ -1,0 +1,524 @@
+---
+title: "Strands Agents SDK マルチエージェント — Graph でワークフローを構造化する"
+description: "Strands Agents SDK の Graph パターンで決定論的なワークフローを構築する。GraphBuilder で逐次・並列・条件分岐・フィードバックループを実際に動かし、Graph の全体像をコードと実行結果で確認する。"
+date: 2026-04-05
+published: false
+featured: false
+categories: [ai-agents]
+tags: ["strands-agents", "bedrock", "python", "ai-agents", "graph"]
+series: "strands-agents-multi-agent-patterns"
+seriesOrder: 2
+---
+
+## はじめに
+
+[前回の記事](/ja/blog/2026/04/05/strands-agents-swarm)では Swarm でエージェントが自律的にハンドオフする仕組みを学んだ。しかし、Swarm はエージェントが自律的に判断するため、実行順序が予測しにくい。「リサーチ → 分析 → レポート」のように実行順序を明示的に制御したい場面がある。
+
+`GraphBuilder` でノードとエッジを定義するだけで、依存関係に基づいた決定論的なワークフローが動く。
+
+この記事では以下を試す。
+
+1. **逐次パイプライン** — research → analysis → report の直列構成
+2. **並列処理** — 分岐と合流で複数エージェントを同時実行する
+3. **条件分岐** — `condition` 関数でエッジの通過を制御する
+4. **フィードバックループ** — レビュー→修正の反復ワークフローを構築する
+
+公式ドキュメントは [Graph](https://strandsagents.com/docs/user-guide/concepts/multi-agent/graph/) を参照。
+
+## セットアップ
+
+[第 1 回](/ja/blog/2026/04/05/strands-agents-swarm)の環境をそのまま使う。以降の例ではすべて同じモデル設定を使う。各例は独立した `.py` ファイルとして実行できる。共通設定を先頭に書き、その下に各例のコードを追加する形だ。
+
+```python title="Python (共通設定)"
+from strands import Agent
+from strands.models import BedrockModel
+from strands.multiagent import GraphBuilder
+from strands.multiagent.graph import GraphState
+
+bedrock_model = BedrockModel(
+    model_id="us.anthropic.claude-sonnet-4-20250514-v1:0",
+    region_name="us-east-1",
+)
+```
+
+## 逐次パイプライン — 直列構成
+
+「トピックをリサーチし、分析し、レポートにまとめる」という 3 ステップのパイプラインを作る。
+
+まず Swarm との違いを整理する。
+
+| | Swarm | Graph |
+|---|---|---|
+| 実行順序 | エージェントが自律判断 | エッジで明示的に定義 |
+| 並列実行 | なし（逐次ハンドオフ） | 依存関係がないノードは並列実行 |
+| 適用場面 | 探索的なタスク | 手順が決まったワークフロー |
+
+`GraphBuilder` でノードを追加し、エッジで依存関係を定義する。
+
+```python title="Python (Graph 構築と実行)"
+builder = GraphBuilder()
+builder.add_node(researcher, "research")
+builder.add_node(analyst, "analysis")
+builder.add_node(report_writer, "report")
+builder.add_edge("research", "analysis")
+builder.add_edge("analysis", "report")
+builder.set_entry_point("research")
+
+graph = builder.build()
+result = graph("What is Amazon Bedrock?")
+```
+
+`add_node` でエージェントをノードとして登録し、`add_edge` でノード間の依存関係を定義する。`set_entry_point` で最初に実行するノードを指定する。
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">01_sequential.py 全体コード（コピペ用）</summary>
+
+```python title="01_sequential.py"
+from strands import Agent
+from strands.models import BedrockModel
+from strands.multiagent import GraphBuilder
+
+bedrock_model = BedrockModel(
+    model_id="us.anthropic.claude-sonnet-4-20250514-v1:0",
+    region_name="us-east-1",
+)
+
+researcher = Agent(
+    name="researcher", model=bedrock_model,
+    system_prompt="You are a research specialist. Provide key facts about the given topic in bullet points.",
+    callback_handler=None,
+)
+analyst = Agent(
+    name="analyst", model=bedrock_model,
+    system_prompt="You are an analysis specialist. Analyze the research provided and identify the top 3 insights.",
+    callback_handler=None,
+)
+report_writer = Agent(
+    name="report_writer", model=bedrock_model,
+    system_prompt="You are a report writing specialist. Write a concise 2-3 sentence summary based on the analysis.",
+    callback_handler=None,
+)
+
+builder = GraphBuilder()
+builder.add_node(researcher, "research")
+builder.add_node(analyst, "analysis")
+builder.add_node(report_writer, "report")
+builder.add_edge("research", "analysis")
+builder.add_edge("analysis", "report")
+builder.set_entry_point("research")
+
+graph = builder.build()
+result = graph("What is Amazon Bedrock?")
+
+print(f"Status: {result.status}")
+print(f"Execution order: {[node.node_id for node in result.execution_order]}")
+
+for node_id, node_result in result.results.items():
+    print(f"\n--- {node_id} ---")
+    print(f"  Status: {node_result.status}")
+    print(f"  Time: {node_result.execution_time}ms")
+```
+
+</details>
+
+```bash title="Terminal"
+python -u 01_sequential.py
+```
+
+### 実行結果
+
+```text title="Output"
+Status: Status.COMPLETED
+Execution order: ['research', 'analysis', 'report']
+
+--- research ---
+  Status: Status.COMPLETED
+  Time: 9915ms
+
+--- analysis ---
+  Status: Status.COMPLETED
+  Time: 4876ms
+
+--- report ---
+  Status: Status.COMPLETED
+  Time: 3787ms
+```
+
+`execution_order` が `['research', 'analysis', 'report']` — エッジで定義した順序通りに実行されている。各ノードの実行時間も確認できる。
+
+`build()` 時に「Graph without execution limits may run indefinitely if cycles exist」という警告が出る。これは DAG（非循環グラフ）では問題ないが、後述のフィードバックループでは `set_max_node_executions` の設定が必要になる。
+
+## 並列処理 — 分岐と合流
+
+「リサーチ結果を、分析チームとファクトチェックチームが同時に検証し、両方の結果をレポートにまとめる」というワークフローを作る。
+
+research の後に analysis と fact_check を並列実行し、両方の結果を report に渡す。
+
+```python title="Python (Graph 構築と実行)"
+builder = GraphBuilder()
+builder.add_node(researcher, "research")
+builder.add_node(analyst, "analysis")
+builder.add_node(fact_checker, "fact_check")
+builder.add_node(report_writer, "report")
+
+builder.add_edge("research", "analysis")
+builder.add_edge("research", "fact_check")
+builder.add_edge("analysis", "report")
+builder.add_edge("fact_check", "report")
+
+builder.set_entry_point("research")
+graph = builder.build()
+result = graph("What is Amazon Bedrock?")
+```
+
+`research` から `analysis` と `fact_check` の 2 つにエッジを引くだけで、並列実行が実現する。
+
+Python の Graph は OR セマンティクスで動作する。つまり、`report` は `analysis` と `fact_check` のいずれかが完了した時点で発火する。今回の実行では `fact_check` が先に完了して `report` が 1 回目に発火し、`analysis` が完了して 2 回目に発火している。最終的に `report` は両方の結果を参照できる。
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">02_parallel.py 全体コード（コピペ用）</summary>
+
+```python title="02_parallel.py"
+from strands import Agent
+from strands.models import BedrockModel
+from strands.multiagent import GraphBuilder
+
+bedrock_model = BedrockModel(
+    model_id="us.anthropic.claude-sonnet-4-20250514-v1:0",
+    region_name="us-east-1",
+)
+
+researcher = Agent(
+    name="researcher", model=bedrock_model,
+    system_prompt="You are a research specialist. Provide key facts about the given topic.",
+    callback_handler=None,
+)
+analyst = Agent(
+    name="analyst", model=bedrock_model,
+    system_prompt="You are an analysis specialist. Analyze the research and identify key insights.",
+    callback_handler=None,
+)
+fact_checker = Agent(
+    name="fact_checker", model=bedrock_model,
+    system_prompt="You are a fact-checking specialist. Verify the claims in the research and note any issues.",
+    callback_handler=None,
+)
+report_writer = Agent(
+    name="report_writer", model=bedrock_model,
+    system_prompt="You are a report writing specialist. Write a concise summary combining the analysis and fact-check results.",
+    callback_handler=None,
+)
+
+builder = GraphBuilder()
+builder.add_node(researcher, "research")
+builder.add_node(analyst, "analysis")
+builder.add_node(fact_checker, "fact_check")
+builder.add_node(report_writer, "report")
+builder.add_edge("research", "analysis")
+builder.add_edge("research", "fact_check")
+builder.add_edge("analysis", "report")
+builder.add_edge("fact_check", "report")
+builder.set_entry_point("research")
+
+graph = builder.build()
+result = graph("What is Amazon Bedrock?")
+
+print(f"Status: {result.status}")
+print(f"Execution order: {[node.node_id for node in result.execution_order]}")
+print(f"Total nodes: {result.total_nodes}")
+print(f"Completed nodes: {result.completed_nodes}")
+
+for node_id, node_result in result.results.items():
+    print(f"\n--- {node_id} ---")
+    print(f"  Status: {node_result.status}")
+    print(f"  Time: {node_result.execution_time}ms")
+```
+
+</details>
+
+```bash title="Terminal"
+python -u 02_parallel.py
+```
+
+### 実行結果
+
+```text title="Output"
+Status: Status.COMPLETED
+Execution order: ['research', 'fact_check', 'analysis', 'report']
+Total nodes: 4
+Completed nodes: 4
+
+--- research ---
+  Status: Status.COMPLETED
+  Time: 11632ms
+
+--- fact_check ---
+  Status: Status.COMPLETED
+  Time: 8699ms
+
+--- analysis ---
+  Status: Status.COMPLETED
+  Time: 11888ms
+
+--- report ---
+  Status: Status.COMPLETED
+  Time: 7396ms
+```
+
+`execution_order` が `['research', 'fact_check', 'analysis', 'report']` — `research` の後に `fact_check` と `analysis` が実行され、最後に `report` が実行されている。`fact_check`（8.7 秒）と `analysis`（11.9 秒）は並列に実行されるため、全体の実行時間は逐次実行より短くなる。
+
+## 条件分岐 — condition 関数でエッジを制御する
+
+「ユーザーの質問を分類し、技術的な質問なら技術専門家に、ビジネスの質問ならビジネス専門家にルーティングする」というワークフローを作る。
+
+ここまでの Graph は固定パスだった。`add_edge` の `condition` パラメータに関数を渡すと、その関数が `True` を返した場合のみエッジが通過する。
+
+```python title="Python (Graph 構築と実行)"
+builder = GraphBuilder()
+builder.add_node(classifier, "classifier")
+builder.add_node(tech_specialist, "tech")
+builder.add_node(business_specialist, "business")
+builder.add_edge("classifier", "tech", condition=is_technical)
+builder.add_edge("classifier", "business", condition=is_business)
+builder.set_entry_point("classifier")
+
+graph = builder.build()
+result = graph("How does container orchestration work in Kubernetes?")
+```
+
+`condition` 関数は `GraphState` を受け取り、前のノードの結果を参照して `True` / `False` を返す。`GraphState` は Graph の現在の実行状態（各ノードの結果やステータス）を保持するオブジェクトだ。`classifier` が「technical」と分類すれば `tech` に、「business」と分類すれば `business` にルーティングされる。
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">03_conditional.py 全体コード（コピペ用）</summary>
+
+```python title="03_conditional.py"
+from strands import Agent
+from strands.models import BedrockModel
+from strands.multiagent import GraphBuilder
+from strands.multiagent.graph import GraphState
+
+bedrock_model = BedrockModel(
+    model_id="us.anthropic.claude-sonnet-4-20250514-v1:0",
+    region_name="us-east-1",
+)
+
+classifier = Agent(
+    name="classifier", model=bedrock_model,
+    system_prompt="You are a classifier. Classify the input as either 'technical' or 'business'. Reply with ONLY the word 'technical' or 'business'.",
+    callback_handler=None,
+)
+tech_specialist = Agent(
+    name="tech_specialist", model=bedrock_model,
+    system_prompt="You are a technical specialist. Provide a technical explanation in 2-3 sentences.",
+    callback_handler=None,
+)
+business_specialist = Agent(
+    name="business_specialist", model=bedrock_model,
+    system_prompt="You are a business specialist. Explain the business impact in 2-3 sentences.",
+    callback_handler=None,
+)
+
+def is_technical(state: GraphState) -> bool:
+    result = state.results.get("classifier")
+    if not result or not result.result:
+        return False
+    for block in result.result.message.get('content', []):
+        if 'text' in block and 'technical' in block['text'].lower():
+            return True
+    return False
+
+def is_business(state: GraphState) -> bool:
+    result = state.results.get("classifier")
+    if not result or not result.result:
+        return False
+    for block in result.result.message.get('content', []):
+        if 'text' in block and 'business' in block['text'].lower():
+            return True
+    return False
+
+builder = GraphBuilder()
+builder.add_node(classifier, "classifier")
+builder.add_node(tech_specialist, "tech")
+builder.add_node(business_specialist, "business")
+builder.add_edge("classifier", "tech", condition=is_technical)
+builder.add_edge("classifier", "business", condition=is_business)
+builder.set_entry_point("classifier")
+
+graph = builder.build()
+
+print("=== Technical question ===")
+result1 = graph("How does container orchestration work in Kubernetes?")
+print(f"Execution order: {[node.node_id for node in result1.execution_order]}")
+
+print("\n=== Business question ===")
+graph2 = builder.build()
+result2 = graph2("What is the ROI of migrating to cloud computing?")
+print(f"Execution order: {[node.node_id for node in result2.execution_order]}")
+```
+
+</details>
+
+```bash title="Terminal"
+python -u 03_conditional.py
+```
+
+### 実行結果
+
+```text title="Output"
+=== Technical question ===
+Execution order: ['classifier', 'tech']
+
+=== Business question ===
+Execution order: ['classifier', 'business']
+```
+
+技術的な質問は `classifier → tech`、ビジネスの質問は `classifier → business` に分岐した。`condition` 関数が `False` を返したエッジは通過しないため、不要なノードは実行されない。
+
+## フィードバックループ — レビュー→修正の反復
+
+「俳句を書き、レビュアーが品質チェックし、不合格なら修正して再レビュー、合格したら出版する」というワークフローを作る。
+
+条件付きエッジを使えば、`reviewer` から `draft_writer` に戻るフィードバックループも構築できる。
+
+```python title="Python (Graph 構築と実行)"
+builder = GraphBuilder()
+builder.add_node(draft_writer, "draft_writer")
+builder.add_node(reviewer, "reviewer")
+builder.add_node(publisher, "publisher")
+
+builder.add_edge("draft_writer", "reviewer")
+builder.add_edge("reviewer", "draft_writer", condition=needs_revision)
+builder.add_edge("reviewer", "publisher", condition=is_approved)
+
+builder.set_entry_point("draft_writer")
+builder.set_max_node_executions(10)
+builder.set_execution_timeout(300)
+builder.reset_on_revisit(True)
+
+graph = builder.build()
+result = graph("Write a haiku about Python programming")
+```
+
+ポイントは 3 つだ。
+
+- **`set_entry_point("draft_writer")`** — サイクルがある Graph では自動エントリポイント検出が失敗するため、明示的に指定する必要がある
+- **`set_max_node_executions(10)`** — ノードの総実行回数の上限。無限ループを防ぐ
+- **`reset_on_revisit(True)`** — ノードが再訪問されたときに状態をリセットする。これがないと前回の会話履歴が残り、エージェントが混乱する
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">04_feedback.py 全体コード（コピペ用）</summary>
+
+```python title="04_feedback.py"
+from strands import Agent
+from strands.models import BedrockModel
+from strands.multiagent import GraphBuilder
+from strands.multiagent.graph import GraphState
+
+bedrock_model = BedrockModel(
+    model_id="us.anthropic.claude-sonnet-4-20250514-v1:0",
+    region_name="us-east-1",
+)
+
+draft_writer = Agent(
+    name="draft_writer", model=bedrock_model,
+    system_prompt="You are a draft writer. Write or revise a haiku about programming based on the feedback provided. Output ONLY the haiku (3 lines).",
+    callback_handler=None,
+)
+reviewer = Agent(
+    name="reviewer", model=bedrock_model,
+    system_prompt="""You are a strict haiku reviewer. Check if the text is a valid haiku (5-7-5 syllable pattern).
+If it needs revision, start your response with 'REVISION NEEDED:' followed by specific feedback.
+If it's approved, start your response with 'APPROVED:' followed by a brief comment.""",
+    callback_handler=None,
+)
+publisher = Agent(
+    name="publisher", model=bedrock_model,
+    system_prompt="You are a publisher. Format the approved haiku nicely with a title.",
+    callback_handler=None,
+)
+
+def needs_revision(state: GraphState) -> bool:
+    result = state.results.get("reviewer")
+    if not result or not result.result:
+        return False
+    for block in result.result.message.get('content', []):
+        if 'text' in block and 'REVISION NEEDED' in block['text'].upper():
+            return True
+    return False
+
+def is_approved(state: GraphState) -> bool:
+    result = state.results.get("reviewer")
+    if not result or not result.result:
+        return False
+    for block in result.result.message.get('content', []):
+        if 'text' in block and 'APPROVED' in block['text'].upper():
+            return True
+    return False
+
+builder = GraphBuilder()
+builder.add_node(draft_writer, "draft_writer")
+builder.add_node(reviewer, "reviewer")
+builder.add_node(publisher, "publisher")
+builder.add_edge("draft_writer", "reviewer")
+builder.add_edge("reviewer", "draft_writer", condition=needs_revision)
+builder.add_edge("reviewer", "publisher", condition=is_approved)
+builder.set_entry_point("draft_writer")
+builder.set_max_node_executions(10)
+builder.set_execution_timeout(300)
+builder.reset_on_revisit(True)
+
+graph = builder.build()
+result = graph("Write a haiku about Python programming")
+
+print(f"Status: {result.status}")
+print(f"Execution order: {[node.node_id for node in result.execution_order]}")
+print(f"Total executions: {len(result.execution_order)}")
+
+for node_id, node_result in result.results.items():
+    print(f"\n--- {node_id} ---")
+    print(f"  Status: {node_result.status}")
+    if node_result.result and node_result.result.message:
+        for block in node_result.result.message.get('content', []):
+            if 'text' in block:
+                print(f"  Output: {block['text'][:200]}")
+                break
+```
+
+</details>
+
+```bash title="Terminal"
+python -u 04_feedback.py
+```
+
+### 実行結果
+
+```text title="Output"
+Status: Status.COMPLETED
+Execution order: ['draft_writer', 'reviewer', 'publisher']
+Total executions: 3
+
+--- draft_writer ---
+  Status: Status.COMPLETED
+  Output: Code flows like water
+Indentation guides the path
+Serpent's logic coils
+
+--- reviewer ---
+  Status: Status.COMPLETED
+  Output: APPROVED: This is a beautifully crafted haiku...
+
+--- publisher ---
+  Status: Status.COMPLETED
+  Output: # **Flowing Code**
+*A Haiku on Python Programming*
+...
+```
+
+今回は 1 回目のドラフトで APPROVED されたため、`draft_writer → reviewer → publisher` の 3 ステップで完了した。リビジョンが発生した場合は `draft_writer → reviewer → draft_writer → reviewer → publisher` のように `execution_order` が長くなる。
+
+## まとめ
+
+- **`GraphBuilder` でノードとエッジを定義するだけで決定論的なワークフローが動く** — `add_node` でエージェントを登録し、`add_edge` で依存関係を定義する。実行順序はエッジで明示的に制御される。
+- **依存関係がないノードは自動的に並列実行される** — `research` から `analysis` と `fact_check` にエッジを引くだけで並列処理が実現する。Python の Graph は OR セマンティクスで動作する。
+- **条件付きエッジで動的な分岐が実現する** — `add_edge` の `condition` パラメータに関数を渡すだけ。`GraphState` から前のノードの結果を参照して分岐を判断する。
+- **フィードバックループは逆方向の条件付きエッジで構築する** — サイクルがある Graph では `set_entry_point`、`set_max_node_executions`、`reset_on_revisit` の 3 つの設定が必須。

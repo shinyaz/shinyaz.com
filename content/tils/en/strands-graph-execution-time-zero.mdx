@@ -1,0 +1,20 @@
+---
+title: "Graph's result.execution_time returns 0ms — use node sum instead"
+description: "Strands Agents SDK Graph's result.execution_time returns 0ms. Per-node execution_time is correct, so calculate the total yourself."
+date: 2026-04-05
+published: false
+tags: ["strands-agents", "bedrock", "python", "graph"]
+---
+
+When checking execution time on a Strands Agents SDK Graph, `result.execution_time` returned 0ms. With 3 nodes taking over 15 seconds total, 0ms didn't make sense.
+
+```python title="Python"
+result = graph("What is Amazon Bedrock?")
+print(f"execution_time: {result.execution_time}ms")  # 0ms
+total = sum(nr.execution_time for nr in result.results.values())
+print(f"sum of node times: {total}ms")  # 15550ms
+```
+
+`result.execution_time` currently returns 0ms, but per-node `execution_time` is correctly recorded. To get total Graph execution time, use `sum(nr.execution_time for nr in result.results.values())`.
+
+Swarm's `result.execution_time` works correctly, so this is Graph-specific. When comparing execution times across patterns, note that Graph requires manual node-time summation.

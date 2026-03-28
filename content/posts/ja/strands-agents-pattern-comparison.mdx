@@ -1,0 +1,302 @@
+---
+title: "Strands Agents SDK マルチエージェント — マルチエージェントパターンの選び方"
+description: "Strands Agents SDK の Agents as Tools・Swarm・Graph の 3 パターンで同じタスクを実行し、構造的な違いをメトリクスで比較する。ユースケースに応じたパターン選択の基準を整理する。"
+date: 2026-04-05
+published: false
+featured: false
+categories: [ai-agents]
+tags: ["strands-agents", "bedrock", "python", "ai-agents", "multi-agent"]
+series: "strands-agents-multi-agent-patterns"
+seriesOrder: 4
+---
+
+## はじめに
+
+[入門第 5 回](/ja/blog/2026/03/03/strands-agents-multi-agent)で Agents as Tools を、このシリーズで Swarm と Graph を学んだ。3 つのパターンを理解したが、「どれをいつ使うか」の判断基準がまだない。
+
+同じタスクを 3 パターンで実行し、メトリクスを比較すれば、どのパターンを選ぶべきか判断できる。
+
+この記事では以下を試す。
+
+1. **3 パターンで同じタスクを実行する** — 「要約して翻訳する」を共通タスクに
+2. **メトリクスの比較と選択基準** — 構造的な違いとユースケースに応じた選び方
+
+公式ドキュメントは [Multi-agent Patterns](https://strandsagents.com/docs/user-guide/concepts/multi-agent/multi-agent-patterns/) を参照。
+
+## セットアップ
+
+[第 1 回](/ja/blog/2026/04/05/strands-agents-swarm)の環境をそのまま使う。以降の例ではすべて同じモデル設定を使う。共通設定を先頭に書き、その下に各例のコードを追加する形だ。
+
+```python title="Python (共通設定)"
+from strands import Agent, tool
+from strands.models import BedrockModel
+from strands.multiagent import Swarm, GraphBuilder
+
+bedrock_model = BedrockModel(
+    model_id="us.anthropic.claude-sonnet-4-20250514-v1:0",
+    region_name="us-east-1",
+)
+
+TASK = "Summarize what Amazon Bedrock is in 2 sentences, then translate the summary into Japanese."
+```
+
+## 3 パターンで同じタスクを実行する
+
+「Amazon Bedrock を 2 文で要約し、日本語に翻訳する」という同じタスクを、Agents as Tools・Swarm・Graph の 3 パターンで実行する。タスクは同じだが、エージェントの協調方法が異なる。
+
+### Agents as Tools
+
+[入門第 5 回](/ja/blog/2026/03/03/strands-agents-multi-agent)のパターン。オーケストレーターが `@tool` でラップされた専門エージェントを呼び出す。
+
+```python title="Python (オーケストレーター作成と実行)"
+orchestrator = Agent(
+    model=bedrock_model, tools=[summarizer, translator],
+    system_prompt="First summarize, then translate to Japanese.",
+    callback_handler=None,
+)
+result_a = orchestrator(TASK)
+```
+
+このパターンでは、オーケストレーターが「まず summarizer を呼び、次に translator を呼ぶ」と推論する。オーケストレーター自身の推論サイクルが追加されるため、3 サイクル（推論 → summarizer → 推論 → translator → 推論 → 回答）で完了する。
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">@tool 定義（summarizer, translator）</summary>
+
+```python title="Python"
+@tool
+def summarizer(text: str) -> str:
+    """Summarize the given text into 2 concise sentences.
+
+    Args:
+        text: The text to summarize
+
+    Returns:
+        A concise summary
+    """
+    agent = Agent(model=bedrock_model, system_prompt="Summarize in exactly 2 sentences.", callback_handler=None)
+    return agent(f"Summarize this: {text}").message['content'][0]['text']
+
+@tool
+def translator(text: str, target_language: str) -> str:
+    """Translate the given text into the specified language.
+
+    Args:
+        text: The text to translate
+        target_language: The target language
+
+    Returns:
+        The translated text
+    """
+    agent = Agent(model=bedrock_model, system_prompt="Translate accurately. Return only the translation.", callback_handler=None)
+    return agent(f"Translate into {target_language}: {text}").message['content'][0]['text']
+```
+
+</details>
+
+### Swarm
+
+[第 1 回](/ja/blog/2026/04/05/strands-agents-swarm)のパターン。エージェント同士が自律的にハンドオフする。
+
+```python title="Python"
+summarizer_agent = Agent(
+    name="summarizer", model=bedrock_model,
+    system_prompt="Summarize the topic in exactly 2 sentences, then hand off to the translator.",
+    callback_handler=None,
+)
+translator_agent = Agent(
+    name="translator", model=bedrock_model,
+    system_prompt="Translate the provided summary into Japanese. Do not hand off.",
+    callback_handler=None,
+)
+
+swarm = Swarm([summarizer_agent, translator_agent], entry_point=summarizer_agent, max_handoffs=5, max_iterations=5)
+result_b = swarm(TASK)
+```
+
+Swarm ではオーケストレーターが存在しない。summarizer が要約を完了すると、自律的に `handoff_to_agent` ツールで translator にハンドオフする。オーケストレーターの推論サイクルがない分、Agents as Tools より軽量だ。
+
+### Graph
+
+[第 2 回](/ja/blog/2026/04/05/strands-agents-graph)のパターン。エッジで実行順序を明示的に定義する。
+
+```python title="Python"
+summarizer_agent2 = Agent(
+    name="summarizer2", model=bedrock_model,
+    system_prompt="Summarize the topic in exactly 2 sentences.",
+    callback_handler=None,
+)
+translator_agent2 = Agent(
+    name="translator2", model=bedrock_model,
+    system_prompt="Translate the provided text into Japanese.",
+    callback_handler=None,
+)
+
+builder = GraphBuilder()
+builder.add_node(summarizer_agent2, "summarize")
+builder.add_node(translator_agent2, "translate")
+builder.add_edge("summarize", "translate")
+builder.set_entry_point("summarize")
+graph = builder.build()
+result_c = graph(TASK)
+```
+
+Graph ではエッジが実行順序を決定する。summarize → translate の順序はコードで明示的に定義されており、LLM の判断に依存しない。ただし、Graph はノード間の入力構築（前のノードの結果を次のノードに渡す処理）にオーバーヘッドがある。
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">01_compare.py 全体コード（コピペ用）</summary>
+
+```python title="01_compare.py"
+from strands import Agent, tool
+from strands.models import BedrockModel
+from strands.multiagent import Swarm, GraphBuilder
+
+bedrock_model = BedrockModel(
+    model_id="us.anthropic.claude-sonnet-4-20250514-v1:0",
+    region_name="us-east-1",
+)
+
+TASK = "Summarize what Amazon Bedrock is in 2 sentences, then translate the summary into Japanese."
+
+# Pattern A: Agents as Tools
+@tool
+def summarizer(text: str) -> str:
+    """Summarize the given text into 2 concise sentences.
+
+    Args:
+        text: The text to summarize
+
+    Returns:
+        A concise summary
+    """
+    agent = Agent(model=bedrock_model, system_prompt="Summarize in exactly 2 sentences.", callback_handler=None)
+    return agent(f"Summarize this: {text}").message['content'][0]['text']
+
+@tool
+def translator(text: str, target_language: str) -> str:
+    """Translate the given text into the specified language.
+
+    Args:
+        text: The text to translate
+        target_language: The target language
+
+    Returns:
+        The translated text
+    """
+    agent = Agent(model=bedrock_model, system_prompt="Translate accurately. Return only the translation.", callback_handler=None)
+    return agent(f"Translate into {target_language}: {text}").message['content'][0]['text']
+
+orchestrator = Agent(
+    model=bedrock_model, tools=[summarizer, translator],
+    system_prompt="First summarize, then translate to Japanese.",
+    callback_handler=None,
+)
+result_a = orchestrator(TASK)
+summary_a = result_a.metrics.get_summary()
+print(f"Agents as Tools: {summary_a['total_cycles']} cycles, {summary_a['total_duration']:.1f}s, {summary_a['accumulated_usage']['totalTokens']} tokens")
+
+# Pattern B: Swarm
+summarizer_agent = Agent(name="summarizer", model=bedrock_model, system_prompt="Summarize the topic in exactly 2 sentences, then hand off to the translator.", callback_handler=None)
+translator_agent = Agent(name="translator", model=bedrock_model, system_prompt="Translate the provided summary into Japanese. Do not hand off.", callback_handler=None)
+swarm = Swarm([summarizer_agent, translator_agent], entry_point=summarizer_agent, max_handoffs=5, max_iterations=5)
+result_b = swarm(TASK)
+print(f"Swarm: {result_b.execution_count} nodes, {result_b.execution_time}ms")
+
+# Pattern C: Graph
+summarizer_agent2 = Agent(name="summarizer2", model=bedrock_model, system_prompt="Summarize the topic in exactly 2 sentences.", callback_handler=None)
+translator_agent2 = Agent(name="translator2", model=bedrock_model, system_prompt="Translate the provided text into Japanese.", callback_handler=None)
+builder = GraphBuilder()
+builder.add_node(summarizer_agent2, "summarize")
+builder.add_node(translator_agent2, "translate")
+builder.add_edge("summarize", "translate")
+builder.set_entry_point("summarize")
+graph = builder.build()
+result_c = graph(TASK)
+total_time_c = sum(nr.execution_time for nr in result_c.results.values())
+print(f"Graph: {len(result_c.execution_order)} nodes, {total_time_c}ms")
+```
+
+</details>
+
+```bash title="Terminal"
+python -u 01_compare.py
+```
+
+### 実行結果
+
+```text title="Output"
+Agents as Tools: 3 cycles, 17.3s, 3418 tokens
+Swarm: 2 nodes, 10693ms
+Graph: 2 nodes, 15550ms
+```
+
+## メトリクスの比較と選択基準
+
+### 構造的な違い
+
+3 パターンの実行結果を比較する。Graph の実行時間はノードごとの `execution_time` の合計で算出している（`result.execution_time` は現時点で 0ms を返すため）。
+
+| パターン | 制御方式 | 実行時間 | エージェント数 | 特徴 |
+|---|---|---|---|---|
+| Agents as Tools | オーケストレーターが制御 | 17.3 秒 | 3（オーケストレーター + 2 専門家） | オーケストレーターの推論コストが加算される |
+| Swarm | エージェントが自律判断 | 10.7 秒 | 2（summarizer + translator） | ハンドオフのオーバーヘッドが小さい |
+| Graph | エッジで明示的に定義 | 15.6 秒 | 2（summarize + translate） | 実行順序が保証される |
+
+Agents as Tools が最も遅いのは、オーケストレーターが「どのツールを呼ぶか」を推論するサイクルが追加されるためだ。入門第 1 回で学んだエージェントループが、オーケストレーター自身にも適用される。つまり「推論 → ツール選択 → ツール実行 → 推論」のサイクルがオーケストレーターレベルで回り、さらに各ツール内のエージェントでも同じサイクルが回る。
+
+Swarm はハンドオフが軽量で最速だ。`handoff_to_agent` ツールの呼び出しは通常のツール呼び出しと同じ仕組みで、オーケストレーターの追加推論がない。
+
+Graph はノード間の入力構築にオーバーヘッドがある。前のノードの結果を次のノードの入力として構築する処理が、Swarm のハンドオフより重い。ただし、実行順序が保証されるため、結果の予測可能性は最も高い。
+
+### パターン選択の判断フレームワーク
+
+実行時間だけでパターンを選ぶべきではない。以下の 3 つの質問に答えることで、適切なパターンが決まる。
+
+**Q1: 実行順序を明示的に制御する必要があるか？**
+
+- **はい** → **Graph**。エッジで依存関係を定義し、並列処理や条件分岐も可能。第 2 回で学んだ逐次・並列・条件分岐・フィードバックループのすべてが使える。
+- **いいえ** → Q2 へ。
+
+**Q2: 既存のツール（`@tool` 関数）を再利用したいか？**
+
+- **はい** → **Agents as Tools**。入門第 2 回で作ったカスタムツールや、入門第 3 回の MCP ツールをそのまま使える。新しい API を学ぶ必要がない。
+- **いいえ** → Q3 へ。
+
+**Q3: エージェントの専門性に基づいて、タスクを自律的に振り分けたいか？**
+
+- **はい** → **Swarm**。エージェントが共有コンテキストを参照して、最適なハンドオフ先を自律的に判断する。
+- **組み合わせたい** → **Graph + Swarm ネスト**。第 3 回で学んだように、Swarm を Graph のノードに埋め込める。
+
+| ユースケース | 推奨パターン | 理由 |
+|---|---|---|
+| 手順が決まったワークフロー | **Graph** | 実行順序が保証され、並列処理も可能 |
+| 探索的なタスク | **Swarm** | エージェントが自律的に最適なハンドオフ先を判断 |
+| 既存のツールを活用したい | **Agents as Tools** | `@tool` でラップするだけで既存関数を再利用 |
+| レビュー→修正の反復 | **Graph（サイクル）** | 条件付きエッジでフィードバックループを構築 |
+| 自律協調 + 構造化 | **Graph + Swarm ネスト** | 部分的に自律協調、全体は構造化 |
+| 認証情報やDB接続の共有 | **invocation_state** | どのパターンでも `invocation_state` で共有可能 |
+
+## シリーズの振り返り
+
+入門・実践・マルチエージェントの全 3 シリーズで、Strands Agents SDK の主要機能を一通り学んだ。
+
+| シリーズ | テーマ | 学んだこと |
+|---|---|---|
+| [入門](/ja/blog/2026/03/03/strands-agents-quickstart)（全 5 回） | 基礎概念 | エージェントループ、ツール、MCP、会話管理、Agents as Tools |
+| [実践](/ja/blog/2026/03/29/strands-agents-structured-output)（全 5 回） | 品質向上 | Structured Output、セッション管理、Hooks、Guardrails、メトリクス |
+| [マルチエージェント](/ja/blog/2026/04/05/strands-agents-swarm)（全 4 回） | 協調パターン | Swarm、Graph、ネスト+Hooks+共有状態、パターン比較 |
+
+3 シリーズの知識は独立しているのではなく、積み重なって活きる。
+
+- **入門のエージェントループ** → 実践の Structured Output（内部的にツールとして動作）、マルチエージェントの Swarm（ハンドオフもエージェントループの一部）
+- **入門のカスタムツール** → 実践の Hooks（ツール呼び出しの監視・制限）、マルチエージェントの Agents as Tools（ツールの再利用）
+- **実践の Hooks** → マルチエージェントの `BeforeNodeCallEvent`（ノード単位の監視）
+- **実践のメトリクス** → マルチエージェントのパターン比較（サイクル数・実行時間で判断）
+
+ここから先は、[AWS Lambda](https://strandsagents.com/docs/user-guide/deploy/deploy_to_aws_lambda/) や [Bedrock AgentCore](https://strandsagents.com/docs/user-guide/deploy/deploy_to_bedrock_agentcore/) へのデプロイ、[OpenTelemetry](https://strandsagents.com/docs/user-guide/observability-evaluation/observability/) によるオブザーバビリティ、[A2A (Agent2Agent)](https://strandsagents.com/docs/user-guide/concepts/multi-agent/agent-to-agent/) によるリモートエージェント連携など、より高度なトピックに進むことができる。
+
+## まとめ
+
+- **同じタスクでもパターンによって実行時間と構造が異なる** — Agents as Tools はオーケストレーターの推論コストが加算され（3 サイクル, 17.3 秒）、Swarm はハンドオフが軽量で最速（2 ノード, 10.7 秒）、Graph は実行順序が保証される（2 ノード, 15.6 秒）。
+- **3 つの質問でパターンが決まる** — 実行順序を制御するか → Graph。既存ツールを再利用するか → Agents as Tools。自律的に振り分けるか → Swarm。
+- **パターンは組み合わせられる** — Swarm を Graph のノードに埋め込むネスト構成で、自律協調と構造化を両立できる。`invocation_state` でどのパターンでも共有データを渡せる。
+- **3 シリーズの知識が積み重なる** — 入門のエージェントループ、実践の Hooks やメトリクス、マルチエージェントのパターン選択が、実用的なエージェントシステムの設計に活きる。

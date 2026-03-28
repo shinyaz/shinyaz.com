@@ -1,0 +1,28 @@
+---
+title: "Swarm でハンドオフしたエージェントのテキスト出力は空になる"
+description: "Strands Agents SDK の Swarm でハンドオフしたエージェントの result にテキストブロックがない。handoff_to_agent ツール呼び出しで終了するため。最終出力はハンドオフしなかったエージェントが生成する。"
+date: 2026-04-05
+published: false
+tags: ["strands-agents", "bedrock", "python", "swarm"]
+---
+
+Swarm の実行結果で各ノードの出力を確認しようとしたところ、ハンドオフした `researcher` のテキスト出力が空で `IndexError` になった。
+
+```text title="Output"
+--- researcher ---
+  Status: Status.COMPLETED
+
+--- writer ---
+  Status: Status.COMPLETED
+  Output: Amazon Bedrock is a fully managed AWS service...
+```
+
+researcher は `handoff_to_agent` ツールを呼び出してハンドオフするため、テキストブロックを生成せずに終了する。`result.message` の `content` にはツール呼び出しのブロックしか含まれず、`text` キーを持つブロックが存在しない。
+
+最終的なテキスト出力は、ハンドオフせずに終了した最後のエージェント（この場合は `writer`）が生成する。`result.results` から出力を取得する際は、テキストブロックの存在チェックが必要だ。
+
+```python title="Python"
+for block in msg.get('content', []):
+    if 'text' in block:  # この存在チェックが必須
+        print(block['text'])
+```

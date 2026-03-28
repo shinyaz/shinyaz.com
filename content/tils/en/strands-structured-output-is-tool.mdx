@@ -14,8 +14,8 @@ tool_usage:
   ConversionResult: calls=1, success=1
 ```
 
-`ConversionResult` is counted as a tool. Structured Output internally converts the Pydantic model into a tool specification and registers it with the LLM. The LLM outputs structured data using the same tool-calling mechanism, and the SDK validates it.
+`ConversionResult` is counted as a tool. I didn't define this as a tool, so why does it show up in `tool_usage`?
 
-So the agent loop goes: LLM → call `get_exchange_rate` → receive result → call `ConversionResult` tool → validation passes → done.
+Turns out Structured Output internally converts the Pydantic model into a tool specification and registers it with the LLM. The LLM outputs structured data using the same tool-calling mechanism, and the SDK validates it. So the agent loop goes: LLM → call `get_exchange_rate` → receive result → call `ConversionResult` tool → validation passes → done.
 
-If you see a Pydantic model name in `tool_usage` during debugging, it's the Structured Output internals. You can also check `call_count` and `error_count` to monitor validation success rates.
+If you see a Pydantic model name in `tool_usage` during debugging, it's the Structured Output internals. You can also check `call_count` and `error_count` to monitor validation success rates and catch excessive retries.

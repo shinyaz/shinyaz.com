@@ -1,0 +1,20 @@
+---
+title: "Graph の result.execution_time は 0ms を返すのでノード合計で計算する"
+description: "Strands Agents SDK の Graph で result.execution_time が 0ms を返す。ノードごとの execution_time は正しく記録されるので、合計値を自分で計算する必要がある。"
+date: 2026-04-05
+published: false
+tags: ["strands-agents", "bedrock", "python", "graph"]
+---
+
+Strands Agents SDK の Graph で実行時間を確認しようとしたところ、`result.execution_time` が 0ms だった。3 ノードで合計 15 秒以上かかっているはずなのに 0ms はおかしい。
+
+```python title="Python"
+result = graph("What is Amazon Bedrock?")
+print(f"execution_time: {result.execution_time}ms")  # 0ms
+total = sum(nr.execution_time for nr in result.results.values())
+print(f"sum of node times: {total}ms")  # 15550ms
+```
+
+`result.execution_time` は現時点で 0ms を返すが、各ノードの `execution_time` は正しく記録されている。Graph 全体の実行時間が必要な場合は `sum(nr.execution_time for nr in result.results.values())` で計算する。
+
+Swarm の `result.execution_time` は正しく動作するので、Graph 固有の問題だ。パターン比較で実行時間を揃えたい場合は、Graph だけノード合計で計算する必要がある点に注意。

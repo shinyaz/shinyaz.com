@@ -6,7 +6,7 @@ published: false
 tags: ["strands-agents", "bedrock", "guardrails", "python"]
 ---
 
-Strands Agents SDK に Bedrock Guardrails を設定してブロックされるリクエストを送ったところ、会話履歴のユーザー入力が消えていた。
+Strands Agents SDK に Bedrock Guardrails を設定してブロックされるリクエストを送ったところ、会話履歴のユーザー入力が消えていた。「入力したはずの文章がない」と思ってデバッグしたら、こうなっていた。
 
 ```text title="Output"
 Messages after block: 2
@@ -18,4 +18,4 @@ Messages after block: 2
 
 この動作は `BedrockModel` の `guardrail_redact_input` パラメータ（デフォルト `True`）で制御できる。書き換えメッセージは `guardrail_redact_input_message` で変更可能。出力側にも同様の `guardrail_redact_output`（デフォルト `False`）がある。
 
-会話履歴をデバッグしていて「ユーザーの入力が消えている」と思ったら、ガードレールの自動書き換えを疑うとよい。
+会話履歴をデバッグしていて「ユーザーの入力が消えている」と思ったら、ガードレールの自動書き換えを疑うとよい。`guardrail_redact_input=False` に設定すれば元の入力が保持されるが、後続の会話でガードレールが再発動するリスクがある。
