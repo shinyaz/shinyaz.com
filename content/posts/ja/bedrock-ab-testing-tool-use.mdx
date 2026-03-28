@@ -1,0 +1,642 @@
+---
+title: "Bedrock の tool use で AI 駆動 A/B テストの意思決定エンジンを検証する"
+description: "AWS ブログで紹介された AI 駆動 A/B テストエンジンの核心 — Bedrock Converse API の tool use を活用したモデルによる意思決定 — を実装・検証。プロンプトに含める文脈情報の有無でバリアント選択が逆転する現象を確認し、tool use でモデルに意思決定させる際の設計指針を整理した。"
+date: 2026-03-28
+published: true
+featured: false
+categories: [ai-agents]
+tags: ["bedrock", "python", "ai-agents", "ab-testing", "tool-use"]
+---
+
+## はじめに
+
+2026年3月18日、AWS Machine Learning Blog に [Build an AI-Powered A/B testing engine using Amazon Bedrock](https://aws.amazon.com/blogs/machine-learning/build-an-ai-powered-a-b-testing-engine-using-amazon-bedrock/) が公開された。従来のランダム割り当てではなく、Amazon Bedrock の tool use でユーザーコンテキストをリアルタイムに分析し、最適なバリアントを選択する A/B テストエンジンのアーキテクチャだ。元記事では MCP（Model Context Protocol）を使ってデータソースへのアクセスを標準化しているが、tool use 自体は Bedrock Converse API のネイティブ機能であり、MCP なしでも利用できる。
+
+ブログではアーキテクチャの全体像と概念が詳しく解説されているが、実際にコードを動かした検証は含まれていない。この記事では、そのアーキテクチャの核心部分 — Bedrock Converse API の tool use によるコンテキスト依存の意思決定 — を Python コードで実装し、以下の 3 点を検証した結果を共有する。
+
+1. **tool use によるバリアント選択の基本動作** — ロイヤルティメンバーに対して適切なバリアントが選ばれるか
+2. **ユーザーコンテキストの違いによる選択の変化** — 新規ユーザーでは異なるバリアントが選ばれるか
+3. **矛盾するシグナルでの意思決定** — データが対立する場合、LLM はどうトレードオフを解決するか
+
+加えて、検証の過程でプロンプトに含める文脈情報の有無がバリアント選択を逆転させるという発見があった。この点も共有する。
+
+公式ドキュメントは [Carry out a conversation with the Converse API operations](https://docs.aws.amazon.com/bedrock/latest/userguide/conversation-inference.html) を参照。
+
+## AI 駆動 A/B テストの仕組み
+
+### 従来の A/B テストの課題
+
+従来の A/B テストはユーザーをランダムにバリアントに割り当てる。統計的有意性を得るまでに数週間かかり、ユーザーセグメントごとの違いは事後分析でしか見えない。
+
+ブログでは小売サイトの CTA ボタンテストを例に挙げている。2 つのバリアントのどちらをユーザーに表示するかを、Bedrock の tool use を通じてモデルに判断させるというシナリオだ。この記事でも同じ例を使い、ユーザーの属性やコンテキストを変えたときにモデルの判断がどう変わるかを検証する。
+
+- **Variant A**: "Buy Now" — シンプルで直接的な CTA
+- **Variant B**: "Buy Now – Free Shipping" — 送料無料のインセンティブ付き CTA
+
+全体では Variant B が優勢に見えるが、実際にはユーザー層によって反応が異なる。プレミアムロイヤルティメンバーは既に送料無料の特典があるため "Free Shipping" メッセージに困惑し、クーポンサイト経由のユーザーはインセンティブに強く反応する。ランダム割り当てではこの違いを活かせない。
+
+### アーキテクチャ概要
+
+ブログのアーキテクチャは CloudFront + ECS Fargate + DynamoDB + Bedrock で構成されている。ポイントは**ハイブリッド戦略**だ。
+
+- **新規ユーザー** → ハッシュベースの割り当て（行動データがないため AI 分析の価値が低い）
+- **リピーター** → Bedrock の tool use で AI 駆動の割り当て
+
+この記事では、フルアーキテクチャの構築ではなく、意思決定ロジックの検証に焦点を当てる。
+
+| 元記事のコンポーネント | この検証での代替 |
+|---|---|
+| CloudFront + ECS Fargate | ローカル Python スクリプト |
+| DynamoDB（5テーブル） | ツール関数内のハードコードデータ |
+| MCP ツール | Bedrock toolConfig のツール定義 |
+| Bedrock Converse API | 同じ（そのまま使用） |
+
+Bedrock から見た挙動は同じだ。ツールを呼び出し、データを受け取り、判断を下す。データの取得元が DynamoDB かハードコードかは、意思決定ロジックに影響しない。
+
+### tool use の役割
+
+Bedrock の tool use は、モデルが外部データを取得するための仕組みだ。すべてのデータをプロンプトに詰め込む代わりに、モデルが必要なツールを選択的に呼び出す。
+
+元記事では 11 個のツール（`get_user_assignment`、`get_user_profile`、`get_similar_users`、`get_variant_performance`、`get_session_context` 等）が定義されている。この検証では、意思決定の核心に関わる以下の 3 つに絞った。`get_user_assignment`（既存割り当ての確認）は新規割り当てのシナリオでは常に「割り当てなし」を返すだけであり、`get_session_context` 等のセッション分析ツールはプロンプトの ADDITIONAL CONTEXT で代替できるためだ。
+
+| ツール名 | 役割 | 返すデータ |
+|---|---|---|
+| `get_user_profile` | ユーザーの行動プロファイル取得 | エンゲージメントスコア、コンバージョン確率、インタラクションスタイル、過去の成功バリアント |
+| `get_similar_users` | 類似ユーザーのパターン取得 | 類似ユーザー数、平均コンバージョン率、好むバリアント、共通特性 |
+| `get_variant_performance` | バリアントのパフォーマンス取得 | インプレッション数、クリック数、コンバージョン数、コンバージョン率、信頼度 |
+
+マルチターン会話のフローは以下の通りだ。
+
+1. ユーザーコンテキストを含むプロンプトを Bedrock に送信
+2. モデルが `stopReason: tool_use` でツール呼び出しを要求
+3. アプリケーションがツールを実行し、結果を返す
+4. 2-3 を繰り返し、モデルが `stopReason: end_turn` で最終判断を返す
+
+## 検証環境
+
+前提条件:
+
+- Python 3.12+、boto3 インストール済み
+- Amazon Bedrock のモデルアクセス権限（`bedrock:InvokeModel`）
+- 検証リージョン: us-east-1
+- 使用モデル: Claude Sonnet 4（`global.anthropic.claude-sonnet-4-20250514-v1:0`）
+
+元記事では Claude 3.5 Sonnet を使用しているが、現在はレガシー扱いのため Claude Sonnet 4 で検証した。
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">セットアップ（ツール定義と検証コード）</summary>
+
+### ツール定義
+
+Bedrock の `toolConfig` に渡すツール定義と、模擬データを返すローカル関数を用意する。データはブログの例と同じ値を使用した。
+
+```python title="tools.py"
+import json
+
+TOOL_DEFINITIONS = [
+    {
+        "toolSpec": {
+            "name": "get_user_profile",
+            "description": "Get user behavioral profile and preferences.",
+            "inputSchema": {
+                "json": {
+                    "type": "object",
+                    "properties": {
+                        "user_id": {"type": "string", "description": "The user ID"}
+                    },
+                    "required": ["user_id"],
+                }
+            },
+        }
+    },
+    {
+        "toolSpec": {
+            "name": "get_similar_users",
+            "description": "Find users with similar behavior patterns.",
+            "inputSchema": {
+                "json": {
+                    "type": "object",
+                    "properties": {
+                        "user_id": {"type": "string"},
+                        "limit": {"type": "integer", "default": 10},
+                    },
+                    "required": ["user_id"],
+                }
+            },
+        }
+    },
+    {
+        "toolSpec": {
+            "name": "get_variant_performance",
+            "description": "Get real-time variant performance metrics.",
+            "inputSchema": {
+                "json": {
+                    "type": "object",
+                    "properties": {
+                        "experiment_id": {"type": "string"},
+                        "variant_id": {"type": "string"},
+                    },
+                    "required": ["experiment_id", "variant_id"],
+                }
+            },
+        }
+    },
+]
+```
+
+### 模擬データ
+
+ブログの小売サイト CTA テストと同じデータを用意した。バリアントパフォーマンスは元ブログと同じく `current_performance` でネストした構造にしている。
+
+```python title="tools.py（続き）"
+USER_PROFILES = {
+    "user_001": {  # ロイヤルティメンバー
+        "user_id": "user_001",
+        "engagement_score": 0.89, "conversion_likelihood": 0.24,
+        "interaction_style": "focused", "attention_span": "short",
+        "successful_variants": ["A", "simple_design"],
+        "confidence_score": 0.87, "device_type": "mobile",
+        "visit_frequency": "frequent",
+        "similarity_cluster": "premium_mobile_focused",
+    },
+    "user_002": {  # 新規ユーザー（クーポンサイト経由）
+        "user_id": "user_002",
+        "engagement_score": 0.15, "conversion_likelihood": 0.05,
+        "interaction_style": "explorer", "attention_span": "medium",
+        "successful_variants": [],
+        "confidence_score": 0.12, "device_type": "mobile",
+        "visit_frequency": "first_visit",
+        "similarity_cluster": "new_deal_seeker",
+    },
+    "user_003": {  # 矛盾シグナル用
+        "user_id": "user_003",
+        "engagement_score": 0.62, "conversion_likelihood": 0.18,
+        "interaction_style": "explorer", "attention_span": "long",
+        "successful_variants": ["B", "social_proof"],
+        "confidence_score": 0.71, "device_type": "desktop",
+        "visit_frequency": "regular",
+        "similarity_cluster": "social_proof_responsive",
+    },
+}
+
+SIMILAR_USERS = {
+    "user_001": {
+        "count": 52, "avg_conversion_rate": 0.21,
+        "preferred_variants": ["A"],
+        "shared_characteristics": ["mobile", "loyalty_member", "focused_buyer"],
+    },
+    "user_002": {
+        "count": 39, "avg_conversion_rate": 0.18,
+        "preferred_variants": ["B"],
+        "shared_characteristics": ["first_visit", "coupon_site_referrer", "deal_seeking"],
+        "note": "Similar new users from deal sites show 2.3x higher conversion with incentive messaging",
+    },
+    "user_003": {
+        "count": 34, "avg_conversion_rate": 0.22,
+        "preferred_variants": ["B"],
+        "shared_characteristics": ["desktop", "social_proof_responsive", "explorer"],
+        "note": "Similar users show 34% higher conversion with social proof emphasis",
+    },
+}
+
+VARIANT_PERFORMANCE = {
+    "A": {
+        "current_performance": {
+            "impressions": 3900, "clicks": 312, "conversions": 125,
+            "conversion_rate": 0.032, "confidence": 0.89,
+        },
+        "has_performance_data": True,
+    },
+    "B": {
+        "current_performance": {
+            "impressions": 3850, "clicks": 385, "conversions": 158,
+            "conversion_rate": 0.041, "confidence": 0.95,
+        },
+        "has_performance_data": True,
+    },
+}
+
+# 検証 3 用: Variant A の全体コンバージョン率が高いデータセット
+VARIANT_PERFORMANCE_CONFLICTING = {
+    "A": {
+        "current_performance": {
+            "impressions": 5000, "clicks": 400, "conversions": 210,
+            "conversion_rate": 0.042, "confidence": 0.92,
+        },
+        "has_performance_data": True,
+    },
+    "B": {
+        "current_performance": {
+            "impressions": 4800, "clicks": 370, "conversions": 182,
+            "conversion_rate": 0.038, "confidence": 0.90,
+        },
+        "has_performance_data": True,
+    },
+}
+
+def execute_tool(tool_name, tool_input, use_conflicting=False):
+    if tool_name == "get_user_profile":
+        data = USER_PROFILES.get(tool_input["user_id"], {"error": "Not found"})
+    elif tool_name == "get_similar_users":
+        data = SIMILAR_USERS.get(tool_input["user_id"], {"count": 0})
+    elif tool_name == "get_variant_performance":
+        perf = VARIANT_PERFORMANCE_CONFLICTING if use_conflicting \
+            else VARIANT_PERFORMANCE
+        data = perf.get(tool_input.get("variant_id", ""), {"error": "Not found"})
+    else:
+        data = {"error": f"Unknown tool: {tool_name}"}
+    return json.dumps(data)
+```
+
+### Converse API 呼び出し
+
+マルチターン会話ループの実装。`stopReason` が `tool_use` の間はツールを実行して結果を返し、`end_turn` で最終判断を取得する。`build_user_prompt` でユーザーコンテキストとバリアント情報をプロンプトに組み立てている。
+
+```python title="verify.py"
+import json, time, boto3
+from tools import TOOL_DEFINITIONS, execute_tool
+
+client = boto3.client("bedrock-runtime", region_name="us-east-1")
+MODEL_ID = "global.anthropic.claude-sonnet-4-20250514-v1:0"
+
+SYSTEM_PROMPT = """You are an expert A/B testing optimization specialist \
+with access to tools for gathering user behavior data.
+
+CRITICAL INSTRUCTIONS:
+1. Call tools to gather information needed for your decision
+2. Consider: device type, user behavior, session context, \
+variant performance, similar user patterns
+3. Make data-driven decisions based on tool results
+4. Your final response MUST be ONLY valid JSON with no additional text
+
+RESPONSE FORMAT: Return ONLY this JSON object:
+{"variant_id": "A or B", "confidence": 0.0-1.0, \
+"reasoning": "Detailed explanation"}"""
+
+def build_user_prompt(user_id, experiment_id, device_type,
+                      is_mobile, current_page, referrer_type,
+                      extra_context=""):
+    ctx = (f"\n\nADDITIONAL CONTEXT:\n{extra_context}"
+           if extra_context else "")
+    return f"""Select the optimal variant for this user \
+in experiment {experiment_id}.
+
+USER CONTEXT:
+- User ID: {user_id}
+- Device: {device_type} (Mobile: {is_mobile})
+- Current Page: {current_page}
+- Referrer: {referrer_type}{ctx}
+
+AVAILABLE VARIANTS:
+- Variant A: "Buy Now" — Clean, direct CTA
+- Variant B: "Buy Now – Free Shipping" — CTA with incentive messaging
+
+INSTRUCTIONS:
+1. Call tools to gather user profile, similar users, \
+and variant performance data
+2. Analyze all signals together
+3. Respond with ONLY the JSON object"""
+
+def run_verification(user_id, experiment_id, device_type, is_mobile,
+                     current_page, referrer_type,
+                     use_conflicting=False, extra_context=""):
+    prompt = build_user_prompt(
+        user_id, experiment_id, device_type,
+        is_mobile, current_page, referrer_type, extra_context)
+    messages = [{"role": "user", "content": [{"text": prompt}]}]
+    tool_calls_log = []
+    turn = 0
+    start_time = time.time()
+
+    while True:
+        turn += 1
+        response = client.converse(
+            modelId=MODEL_ID, messages=messages,
+            system=[{"text": SYSTEM_PROMPT}],
+            toolConfig={"tools": TOOL_DEFINITIONS},
+        )
+        output_message = response["output"]["message"]
+        messages.append(output_message)
+
+        if response["stopReason"] == "tool_use":
+            tool_results = []
+            for block in output_message["content"]:
+                if "toolUse" in block:
+                    tool = block["toolUse"]
+                    result = execute_tool(
+                        tool["name"], tool["input"],
+                        use_conflicting=use_conflicting)
+                    tool_calls_log.append({
+                        "turn": turn, "tool": tool["name"],
+                        "input": tool["input"]})
+                    tool_results.append({"toolResult": {
+                        "toolUseId": tool["toolUseId"],
+                        "content": [{"json": json.loads(result)}],
+                    }})
+            messages.append({"role": "user", "content": tool_results})
+
+        elif response["stopReason"] == "end_turn":
+            final_text = "".join(
+                b["text"] for b in output_message["content"]
+                if "text" in b)
+            return {
+                "decision": json.loads(final_text.strip()),
+                "tool_calls": tool_calls_log,
+                "turns": turn,
+                "elapsed_seconds": round(
+                    time.time() - start_time, 2),
+                "usage": response.get("usage", {}),
+            }
+```
+
+### 検証の実行
+
+上記の `tools.py` と `verify.py` を同じディレクトリに配置し、以下のスクリプトで 3 検証すべてを実行できる。
+
+```python title="run_all.py"
+import json
+from verify import run_verification
+
+def print_result(label, r):
+    d = r["decision"]
+    print(f"\n{'='*60}")
+    print(f"  {label}")
+    print(f"{'='*60}")
+    print(f"  Variant:    {d.get('variant_id', '?')}")
+    print(f"  Confidence: {d.get('confidence', '?')}")
+    print(f"  Reasoning:  {d.get('reasoning', '?')}")
+    print(f"\n  Tool calls ({len(r['tool_calls'])}):")
+    for tc in r["tool_calls"]:
+        print(f"    Turn {tc['turn']}: {tc['tool']}"
+              f"({json.dumps(tc['input'])})")
+    print(f"\n  Turns: {r['turns']}  |  Time: {r['elapsed_seconds']}s")
+
+# 検証 1: ロイヤルティメンバー
+r1 = run_verification(
+    user_id="user_001", experiment_id="cta_test_2024",
+    device_type="iPhone", is_mobile=True,
+    current_page="/products/premium-headphones",
+    referrer_type="direct",
+    extra_context="Premium loyalty member (already has free shipping "
+                  "benefit). Fast, goal-oriented browsing pattern. "
+                  "Frequent purchaser.",
+)
+print_result("Verification 1: Loyalty Member", r1)
+
+# 検証 2: 新規ユーザー
+r2 = run_verification(
+    user_id="user_002", experiment_id="cta_test_2024",
+    device_type="Android", is_mobile=True,
+    current_page="/deals/spring-sale",
+    referrer_type="coupon_site (RetailMeNot)",
+    extra_context="First-time visitor. No loyalty status. "
+                  "Slow, comparison-focused browsing pattern.",
+)
+print_result("Verification 2: New User", r2)
+
+# 検証 3: 矛盾するシグナル
+r3 = run_verification(
+    user_id="user_003", experiment_id="cta_test_2024",
+    device_type="Desktop Chrome", is_mobile=False,
+    current_page="/products/wireless-earbuds",
+    referrer_type="direct",
+    use_conflicting=True,
+)
+print_result("Verification 3: Conflicting Signals", r3)
+```
+
+```bash title="Terminal"
+python run_all.py
+```
+
+</details>
+
+## 検証 1: ロイヤルティメンバーへのバリアント選択
+
+ブログの User 1 と同じコンテキストで検証する。プレミアムロイヤルティメンバーが iPhone で商品ページを閲覧している状況だ。改めて整理すると、Variant A は "Buy Now"（シンプルな CTA）、Variant B は "Buy Now – Free Shipping"（送料無料のインセンティブ付き）だ。
+
+プロンプトには以下のユーザーコンテキストを含めた。
+
+- デバイス: iPhone（モバイル）
+- リファラー: ダイレクトナビゲーション
+- 追加コンテキスト: プレミアムロイヤルティメンバー（送料無料特典あり）、目的志向の閲覧パターン、頻繁な購入者
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">実行コード（検証 1）</summary>
+
+```python title="Python"
+r1 = run_verification(
+    user_id="user_001", experiment_id="cta_test_2024",
+    device_type="iPhone", is_mobile=True,
+    current_page="/products/premium-headphones",
+    referrer_type="direct",
+    extra_context="Premium loyalty member (already has free shipping benefit). "
+                  "Fast, goal-oriented browsing pattern. Frequent purchaser.",
+)
+```
+
+</details>
+
+```text title="Output"
+Variant:    A
+Confidence: 0.82
+Reasoning:  Despite variant B showing higher overall conversion rate (4.1% vs 3.2%),
+            multiple user-specific signals strongly favor variant A:
+            1) User profile shows successful variants include 'A' and 'simple_design',
+               indicating preference for clean interfaces;
+            2) User has 'focused' interaction style and 'short' attention span;
+            3) 52 similar mobile premium focused buyers prefer variant A;
+            4) User is already a premium loyalty member with free shipping benefits,
+               making the incentive messaging in variant B redundant;
+            5) User's goal-oriented browsing pattern on mobile device aligns with
+               variant A's direct approach.
+
+Tool calls (4):
+  Turn 1: get_user_profile({"user_id": "user_001"})
+  Turn 1: get_similar_users({"user_id": "user_001", "limit": 10})
+  Turn 1: get_variant_performance({"experiment_id": "cta_test_2024", "variant_id": "A"})
+  Turn 1: get_variant_performance({"experiment_id": "cta_test_2024", "variant_id": "B"})
+
+Turns: 2  |  Time: 11.44s
+Tokens — input: 1566, output: 207
+```
+
+Variant A が選択された。Variant B の方が全体のコンバージョン率が高い（4.1% vs 3.2%）にもかかわらず、ユーザー固有のシグナルを優先した判断だ。特に注目すべきは、プロンプトに含めた「送料無料特典あり」という文脈情報を reasoning の根拠 4 で明示的に参照している点だ。ツールが返すデータにはロイヤルティ情報は含まれておらず、プロンプトの文脈情報とツールデータを組み合わせて判断していることがわかる。
+
+4 つのツールがすべて Turn 1 で並列に呼び出されている。モデルは必要なデータを一度に取得し、Turn 2 で最終判断を返した。
+
+## 検証 2: 新規ユーザーへのバリアント選択
+
+ブログの User 2 と同じコンテキストで検証する。クーポンサイト経由の新規ユーザーだ。
+
+- デバイス: Android（モバイル）
+- リファラー: クーポンサイト（RetailMeNot）
+- 追加コンテキスト: 初回訪問、ロイヤルティなし、比較重視の閲覧パターン
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">実行コード（検証 2）</summary>
+
+```python title="Python"
+r2 = run_verification(
+    user_id="user_002", experiment_id="cta_test_2024",
+    device_type="Android", is_mobile=True,
+    current_page="/deals/spring-sale",
+    referrer_type="coupon_site (RetailMeNot)",
+    extra_context="First-time visitor. No loyalty status. "
+                  "Slow, comparison-focused browsing pattern.",
+)
+```
+
+</details>
+
+```text title="Output"
+Variant:    B
+Confidence: 0.82
+Reasoning:  Selected Variant B based on multiple converging data points:
+            1) User profile shows 'new_deal_seeker' cluster with very low conversion
+               likelihood (0.05) and 'explorer' interaction style;
+            2) Similar users (39 users: first_visit, coupon_site_referrer, deal_seeking)
+               strongly prefer Variant B with 2.3x higher conversion rate;
+            3) Variant B outperforming A (4.1% vs 3.2% conversion rate) with higher
+               confidence (0.95 vs 0.89);
+            4) First-time visitor from coupon site suggests price/value sensitivity,
+               the 'Free Shipping' incentive directly addresses deal-seeking behavior.
+
+Tool calls (4):
+  Turn 1: get_user_profile({"user_id": "user_002"})
+  Turn 1: get_similar_users({"user_id": "user_002", "limit": 10})
+  Turn 1: get_variant_performance({"experiment_id": "cta_test_2024", "variant_id": "A"})
+  Turn 1: get_variant_performance({"experiment_id": "cta_test_2024", "variant_id": "B"})
+
+Turns: 2  |  Time: 7.75s
+Tokens — input: 1595, output: 243
+```
+
+Variant B が選択された。検証 1 とは異なり、バリアントのパフォーマンスデータ、類似ユーザーパターン、ユーザーコンテキストのすべてが Variant B を指しており、シグナルが収束している。検証 1 では「パフォーマンスデータに逆らう判断」だったが、ここでは全データが同じ方向を向いているため、判断の構造が異なる。
+
+検証 1 と 2 の比較:
+
+| 項目 | 検証 1（ロイヤルティ） | 検証 2（新規） |
+|---|---|---|
+| 選択バリアント | A | B |
+| 信頼度 | 0.82 | 0.82 |
+| ツール呼び出し | 4（並列） | 4（並列） |
+| 判断の特徴 | パフォーマンスデータに逆らう判断 | 全シグナルが収束 |
+| 主要根拠 | ロイヤルティ特典の冗長性 + 類似ユーザー | クーポン経由 + 類似ユーザー + パフォーマンス |
+
+## 検証 3: 矛盾するシグナルでの意思決定
+
+最も興味深い検証だ。データが対立する状況でモデルがどう判断するかを確認する。
+
+- デバイス: デスクトップ（中立 — どちらのバリアントにも有利でない）
+- リファラー: ダイレクトナビゲーション
+- ユーザープロファイル: 中程度のエンゲージメント（0.62）、過去に Variant B と social proof で成功
+- **矛盾ポイント**: Variant A の全体コンバージョン率が高い（4.2% vs 3.8%）が、類似ユーザー 34 人は Variant B を好む
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">実行コード（検証 3）</summary>
+
+```python title="Python"
+r3 = run_verification(
+    user_id="user_003", experiment_id="cta_test_2024",
+    device_type="Desktop Chrome", is_mobile=False,
+    current_page="/products/wireless-earbuds",
+    referrer_type="direct",
+    use_conflicting=True,  # VARIANT_PERFORMANCE_CONFLICTING を使用
+)
+```
+
+</details>
+
+```text title="Output"
+Variant:    B
+Confidence: 0.85
+Reasoning:  Based on comprehensive data analysis:
+            1) User profile shows successful_variants=['B','social_proof']
+               indicating strong historical preference for incentive messaging;
+            2) User belongs to 'social_proof_responsive' cluster with 'explorer'
+               interaction style;
+            3) Similar users (34 users) show 34% higher conversion rate preferring
+               variant B;
+            4) Despite variant A having slightly better overall performance
+               (4.2% vs 3.8%), the user-specific signals strongly favor variant B —
+               their personal conversion likelihood combined with cluster preference
+               outweighs the marginal performance difference;
+            5) The 'Free Shipping' incentive aligns with this user's demonstrated
+               preference pattern.
+
+Tool calls (4):
+  Turn 1: get_user_profile({"user_id": "user_003"})
+  Turn 1: get_similar_users({"user_id": "user_003", "limit": 10})
+  Turn 1: get_variant_performance({"experiment_id": "cta_test_2024", "variant_id": "A"})
+  Turn 1: get_variant_performance({"experiment_id": "cta_test_2024", "variant_id": "B"})
+
+Turns: 2  |  Time: 9.38s
+Tokens — input: 1552, output: 205
+```
+
+Variant B が選択された。reasoning の 4 番目で「全体パフォーマンスの差は marginal であり、ユーザー固有のシグナルが上回る」と明示的にトレードオフを説明している。検証 1 ではプロンプトの文脈情報（ロイヤルティ）がパフォーマンスデータを覆したが、ここではツールデータ同士の対立（全体パフォーマンス vs 類似ユーザー）を LLM が解決している。
+
+### 3 検証の比較
+
+| 項目 | 検証 1（ロイヤルティ） | 検証 2（新規） | 検証 3（矛盾） |
+|---|---|---|---|
+| 選択バリアント | A | B | B |
+| 信頼度 | 0.82 | 0.82 | 0.85 |
+| ツール呼び出し | 4 | 4 | 4 |
+| ターン数 | 2 | 2 | 2 |
+| 所要時間 | 11.44s | 7.75s | 9.38s |
+| 判断の特徴 | パフォーマンスに逆らう | 全シグナル収束 | 矛盾を解決 |
+
+3 つの検証すべてで、モデルはツールから取得したデータを単に列挙するのではなく、データ間の関係性を推論して判断している。特に検証 1 と 3 では、全体のパフォーマンスデータに逆らってユーザー固有のシグナルを優先しており、「個別最適化」の意思決定ができていることがわかる。
+
+### 再現性の確認
+
+バリアント選択の結果は安定しているのか。検証 1 と同じ条件で 3 回実行し、一貫性を確認した。
+
+| 実行 | バリアント | 信頼度 | 所要時間 |
+|---|---|---|---|
+| 1 回目 | A | 0.85 | 10.22s |
+| 2 回目 | A | 0.92 | 10.12s |
+| 3 回目 | A | 0.88 | 11.17s |
+
+バリアント選択は 3 回とも一貫して Variant A だった。一方、信頼度スコアは 0.85〜0.92 の範囲でばらついた。reasoning の表現も毎回異なるが、挙げる根拠の内容は同じだ。バリアント選択の安定性は高いが、信頼度スコアを閾値として使う場合はこのばらつきを考慮する必要がある。
+
+## 制約とトレードオフ
+
+### プロンプトの文脈情報が判断を逆転させる
+
+検証中に最も重要な発見があった。検証 1 で「プレミアムロイヤルティメンバー（送料無料特典あり）」という文脈情報をプロンプトから外して実行したところ、**Variant B が選択された**。
+
+```text title="Output（ロイヤルティ情報なし）"
+Variant:    B
+Confidence: 0.85
+Reasoning:  Variant performance data strongly favors B with 0.041 vs 0.032
+            conversion rate (28% higher). The 'Free Shipping' incentive in
+            Variant B addresses mobile users' need for clear value propositions.
+            The performance data strongly favors B despite similar user
+            preference for A.
+```
+
+同じユーザープロファイル、同じ類似ユーザーデータ、同じバリアントパフォーマンスでも、プロンプトに含める文脈情報の有無でバリアント選択が逆転した。ロイヤルティ情報がなければ、モデルはバリアントのパフォーマンスデータ（B の方がコンバージョン率が高い）を最優先し、類似ユーザーの好み（A を好む）を覆した。
+
+これは tool use を通じてモデルに意思決定させる際の最も重要な設計ポイントだ。**ツールが返すデータだけでなく、プロンプトに含める文脈情報が判断の質を決定する**。元記事のアーキテクチャでは、Context Enrichment Middleware がリクエストヘッダーからデバイス情報やリファラーを自動抽出してプロンプトに追加している。この仕組みが意思決定の精度に直結していることが、今回の検証で実証された。
+
+### レイテンシとコスト
+
+全検証で 2 ターン（ツール呼び出し 1 回 + 最終判断 1 回）、所要時間は 7〜12 秒だった。ツールは毎回 4 つすべてが並列に呼び出された。
+
+本番環境では、この 7〜12 秒のレイテンシが許容できるかがアーキテクチャ選択の鍵になる。元記事のハイブリッド戦略（新規ユーザーはハッシュベース、リピーターのみ AI 駆動）は、このレイテンシを考慮した設計だ。
+
+### LLM ベースの判断の特性
+
+- **バリアント選択は安定** — 同じ入力で 3 回実行しても選択は一貫
+- **信頼度スコアにはばらつきがある** — 0.85〜0.92 の範囲で変動。閾値ベースの制御には不向き
+- **reasoning は毎回異なる表現** — 挙げる根拠は同じだが、文章表現が変わる。ログ分析で reasoning をパースする場合は注意が必要
+
+## まとめ
+
+- **tool use を活用したモデルは意思決定エンジンとして機能する** — モデルはツールから取得したデータを単に列挙するのではなく、データ間の関係性を推論して判断する。全体のパフォーマンスデータに逆らってユーザー固有のシグナルを優先する「個別最適化」の判断ができた
+- **プロンプトの文脈情報が判断の質を決定する** — ツールが返すデータが同じでも、プロンプトに含める文脈情報（ロイヤルティステータス等）の有無でバリアント選択が逆転した。元記事の Context Enrichment Middleware の重要性が実証された
+- **マルチターン会話は効率的に動作する** — 全検証で 2 ターン、4 ツール並列呼び出し。モデルは必要なデータを一度に取得する戦略を取った。ただし 7〜12 秒のレイテンシは本番適用時の設計制約になる
+- **バリアント選択は安定するが、信頼度スコアにはばらつきがある** — 同じ入力で 3 回実行してもバリアント選択は一貫したが、信頼度は 0.85〜0.92 で変動した。信頼度スコアを閾値として使う場合はマージンを持たせる設計が必要だ

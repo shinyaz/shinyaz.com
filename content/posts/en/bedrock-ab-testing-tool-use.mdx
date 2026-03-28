@@ -1,0 +1,642 @@
+---
+title: "Verifying AI-driven A/B test decision-making with Bedrock tool use"
+description: "Hands-on verification of the AI-powered A/B testing engine from the AWS blog — implementing context-dependent variant selection with Bedrock Converse API tool use. Discovered that omitting context from the prompt reverses the variant choice, highlighting prompt design as the critical factor."
+date: 2026-03-28
+published: true
+featured: false
+categories: [ai-agents]
+tags: ["bedrock", "python", "ai-agents", "ab-testing", "tool-use"]
+---
+
+## Introduction
+
+On March 18, 2026, the AWS Machine Learning Blog published [Build an AI-Powered A/B testing engine using Amazon Bedrock](https://aws.amazon.com/blogs/machine-learning/build-an-ai-powered-a-b-testing-engine-using-amazon-bedrock/). Instead of random assignment, the architecture uses Amazon Bedrock's tool use to analyze user context in real time and select the optimal variant. The original blog uses MCP (Model Context Protocol) to standardize data source access, but tool use itself is a native Bedrock Converse API feature that works without MCP.
+
+The blog covers the full architecture and concepts in detail but doesn't include hands-on verification with running code. This article implements the core of that architecture — context-dependent decision-making via Bedrock Converse API tool use — in Python and shares the results of three verifications:
+
+1. **Basic variant selection with tool use** — Does the system select the right variant for a loyalty member?
+2. **Context-driven selection changes** — Does a different user context produce a different variant?
+3. **Decision-making with conflicting signals** — How does the LLM resolve trade-offs when data points disagree?
+
+Along the way, I discovered that including or omitting context in the prompt reverses the variant selection entirely. I'll share that finding as well.
+
+See the official documentation at [Carry out a conversation with the Converse API operations](https://docs.aws.amazon.com/bedrock/latest/userguide/conversation-inference.html).
+
+## How AI-driven A/B testing works
+
+### The problem with traditional A/B testing
+
+Traditional A/B testing assigns users to variants randomly. It takes weeks to reach statistical significance, and segment-level differences only surface in post-hoc analysis.
+
+The blog uses a retail CTA button test as an example. The scenario is straightforward: Bedrock's tool use decides which of two variants to show each user. This article uses the same example and verifies how Bedrock's decision changes when user attributes and context differ.
+
+- **Variant A**: "Buy Now" — a clean, direct call-to-action
+- **Variant B**: "Buy Now – Free Shipping" — a call-to-action with incentive messaging
+
+Variant B appears to win overall, but the reality is more nuanced. Premium loyalty members already have free shipping and find the message confusing, while coupon-site visitors respond strongly to the incentive. Random assignment can't leverage these differences.
+
+### Architecture overview
+
+The blog's architecture consists of CloudFront + ECS Fargate + DynamoDB + Bedrock. The key design is a **hybrid strategy**:
+
+- **New users** → hash-based assignment (no behavioral data, so AI adds little value)
+- **Returning users** → AI-driven assignment via Bedrock tool use
+
+This article focuses on verifying the decision-making logic, not deploying the full architecture.
+
+| Blog component | Verification substitute |
+|---|---|
+| CloudFront + ECS Fargate | Local Python script |
+| DynamoDB (5 tables) | Hard-coded data in tool functions |
+| MCP tools | Bedrock toolConfig tool definitions |
+| Bedrock Converse API | Same (used directly) |
+
+From Bedrock's perspective, the behavior is identical. It calls tools, receives data, and makes decisions. Whether the data comes from DynamoDB or hard-coded values doesn't affect the decision logic.
+
+### The role of tool use
+
+Bedrock's tool use lets the model retrieve external data on demand. Instead of stuffing everything into the prompt, the model selectively calls the tools it needs.
+
+The original blog defines 11 tools (`get_user_assignment`, `get_user_profile`, `get_similar_users`, `get_variant_performance`, `get_session_context`, etc.). This verification uses only the 3 tools most relevant to the decision-making core. `get_user_assignment` (checking existing assignments) always returns "no assignment" in new-assignment scenarios, and session analysis tools like `get_session_context` can be substituted by including context directly in the prompt via ADDITIONAL CONTEXT.
+
+| Tool | Purpose | Data returned |
+|---|---|---|
+| `get_user_profile` | User behavioral profile | Engagement score, conversion likelihood, interaction style, successful variants |
+| `get_similar_users` | Similar user patterns | Count, avg conversion rate, preferred variants, shared characteristics |
+| `get_variant_performance` | Variant metrics | Impressions, clicks, conversions, conversion rate, confidence |
+
+The multi-turn conversation flow:
+
+1. Send prompt with user context to Bedrock
+2. The model responds with `stopReason: tool_use` requesting tool calls
+3. Application executes tools and returns results
+4. Repeat 2-3 until the model responds with `stopReason: end_turn` containing the final decision
+
+## Verification environment
+
+Prerequisites:
+
+- Python 3.12+, boto3 installed
+- Amazon Bedrock model access (`bedrock:InvokeModel`)
+- Region: us-east-1
+- Model: Claude Sonnet 4 (`global.anthropic.claude-sonnet-4-20250514-v1:0`)
+
+The original blog uses Claude 3.5 Sonnet, which is now legacy. This verification uses Claude Sonnet 4.
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">Setup (tool definitions and verification code)</summary>
+
+### Tool definitions
+
+Tool definitions for Bedrock's `toolConfig` and local functions returning mock data matching the blog's examples.
+
+```python title="tools.py"
+import json
+
+TOOL_DEFINITIONS = [
+    {
+        "toolSpec": {
+            "name": "get_user_profile",
+            "description": "Get user behavioral profile and preferences.",
+            "inputSchema": {
+                "json": {
+                    "type": "object",
+                    "properties": {
+                        "user_id": {"type": "string", "description": "The user ID"}
+                    },
+                    "required": ["user_id"],
+                }
+            },
+        }
+    },
+    {
+        "toolSpec": {
+            "name": "get_similar_users",
+            "description": "Find users with similar behavior patterns.",
+            "inputSchema": {
+                "json": {
+                    "type": "object",
+                    "properties": {
+                        "user_id": {"type": "string"},
+                        "limit": {"type": "integer", "default": 10},
+                    },
+                    "required": ["user_id"],
+                }
+            },
+        }
+    },
+    {
+        "toolSpec": {
+            "name": "get_variant_performance",
+            "description": "Get real-time variant performance metrics.",
+            "inputSchema": {
+                "json": {
+                    "type": "object",
+                    "properties": {
+                        "experiment_id": {"type": "string"},
+                        "variant_id": {"type": "string"},
+                    },
+                    "required": ["experiment_id", "variant_id"],
+                }
+            },
+        }
+    },
+]
+```
+
+### Mock data
+
+Data matching the blog's retail CTA test scenario. Variant performance uses the same `current_performance` nested structure as the original blog.
+
+```python title="tools.py (continued)"
+USER_PROFILES = {
+    "user_001": {  # Loyalty member
+        "user_id": "user_001",
+        "engagement_score": 0.89, "conversion_likelihood": 0.24,
+        "interaction_style": "focused", "attention_span": "short",
+        "successful_variants": ["A", "simple_design"],
+        "confidence_score": 0.87, "device_type": "mobile",
+        "visit_frequency": "frequent",
+        "similarity_cluster": "premium_mobile_focused",
+    },
+    "user_002": {  # New user (coupon site)
+        "user_id": "user_002",
+        "engagement_score": 0.15, "conversion_likelihood": 0.05,
+        "interaction_style": "explorer", "attention_span": "medium",
+        "successful_variants": [],
+        "confidence_score": 0.12, "device_type": "mobile",
+        "visit_frequency": "first_visit",
+        "similarity_cluster": "new_deal_seeker",
+    },
+    "user_003": {  # Conflicting signals
+        "user_id": "user_003",
+        "engagement_score": 0.62, "conversion_likelihood": 0.18,
+        "interaction_style": "explorer", "attention_span": "long",
+        "successful_variants": ["B", "social_proof"],
+        "confidence_score": 0.71, "device_type": "desktop",
+        "visit_frequency": "regular",
+        "similarity_cluster": "social_proof_responsive",
+    },
+}
+
+SIMILAR_USERS = {
+    "user_001": {
+        "count": 52, "avg_conversion_rate": 0.21,
+        "preferred_variants": ["A"],
+        "shared_characteristics": ["mobile", "loyalty_member", "focused_buyer"],
+    },
+    "user_002": {
+        "count": 39, "avg_conversion_rate": 0.18,
+        "preferred_variants": ["B"],
+        "shared_characteristics": ["first_visit", "coupon_site_referrer", "deal_seeking"],
+        "note": "Similar new users from deal sites show 2.3x higher conversion with incentive messaging",
+    },
+    "user_003": {
+        "count": 34, "avg_conversion_rate": 0.22,
+        "preferred_variants": ["B"],
+        "shared_characteristics": ["desktop", "social_proof_responsive", "explorer"],
+        "note": "Similar users show 34% higher conversion with social proof emphasis",
+    },
+}
+
+VARIANT_PERFORMANCE = {
+    "A": {
+        "current_performance": {
+            "impressions": 3900, "clicks": 312, "conversions": 125,
+            "conversion_rate": 0.032, "confidence": 0.89,
+        },
+        "has_performance_data": True,
+    },
+    "B": {
+        "current_performance": {
+            "impressions": 3850, "clicks": 385, "conversions": 158,
+            "conversion_rate": 0.041, "confidence": 0.95,
+        },
+        "has_performance_data": True,
+    },
+}
+
+# Verification 3: dataset where Variant A has higher aggregate conversion rate
+VARIANT_PERFORMANCE_CONFLICTING = {
+    "A": {
+        "current_performance": {
+            "impressions": 5000, "clicks": 400, "conversions": 210,
+            "conversion_rate": 0.042, "confidence": 0.92,
+        },
+        "has_performance_data": True,
+    },
+    "B": {
+        "current_performance": {
+            "impressions": 4800, "clicks": 370, "conversions": 182,
+            "conversion_rate": 0.038, "confidence": 0.90,
+        },
+        "has_performance_data": True,
+    },
+}
+
+def execute_tool(tool_name, tool_input, use_conflicting=False):
+    if tool_name == "get_user_profile":
+        data = USER_PROFILES.get(tool_input["user_id"], {"error": "Not found"})
+    elif tool_name == "get_similar_users":
+        data = SIMILAR_USERS.get(tool_input["user_id"], {"count": 0})
+    elif tool_name == "get_variant_performance":
+        perf = VARIANT_PERFORMANCE_CONFLICTING if use_conflicting \
+            else VARIANT_PERFORMANCE
+        data = perf.get(tool_input.get("variant_id", ""), {"error": "Not found"})
+    else:
+        data = {"error": f"Unknown tool: {tool_name}"}
+    return json.dumps(data)
+```
+
+### Converse API call
+
+The multi-turn conversation loop. While `stopReason` is `tool_use`, execute tools and return results. On `end_turn`, extract the final decision. `build_user_prompt` assembles user context and variant information into the prompt.
+
+```python title="verify.py"
+import json, time, boto3
+from tools import TOOL_DEFINITIONS, execute_tool
+
+client = boto3.client("bedrock-runtime", region_name="us-east-1")
+MODEL_ID = "global.anthropic.claude-sonnet-4-20250514-v1:0"
+
+SYSTEM_PROMPT = """You are an expert A/B testing optimization specialist \
+with access to tools for gathering user behavior data.
+
+CRITICAL INSTRUCTIONS:
+1. Call tools to gather information needed for your decision
+2. Consider: device type, user behavior, session context, \
+variant performance, similar user patterns
+3. Make data-driven decisions based on tool results
+4. Your final response MUST be ONLY valid JSON with no additional text
+
+RESPONSE FORMAT: Return ONLY this JSON object:
+{"variant_id": "A or B", "confidence": 0.0-1.0, \
+"reasoning": "Detailed explanation"}"""
+
+def build_user_prompt(user_id, experiment_id, device_type,
+                      is_mobile, current_page, referrer_type,
+                      extra_context=""):
+    ctx = (f"\n\nADDITIONAL CONTEXT:\n{extra_context}"
+           if extra_context else "")
+    return f"""Select the optimal variant for this user \
+in experiment {experiment_id}.
+
+USER CONTEXT:
+- User ID: {user_id}
+- Device: {device_type} (Mobile: {is_mobile})
+- Current Page: {current_page}
+- Referrer: {referrer_type}{ctx}
+
+AVAILABLE VARIANTS:
+- Variant A: "Buy Now" — Clean, direct CTA
+- Variant B: "Buy Now – Free Shipping" — CTA with incentive messaging
+
+INSTRUCTIONS:
+1. Call tools to gather user profile, similar users, \
+and variant performance data
+2. Analyze all signals together
+3. Respond with ONLY the JSON object"""
+
+def run_verification(user_id, experiment_id, device_type, is_mobile,
+                     current_page, referrer_type,
+                     use_conflicting=False, extra_context=""):
+    prompt = build_user_prompt(
+        user_id, experiment_id, device_type,
+        is_mobile, current_page, referrer_type, extra_context)
+    messages = [{"role": "user", "content": [{"text": prompt}]}]
+    tool_calls_log = []
+    turn = 0
+    start_time = time.time()
+
+    while True:
+        turn += 1
+        response = client.converse(
+            modelId=MODEL_ID, messages=messages,
+            system=[{"text": SYSTEM_PROMPT}],
+            toolConfig={"tools": TOOL_DEFINITIONS},
+        )
+        output_message = response["output"]["message"]
+        messages.append(output_message)
+
+        if response["stopReason"] == "tool_use":
+            tool_results = []
+            for block in output_message["content"]:
+                if "toolUse" in block:
+                    tool = block["toolUse"]
+                    result = execute_tool(
+                        tool["name"], tool["input"],
+                        use_conflicting=use_conflicting)
+                    tool_calls_log.append({
+                        "turn": turn, "tool": tool["name"],
+                        "input": tool["input"]})
+                    tool_results.append({"toolResult": {
+                        "toolUseId": tool["toolUseId"],
+                        "content": [{"json": json.loads(result)}],
+                    }})
+            messages.append({"role": "user", "content": tool_results})
+
+        elif response["stopReason"] == "end_turn":
+            final_text = "".join(
+                b["text"] for b in output_message["content"]
+                if "text" in b)
+            return {
+                "decision": json.loads(final_text.strip()),
+                "tool_calls": tool_calls_log,
+                "turns": turn,
+                "elapsed_seconds": round(
+                    time.time() - start_time, 2),
+                "usage": response.get("usage", {}),
+            }
+```
+
+### Running the verifications
+
+Place `tools.py` and `verify.py` in the same directory, then run all 3 verifications with the following script.
+
+```python title="run_all.py"
+import json
+from verify import run_verification
+
+def print_result(label, r):
+    d = r["decision"]
+    print(f"\n{'='*60}")
+    print(f"  {label}")
+    print(f"{'='*60}")
+    print(f"  Variant:    {d.get('variant_id', '?')}")
+    print(f"  Confidence: {d.get('confidence', '?')}")
+    print(f"  Reasoning:  {d.get('reasoning', '?')}")
+    print(f"\n  Tool calls ({len(r['tool_calls'])}):")
+    for tc in r["tool_calls"]:
+        print(f"    Turn {tc['turn']}: {tc['tool']}"
+              f"({json.dumps(tc['input'])})")
+    print(f"\n  Turns: {r['turns']}  |  Time: {r['elapsed_seconds']}s")
+
+# Verification 1: Loyalty member
+r1 = run_verification(
+    user_id="user_001", experiment_id="cta_test_2024",
+    device_type="iPhone", is_mobile=True,
+    current_page="/products/premium-headphones",
+    referrer_type="direct",
+    extra_context="Premium loyalty member (already has free shipping "
+                  "benefit). Fast, goal-oriented browsing pattern. "
+                  "Frequent purchaser.",
+)
+print_result("Verification 1: Loyalty Member", r1)
+
+# Verification 2: New user
+r2 = run_verification(
+    user_id="user_002", experiment_id="cta_test_2024",
+    device_type="Android", is_mobile=True,
+    current_page="/deals/spring-sale",
+    referrer_type="coupon_site (RetailMeNot)",
+    extra_context="First-time visitor. No loyalty status. "
+                  "Slow, comparison-focused browsing pattern.",
+)
+print_result("Verification 2: New User", r2)
+
+# Verification 3: Conflicting signals
+r3 = run_verification(
+    user_id="user_003", experiment_id="cta_test_2024",
+    device_type="Desktop Chrome", is_mobile=False,
+    current_page="/products/wireless-earbuds",
+    referrer_type="direct",
+    use_conflicting=True,
+)
+print_result("Verification 3: Conflicting Signals", r3)
+```
+
+```bash title="Terminal"
+python run_all.py
+```
+
+</details>
+
+## Verification 1: Variant selection for a loyalty member
+
+Testing with the same context as User 1 from the blog. A premium loyalty member browsing a product page on iPhone. As a reminder, Variant A is "Buy Now" (a simple CTA) and Variant B is "Buy Now – Free Shipping" (with incentive messaging).
+
+The prompt included:
+
+- Device: iPhone (mobile)
+- Referrer: direct navigation
+- Additional context: Premium loyalty member (already has free shipping), goal-oriented browsing, frequent purchaser
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">Execution code (Verification 1)</summary>
+
+```python title="Python"
+r1 = run_verification(
+    user_id="user_001", experiment_id="cta_test_2024",
+    device_type="iPhone", is_mobile=True,
+    current_page="/products/premium-headphones",
+    referrer_type="direct",
+    extra_context="Premium loyalty member (already has free shipping benefit). "
+                  "Fast, goal-oriented browsing pattern. Frequent purchaser.",
+)
+```
+
+</details>
+
+```text title="Output"
+Variant:    A
+Confidence: 0.82
+Reasoning:  Despite variant B showing higher overall conversion rate (4.1% vs 3.2%),
+            multiple user-specific signals strongly favor variant A:
+            1) User profile shows successful variants include 'A' and 'simple_design',
+               indicating preference for clean interfaces;
+            2) User has 'focused' interaction style and 'short' attention span;
+            3) 52 similar mobile premium focused buyers prefer variant A;
+            4) User is already a premium loyalty member with free shipping benefits,
+               making the incentive messaging in variant B redundant;
+            5) User's goal-oriented browsing pattern on mobile device aligns with
+               variant A's direct approach.
+
+Tool calls (4):
+  Turn 1: get_user_profile({"user_id": "user_001"})
+  Turn 1: get_similar_users({"user_id": "user_001", "limit": 10})
+  Turn 1: get_variant_performance({"experiment_id": "cta_test_2024", "variant_id": "A"})
+  Turn 1: get_variant_performance({"experiment_id": "cta_test_2024", "variant_id": "B"})
+
+Turns: 2  |  Time: 11.44s
+Tokens — input: 1566, output: 207
+```
+
+Variant A was selected. Despite Variant B having a higher overall conversion rate (4.1% vs 3.2%), the model prioritized user-specific signals. Notably, point 4 in the reasoning explicitly references the "free shipping benefits" context from the prompt. The tool data doesn't contain loyalty information — the model combined the prompt context with tool data to make its decision.
+
+All 4 tools were called in parallel during Turn 1. The model gathered all needed data at once and returned the final decision in Turn 2.
+
+## Verification 2: Variant selection for a new user
+
+Testing with the same context as User 2 from the blog. A first-time visitor from a coupon site.
+
+- Device: Android (mobile)
+- Referrer: coupon site (RetailMeNot)
+- Additional context: First-time visitor, no loyalty status, comparison-focused browsing
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">Execution code (Verification 2)</summary>
+
+```python title="Python"
+r2 = run_verification(
+    user_id="user_002", experiment_id="cta_test_2024",
+    device_type="Android", is_mobile=True,
+    current_page="/deals/spring-sale",
+    referrer_type="coupon_site (RetailMeNot)",
+    extra_context="First-time visitor. No loyalty status. "
+                  "Slow, comparison-focused browsing pattern.",
+)
+```
+
+</details>
+
+```text title="Output"
+Variant:    B
+Confidence: 0.82
+Reasoning:  Selected Variant B based on multiple converging data points:
+            1) User profile shows 'new_deal_seeker' cluster with very low conversion
+               likelihood (0.05) and 'explorer' interaction style;
+            2) Similar users (39 users: first_visit, coupon_site_referrer, deal_seeking)
+               strongly prefer Variant B with 2.3x higher conversion rate;
+            3) Variant B outperforming A (4.1% vs 3.2% conversion rate) with higher
+               confidence (0.95 vs 0.89);
+            4) First-time visitor from coupon site suggests price/value sensitivity,
+               the 'Free Shipping' incentive directly addresses deal-seeking behavior.
+
+Tool calls (4):
+  Turn 1: get_user_profile({"user_id": "user_002"})
+  Turn 1: get_similar_users({"user_id": "user_002", "limit": 10})
+  Turn 1: get_variant_performance({"experiment_id": "cta_test_2024", "variant_id": "A"})
+  Turn 1: get_variant_performance({"experiment_id": "cta_test_2024", "variant_id": "B"})
+
+Turns: 2  |  Time: 7.75s
+Tokens — input: 1595, output: 243
+```
+
+Variant B was selected. Unlike Verification 1, all signals converge here — variant performance, similar user patterns, and user context all point to Variant B. In Verification 1, the decision overrode performance data; here, all data points align, producing a structurally different decision.
+
+Comparison of Verifications 1 and 2:
+
+| Item | V1 (Loyalty) | V2 (New User) |
+|---|---|---|
+| Selected variant | A | B |
+| Confidence | 0.82 | 0.82 |
+| Tool calls | 4 (parallel) | 4 (parallel) |
+| Decision characteristic | Overrides performance data | All signals converge |
+| Key factor | Loyalty benefit redundancy + similar users | Coupon referrer + similar users + performance |
+
+## Verification 3: Decision-making with conflicting signals
+
+The most interesting verification. How does Bedrock decide when data points disagree?
+
+- Device: Desktop (neutral — no advantage for either variant)
+- Referrer: direct navigation
+- User profile: moderate engagement (0.62), past success with Variant B and social proof
+- **Conflict**: Variant A has higher overall conversion rate (4.2% vs 3.8%), but 34 similar users prefer Variant B
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">Execution code (Verification 3)</summary>
+
+```python title="Python"
+r3 = run_verification(
+    user_id="user_003", experiment_id="cta_test_2024",
+    device_type="Desktop Chrome", is_mobile=False,
+    current_page="/products/wireless-earbuds",
+    referrer_type="direct",
+    use_conflicting=True,  # Uses VARIANT_PERFORMANCE_CONFLICTING
+)
+```
+
+</details>
+
+```text title="Output"
+Variant:    B
+Confidence: 0.85
+Reasoning:  Based on comprehensive data analysis:
+            1) User profile shows successful_variants=['B','social_proof']
+               indicating strong historical preference for incentive messaging;
+            2) User belongs to 'social_proof_responsive' cluster with 'explorer'
+               interaction style;
+            3) Similar users (34 users) show 34% higher conversion rate preferring
+               variant B;
+            4) Despite variant A having slightly better overall performance
+               (4.2% vs 3.8%), the user-specific signals strongly favor variant B —
+               their personal conversion likelihood combined with cluster preference
+               outweighs the marginal performance difference;
+            5) The 'Free Shipping' incentive aligns with this user's demonstrated
+               preference pattern.
+
+Tool calls (4):
+  Turn 1: get_user_profile({"user_id": "user_003"})
+  Turn 1: get_similar_users({"user_id": "user_003", "limit": 10})
+  Turn 1: get_variant_performance({"experiment_id": "cta_test_2024", "variant_id": "A"})
+  Turn 1: get_variant_performance({"experiment_id": "cta_test_2024", "variant_id": "B"})
+
+Turns: 2  |  Time: 9.38s
+Tokens — input: 1552, output: 205
+```
+
+Variant B was selected. Despite Variant A's higher overall conversion rate, the model prioritized user-specific signals (past successful variants, similar user patterns, cluster characteristics). Point 4 in the reasoning explicitly explains the trade-off: the aggregate performance difference is "marginal" and user-specific signals outweigh it. In Verification 1, prompt context (loyalty status) overrode performance data; here, the LLM resolved a conflict between tool data sources (aggregate performance vs. similar users).
+
+### Comparison across all three verifications
+
+| Item | V1 (Loyalty) | V2 (New User) | V3 (Conflicting) |
+|---|---|---|---|
+| Selected variant | A | B | B |
+| Confidence | 0.82 | 0.82 | 0.85 |
+| Tool calls | 4 | 4 | 4 |
+| Turns | 2 | 2 | 2 |
+| Time | 11.44s | 7.75s | 9.38s |
+| Decision type | Overrides performance | All signals converge | Resolves conflict |
+
+Across all three verifications, the model didn't just list the data from tools — it reasoned about relationships between data points. In Verifications 1 and 3, it overrode aggregate performance data in favor of user-specific signals, demonstrating genuine "individual optimization."
+
+### Reproducibility check
+
+Is the variant selection stable across runs? Running Verification 1 three times with identical conditions:
+
+| Run | Variant | Confidence | Time |
+|---|---|---|---|
+| 1 | A | 0.85 | 10.22s |
+| 2 | A | 0.92 | 10.12s |
+| 3 | A | 0.88 | 11.17s |
+
+Variant selection was consistent across all 3 runs. Confidence scores varied between 0.85–0.92. The reasoning text differed each time but cited the same factors. Variant selection is stable, but confidence scores shouldn't be used as hard thresholds without accounting for this variance.
+
+## Constraints and trade-offs
+
+### Prompt context reverses the decision
+
+The most significant finding from this verification. When I ran Verification 1 without the "Premium loyalty member (already has free shipping benefit)" context in the prompt, **Variant B was selected instead**.
+
+```text title="Output (without loyalty context)"
+Variant:    B
+Confidence: 0.85
+Reasoning:  Variant performance data strongly favors B with 0.041 vs 0.032
+            conversion rate (28% higher). The 'Free Shipping' incentive in
+            Variant B addresses mobile users' need for clear value propositions.
+            The performance data strongly favors B despite similar user
+            preference for A.
+```
+
+Same user profile, same similar user data, same variant performance — but removing the loyalty context from the prompt reversed the variant selection. Without the loyalty information, the model prioritized variant performance data (B has higher conversion rate) over similar user preferences (which favor A).
+
+This is the most important design consideration when using tool use to drive model decisions. **The quality of decisions depends not just on tool data, but on the context included in the prompt.** The blog's Context Enrichment Middleware, which auto-extracts device info and referrer from request headers, is critical to decision quality. This verification proved it empirically.
+
+### Latency and cost
+
+All verifications completed in 2 turns (1 tool call round + 1 final decision), taking 7–12 seconds. Tools were always called in parallel (all 4 at once).
+
+In production, whether this 7–12 second latency is acceptable determines the architecture choice. The blog's hybrid strategy (hash-based for new users, AI-driven only for returning users) is designed with this latency in mind.
+
+### Characteristics of LLM-based decisions
+
+- **Variant selection is stable** — 3 runs with identical input produced the same choice
+- **Confidence scores vary** — 0.85–0.92 range across runs. Not suitable as hard thresholds
+- **Reasoning text changes each time** — Same factors cited, different wording. Be cautious if parsing reasoning in log analysis
+
+## Summary
+
+- **Models with tool use function as decision engines** — The model doesn't just list tool data; it reasons about relationships between data points. It overrode aggregate performance data to prioritize user-specific signals, achieving genuine individual optimization
+- **Prompt context determines decision quality** — Identical tool data produced opposite variant selections depending on whether loyalty status was included in the prompt. The blog's Context Enrichment Middleware is critical, not optional
+- **Multi-turn conversations are efficient** — All verifications completed in 2 turns with 4 parallel tool calls. The model gathered all needed data at once. However, 7–12 second latency is a real production constraint
+- **Variant selection is stable, but confidence scores vary** — Same input produced consistent variant choices across 3 runs, but confidence ranged from 0.85–0.92. Design with margin if using confidence as a threshold
