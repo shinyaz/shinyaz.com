@@ -1,0 +1,38 @@
+---
+title: "Bedrock Converse API tool use calls multiple tools in parallel in a single turn"
+description: "With 3 tool types and 4 total calls needed in Bedrock Converse API tool use, the model requested all 4 in a single response instead of calling them sequentially. The implementation must handle multiple toolUse blocks per turn."
+date: 2026-03-28
+published: true
+tags: ["bedrock", "python", "tool-use"]
+---
+
+Discovered this while [verifying A/B test variant selection](/en/blog/2026/03/28/bedrock-ab-testing-tool-use) with Bedrock Converse API tool use. I defined 3 tool types (`get_user_profile`, `get_similar_users`, `get_variant_performance`) and needed 4 calls total (variant performance for both A and B).
+
+I expected the model to call tools one at a time, inspect results, then call the next. Instead, it requested all 4 in a single response.
+
+```text title="Output"
+Turn 1: get_user_profile({"user_id": "user_001"})
+Turn 1: get_similar_users({"user_id": "user_001", "limit": 10})
+Turn 1: get_variant_performance({"experiment_id": "cta_test_2024", "variant_id": "A"})
+Turn 1: get_variant_performance({"experiment_id": "cta_test_2024", "variant_id": "B"})
+```
+
+All requested in Turn 1. After returning results, the model gave its final decision in Turn 2. Every verification completed in exactly 2 turns.
+
+The implementation detail: `output_message["content"]` can contain multiple `toolUse` blocks, so you need to loop through all of them and return all `toolResult`s together.
+
+```python title="Python"
+if response["stopReason"] == "tool_use":
+    tool_results = []
+    for block in output_message["content"]:
+        if "toolUse" in block:
+            tool = block["toolUse"]
+            result = execute_tool(tool["name"], tool["input"])
+            tool_results.append({"toolResult": {
+                "toolUseId": tool["toolUseId"],
+                "content": [{"json": json.loads(result)}],
+            }})
+    messages.append({"role": "user", "content": tool_results})
+```
+
+The [tool use documentation](https://docs.aws.amazon.com/bedrock/latest/userguide/tool-use.html) sample code focuses on single-tool examples, though the `for` loop structure does handle multiple `toolUse` blocks. When tools have no dependencies, the model is likely to choose parallel calls.

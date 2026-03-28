@@ -1,0 +1,38 @@
+---
+title: "Bedrock Converse API の tool use はモデルが1ターンで複数ツールを並列呼び出しする"
+description: "Bedrock Converse API の tool use で 3 種類・計 4 回のツール呼び出しが必要なシナリオで、モデルが 1 回のレスポンスですべてを同時に要求した。逐次呼び出しを想定していたが、並列対応が必要だった。"
+date: 2026-03-28
+published: true
+tags: ["bedrock", "python", "tool-use"]
+---
+
+Bedrock Converse API の tool use で A/B テストのバリアント選択を[検証した](/ja/blog/2026/03/28/bedrock-ab-testing-tool-use)ときの発見。3 種類のツール（`get_user_profile`、`get_similar_users`、`get_variant_performance`）を定義し、バリアント A/B 両方のパフォーマンスを取得するため計 4 回のツール呼び出しが必要なシナリオだった。
+
+最初は「モデルが 1 つずつツールを呼び、結果を見て次のツールを呼ぶ」逐次パターンを想定していた。しかし実際には、モデルは 1 回のレスポンスで 4 つのツール呼び出しを同時に要求した。
+
+```text title="Output"
+Turn 1: get_user_profile({"user_id": "user_001"})
+Turn 1: get_similar_users({"user_id": "user_001", "limit": 10})
+Turn 1: get_variant_performance({"experiment_id": "cta_test_2024", "variant_id": "A"})
+Turn 1: get_variant_performance({"experiment_id": "cta_test_2024", "variant_id": "B"})
+```
+
+すべて Turn 1 で並列に要求され、結果を返すと Turn 2 で最終判断が返る。全検証で 2 ターンだった。
+
+実装上のポイントは、`output_message["content"]` に複数の `toolUse` ブロックが含まれうるため、ループで全件処理して `toolResult` をまとめて返す必要がある点だ。
+
+```python title="Python"
+if response["stopReason"] == "tool_use":
+    tool_results = []
+    for block in output_message["content"]:
+        if "toolUse" in block:
+            tool = block["toolUse"]
+            result = execute_tool(tool["name"], tool["input"])
+            tool_results.append({"toolResult": {
+                "toolUseId": tool["toolUseId"],
+                "content": [{"json": json.loads(result)}],
+            }})
+    messages.append({"role": "user", "content": tool_results})
+```
+
+ドキュメントの [tool use](https://docs.aws.amazon.com/bedrock/latest/userguide/tool-use.html) のサンプルコードは単一ツールの例が中心だが、`for` ループで複数の `toolUse` ブロックを処理する構造にはなっている。ツール間に依存関係がなければ、モデルは並列呼び出しを選択する可能性が高い。
