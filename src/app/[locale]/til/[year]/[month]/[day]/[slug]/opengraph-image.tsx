@@ -8,7 +8,7 @@ import { AUTHOR } from "@/lib/constants";
 import { generateTilStaticParams } from "@/lib/til-params";
 import { OgImageLayout } from "@/lib/og-image";
 
-export const alt = "TIL post";
+export const alt = "TIL entry";
 export const size = { width: 1200, height: 630 };
 export const contentType = "image/png";
 
@@ -48,7 +48,6 @@ export default async function OgImage({ params }: Props) {
   }
 
   const { fontSans, fontSansJP } = await loadFonts();
-
   const formattedDate = formatDate(til.date, locale);
 
   return new ImageResponse(

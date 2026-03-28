@@ -3,7 +3,7 @@ import { getAllProjects } from "@/lib/posts";
 import { ProjectCard } from "@/components/projects/project-card";
 import { SITE_URL } from "@/lib/constants";
 import { locales, isValidLocale, getDictionary } from "@/lib/i18n";
-import { buildAlternateLanguages } from "@/lib/seo";
+import { buildAlternateLanguages, buildBreadcrumbJsonLd } from "@/lib/seo";
 import { notFound } from "next/navigation";
 
 interface ProjectsPageProps {
@@ -40,9 +40,14 @@ export default async function ProjectsPage({ params }: ProjectsPageProps) {
   if (!isValidLocale(locale)) notFound();
   const t = getDictionary(locale);
   const projects = getAllProjects();
+  const breadcrumbJsonLd = buildBreadcrumbJsonLd(locale, t.nav.projects, "projects");
 
   return (
     <div className="mx-auto max-w-3xl px-4 py-6 md:py-12">
+      <script
+        type="application/ld+json"
+        dangerouslySetInnerHTML={{ __html: JSON.stringify(breadcrumbJsonLd) }}
+      />
       <header className="mb-8">
         <h1 className="text-2xl font-bold tracking-tight md:text-3xl">
           {t.nav.projects}

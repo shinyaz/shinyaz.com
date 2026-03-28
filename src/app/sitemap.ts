@@ -9,12 +9,12 @@ export default function sitemap(): MetadataRoute.Sitemap {
 
   // Home and blog pages for each locale
   for (const locale of locales) {
-    const homeUrl = locale === defaultLocale ? SITE_URL : `${SITE_URL}/${locale}`;
+    const homeUrl = `${SITE_URL}/${locale}`;
     const alternateLanguages: Record<string, string> = {};
     for (const l of locales) {
-      alternateLanguages[l] = l === defaultLocale ? SITE_URL : `${SITE_URL}/${l}`;
+      alternateLanguages[l] = `${SITE_URL}/${l}`;
     }
-    alternateLanguages["x-default"] = SITE_URL;
+    alternateLanguages["x-default"] = `${SITE_URL}/${defaultLocale}`;
     entries.push({
       url: homeUrl,
       changeFrequency: "daily",
