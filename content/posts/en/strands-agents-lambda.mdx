@@ -1,0 +1,300 @@
+---
+title: "Strands Agents SDK Deploy — Serverless Deployment to AWS Lambda"
+description: "Deploy a Strands Agents SDK agent to AWS Lambda using the official Lambda Layer. Measured cold start Init Duration at ~1 second and warm start at under 1 second."
+date: 2026-04-12
+published: false
+featured: false
+categories: [ai-agents]
+tags: ["strands-agents", "bedrock", "python", "ai-agents", "lambda", "serverless"]
+series: "strands-agents-deploy"
+seriesOrder: 2
+---
+
+## Introduction
+
+In the [previous article](/en/blog/2026/04/12/strands-agents-docker), we containerized the agent with FastAPI + Docker. Containers are versatile but require always-on infrastructure.
+
+With Lambda, the function only runs when invoked, and you pay only for compute time consumed. Using the official Lambda Layer, you just write a handler function and the serverless agent is ready.
+
+Note that Lambda does not support response streaming. If you need streaming, consider the Docker + Fargate approach from the [previous article](/en/blog/2026/04/12/strands-agents-docker).
+
+This article covers:
+
+1. **Implementing the Lambda handler** — embedding the agent in a Lambda function
+2. **Deploying with the official Lambda Layer** — deploying via AWS CLI and verifying with invoke
+3. **Adding an HTTP endpoint with Function URL** — making the agent callable via curl
+4. **Measuring cold start** — comparing Init Duration and warm start performance
+
+See the official documentation at [Deploying Strands Agents to AWS Lambda](https://strandsagents.com/docs/user-guide/deploy/deploy_to_aws_lambda/).
+
+## Setup
+
+Prerequisites:
+
+- Python 3.12 (matching the Lambda runtime)
+- AWS CLI configured with Lambda and Bedrock permissions
+- The [part 1](/en/blog/2026/04/12/strands-agents-docker) environment (`strands-agents` installed) for local testing
+
+Create a working directory:
+
+```bash title="Terminal"
+mkdir lambda_agent && cd lambda_agent
+```
+
+## Implementing the Lambda Handler
+
+In the [previous article](/en/blog/2026/04/12/strands-agents-docker), FastAPI used `def invoke(request)` to receive requests. In Lambda, `def handler(event, context)` is the entry point. The handler below supports both `aws lambda invoke` and Function URL (covered later).
+
+```python title="handler.py"
+import json
+from strands import Agent
+from strands.models import BedrockModel
+
+bedrock_model = BedrockModel(
+    model_id="us.anthropic.claude-sonnet-4-20250514-v1:0",
+    region_name="us-east-1",
+)
+
+def handler(event, context):
+    # Function URL: body comes as JSON string / lambda invoke: payload is the event directly
+    if isinstance(event.get("body"), str):
+        body = json.loads(event["body"])
+    else:
+        body = event
+    prompt = body.get("prompt", "Hello")
+
+    agent = Agent(model=bedrock_model, callback_handler=None)
+    result = agent(prompt)
+    text = result.message["content"][0]["text"]
+
+    return {
+        "statusCode": 200,
+        "headers": {"Content-Type": "application/json"},
+        "body": json.dumps({"response": text}),
+    }
+```
+
+Three key points:
+
+- **`BedrockModel` at module level** — Lambda reuses module-level objects across warm invocations. Since `BedrockModel` is stateless, it doesn't need to be recreated each time
+- **`Agent` inside the handler** — Same reason as the [previous article](/en/blog/2026/04/12/strands-agents-docker): create a new instance per invocation to isolate conversation history
+- **Event format detection** — `aws lambda invoke` passes the payload directly as the event, but Function URL wraps it in `event.body` as a JSON string. `isinstance(event.get("body"), str)` detects the format and handles both
+
+### Local Test
+
+Verify locally before deploying.
+
+```bash title="Terminal"
+python -c "
+from handler import handler
+result = handler({'prompt': 'What is 2+2? Answer in one word.'}, None)
+print(result)
+"
+```
+
+```text title="Output"
+{'statusCode': 200, 'headers': {'Content-Type': 'application/json'}, 'body': '{"response": "Four"}'}
+```
+
+## Deploying with the Official Lambda Layer
+
+The Strands Agents SDK provides an official Lambda Layer. A Lambda Layer is a mechanism for managing dependency packages separately from function code — this Layer contains the `strands-agents` package, so your ZIP only needs the handler code. The Layer ARN used here:
+
+```text title="Layer ARN"
+arn:aws:lambda:us-east-1:856699698935:layer:strands-agents-py3_12-x86_64:1
+```
+
+This Layer contains `strands-agents v1.23.0`. For other regions or architectures, construct the ARN using this format:
+
+```text title="Layer ARN format"
+arn:aws:lambda:{region}:856699698935:layer:strands-agents-py{python_version}-{architecture}:{layer_version}
+```
+
+If you need additional packages like `strands-agents-tools`, you'll need to create a custom Layer (see [Using a Custom Dependencies Layer](https://strandsagents.com/docs/user-guide/deploy/deploy_to_aws_lambda/#using-a-custom-dependencies-layer) in the official docs).
+
+### Creating the IAM Role
+
+The Lambda function needs an execution role with Bedrock invocation permissions.
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">IAM role creation commands</summary>
+
+```bash title="Terminal"
+# Create Lambda execution role
+aws iam create-role \
+  --role-name strands-lambda-role \
+  --assume-role-policy-document '{
+    "Version": "2012-10-17",
+    "Statement": [{
+      "Effect": "Allow",
+      "Principal": {"Service": "lambda.amazonaws.com"},
+      "Action": "sts:AssumeRole"
+    }]
+  }'
+
+# Attach basic execution policy (CloudWatch Logs)
+aws iam attach-role-policy \
+  --role-name strands-lambda-role \
+  --policy-arn arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+
+# Add Bedrock invocation permissions
+aws iam put-role-policy \
+  --role-name strands-lambda-role \
+  --policy-name bedrock-invoke \
+  --policy-document '{
+    "Version": "2012-10-17",
+    "Statement": [{
+      "Effect": "Allow",
+      "Action": ["bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream"],
+      "Resource": "*"
+    }]
+  }'
+```
+
+Allow a few seconds for IAM propagation after creating the role.
+
+</details>
+
+### Deploying
+
+```bash title="Terminal"
+# Package handler as ZIP
+zip handler.zip handler.py
+
+# Create Lambda function
+ROLE_ARN=$(aws iam get-role --role-name strands-lambda-role --query 'Role.Arn' --output text)
+
+aws lambda create-function \
+  --function-name strands-agent \
+  --runtime python3.12 \
+  --handler handler.handler \
+  --role "$ROLE_ARN" \
+  --zip-file fileb://handler.zip \
+  --timeout 60 \
+  --memory-size 256 \
+  --layers "arn:aws:lambda:us-east-1:856699698935:layer:strands-agents-py3_12-x86_64:1" \
+  --region us-east-1
+```
+
+`--timeout 60` because agent responses (LLM inference + tool execution) take longer than the default 3 seconds. `--memory-size 256` because the SDK uses about 111MB — 128MB may not be enough.
+
+After creating the function, wait a few seconds for the State to become `Active`. Invoking before it's active will result in an error.
+
+## Adding an HTTP Endpoint with Function URL
+
+So far, the Lambda function can only be called via `aws lambda invoke`. To call it over HTTP like the FastAPI setup in [part 1](/en/blog/2026/04/12/strands-agents-docker), add a [Lambda Function URL](https://docs.aws.amazon.com/lambda/latest/dg/urls-configuration.html). This gives the function a dedicated HTTPS endpoint without needing API Gateway.
+
+```bash title="Terminal"
+aws lambda create-function-url-config \
+  --function-name strands-agent \
+  --auth-type AWS_IAM \
+  --region us-east-1
+```
+
+```text title="Output (excerpt)"
+{
+    "FunctionUrl": "https://xxxxx.lambda-url.us-east-1.on.aws/",
+    "AuthType": "AWS_IAM"
+}
+```
+
+`--auth-type AWS_IAM` uses IAM authentication. `NONE` (no auth) is also available, but may be blocked by your organization's SCP (Service Control Policy) — IAM auth is more reliable.
+
+IAM-authenticated Function URLs require SigV4-signed requests. [awscurl](https://github.com/okigan/awscurl) is a SigV4-aware version of curl that automatically signs requests using your AWS credentials.
+
+```bash title="Terminal"
+pip install awscurl
+```
+
+Use the `FunctionUrl` value from the output above.
+
+```bash title="Terminal"
+awscurl --service lambda --region us-east-1 \
+  -X POST "https://xxxxx.lambda-url.us-east-1.on.aws/" \
+  -H "Content-Type: application/json" \
+  -d '{"prompt": "What is the capital of Japan? Answer in one word."}'
+```
+
+```json title="Output"
+{"response": "Tokyo"}
+```
+
+The agent is now callable over HTTP, just like the FastAPI setup in [part 1](/en/blog/2026/04/12/strands-agents-docker).
+
+## Measuring Cold Start
+
+Measure the performance difference between cold start and warm start using `aws lambda invoke`. The commands below use `--cli-binary-format raw-in-base64-out`, which is required in AWS CLI v2 to pass JSON payloads directly.
+
+### Cold Start (First Invoke)
+
+```bash title="Terminal"
+aws lambda invoke \
+  --function-name strands-agent \
+  --cli-binary-format raw-in-base64-out \
+  --payload '{"prompt": "What is 2+2? Answer in one word."}' \
+  --region us-east-1 \
+  output.json
+
+cat output.json
+```
+
+```json title="Output"
+{"statusCode": 200, "headers": {"Content-Type": "application/json"}, "body": "{\"response\": \"Four\"}"}
+```
+
+### Warm Start (Second Invoke)
+
+```bash title="Terminal"
+aws lambda invoke \
+  --function-name strands-agent \
+  --cli-binary-format raw-in-base64-out \
+  --payload '{"prompt": "What is the capital of Japan? Answer in one word."}' \
+  --region us-east-1 \
+  output.json
+
+cat output.json
+```
+
+```json title="Output"
+{"statusCode": 200, "headers": {"Content-Type": "application/json"}, "body": "{\"response\": \"Tokyo\"}"}
+```
+
+### Cold Start vs Warm Start Comparison
+
+A Lambda cold start occurs when the function is invoked for the first time (or after being idle), requiring runtime initialization. A warm start reuses the previous execution environment, skipping initialization.
+
+Actual measurements from CloudWatch Logs REPORT lines:
+
+| Metric | Cold Start | Warm Start |
+|---|---|---|
+| Init Duration | 937 ms | — |
+| Duration | 1,780 ms | 745 ms |
+| Billed Duration | 2,718 ms | 745 ms |
+| Max Memory Used | 111 MB | 112 MB |
+
+Cold start adds Init Duration (937ms) for SDK import and `BedrockModel` initialization. Warm start skips this, and Duration drops to less than half.
+
+## Summary
+
+- **The official Lambda Layer makes deployment simple** — ZIP your `handler.py`, specify the Layer ARN, and you're done. No need to manage dependency packages yourself.
+- **Function URL adds an HTTP endpoint** — Get an HTTPS endpoint without API Gateway. With IAM auth, use `awscurl` for SigV4-signed requests. The handler needs to support both `aws lambda invoke` and Function URL event formats.
+- **`BedrockModel` at module level, `Agent` in the handler** — Reuse the model across warm invocations while isolating conversations per request. Same design principle as the [previous article](/en/blog/2026/04/12/strands-agents-docker).
+- **Cold start Init Duration is about 1 second** — Primarily SDK import time. Warm start Duration drops to less than half. Recommend `--memory-size 256` or higher (111MB used).
+- **Set timeout to 60 seconds or more** — Agent responses (LLM inference + tool execution) exceed the default 3-second timeout.
+
+## Cleanup
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">Resource deletion commands</summary>
+
+```bash title="Terminal"
+aws lambda delete-function-url-config --function-name strands-agent --region us-east-1
+aws lambda delete-function --function-name strands-agent --region us-east-1
+aws iam delete-role-policy --role-name strands-lambda-role --policy-name bedrock-invoke
+aws iam detach-role-policy --role-name strands-lambda-role \
+  --policy-arn arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+aws iam delete-role --role-name strands-lambda-role
+aws logs delete-log-group --log-group-name /aws/lambda/strands-agent --region us-east-1
+```
+
+</details>

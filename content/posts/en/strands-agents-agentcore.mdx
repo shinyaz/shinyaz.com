@@ -1,0 +1,171 @@
+---
+title: "Strands Agents SDK Deploy — Managed Deployment with AgentCore CLI"
+description: "Use the AgentCore CLI (Node.js) to deploy a Strands agent to Bedrock AgentCore with just agentcore create + deploy. Verified that session isolation enables conversation continuity across invocations."
+date: 2026-04-12
+published: false
+featured: false
+categories: [ai-agents]
+tags: ["strands-agents", "bedrock", "python", "ai-agents", "agentcore", "agentcore-cli"]
+series: "strands-agents-deploy"
+seriesOrder: 3
+---
+
+## Introduction
+
+In the [previous article](/en/blog/2026/04/12/strands-agents-lambda), we deployed to Lambda serverlessly. Lambda is convenient but stateless — conversations can't continue across requests. In [practical part 2](/en/blog/2026/03/29/strands-agents-session-management), we manually persisted conversations with `FileSessionManager`, but in production you want the infrastructure to handle session management.
+
+[Amazon Bedrock AgentCore Runtime](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/what-is-bedrock-agentcore.html) is a managed runtime purpose-built for AI agents. It includes session isolation (dedicated microVMs), auto-scaling, and built-in observability. With the [AgentCore CLI](https://github.com/aws/agentcore-cli), `create` + `deploy` completes the deployment with no CDK knowledge required.
+
+This article covers:
+
+1. **Project creation and deployment** — the shortest path with `agentcore create` + `agentcore deploy`
+2. **Session continuity verification** — confirming conversations persist within a session and are isolated across sessions
+
+For AgentCore CLI details (local development, Memory, Gateway, Evaluations), see the [AgentCore CLI series](/en/blog/2026/03/24/agentcore-cli-create-dev-deploy). This article focuses on deployment and session isolation.
+
+See the official documentation at [AgentCore CLI GitHub](https://github.com/aws/agentcore-cli).
+
+## Setup
+
+Prerequisites:
+
+- Node.js 20+ (required for AgentCore CLI installation)
+- [uv](https://docs.astral.sh/uv/) (used for Python agent builds)
+- AWS CLI configured with Bedrock AgentCore permissions
+
+```bash title="Terminal"
+npm install -g @aws/agentcore
+agentcore --version
+```
+
+```text title="Output"
+0.4.0
+```
+
+## Project Creation and Deployment
+
+### Creating the Project
+
+`agentcore create --defaults` generates a project with the default configuration: Python + Strands Agents + Bedrock. Omitting `--defaults` launches an interactive wizard where you can choose the framework (Strands / LangChain / OpenAI Agents, etc.) and model provider.
+
+```bash title="Terminal"
+agentcore create --name MyAgent --defaults
+cd MyAgent
+```
+
+```text title="Output"
+[done]  Create MyAgent/ project directory
+[done]  Prepare agentcore/ directory
+[done]  Initialize git repository
+[done]  Add agent to project
+[done]  Set up Python environment
+
+Project created successfully!
+```
+
+Agent code (`app/MyAgent/main.py`), CDK infrastructure code (`agentcore/cdk/`), and project configuration (`agentcore/agentcore.json`) are all auto-generated. In [part 1](/en/blog/2026/04/12/strands-agents-docker) we wrote FastAPI code manually, and in [part 2](/en/blog/2026/04/12/strands-agents-lambda) we wrote the Lambda handler manually — with AgentCore CLI, no code writing is needed.
+
+### Deploying
+
+```bash title="Terminal"
+agentcore deploy
+```
+
+```text title="Output (excerpt)"
+AgentCore Deploy
+
+Project: MyAgent
+Target: ap-northeast-1:123456789012
+
+[done]    Validate project
+[done]    Check dependencies
+[done]    Build CDK project
+[done]    Synthesize CloudFormation
+[done]    Check stack status
+[done]    Publish assets
+
+╭────────────────────────────────────────────────╮
+│ ✓ Deploy to AWS Complete                       │
+│ [████████████████████] 5/5                     │
+╰────────────────────────────────────────────────╯
+
+Deployed 1 stack(s): AgentCore-MyAgent-default
+```
+
+Internally, CDK creates a CloudFormation stack that auto-provisions IAM roles, policies, and the AgentCore Runtime. If CDK Bootstrap hasn't been run for the account/region, the CLI handles it automatically. In [part 2](/en/blog/2026/04/12/strands-agents-lambda), we created the IAM role manually for Lambda — the AgentCore CLI automates this.
+
+### Basic Verification
+
+```bash title="Terminal"
+agentcore invoke --prompt "What is 2+2? Answer in one word."
+```
+
+```text title="Output"
+Four
+```
+
+## Verifying Session Continuity
+
+AgentCore's key differentiator is session isolation. Invoking with the same session ID retains the conversation. Invoking with a different session ID starts fresh. With Lambda, you'd need to implement this yourself — AgentCore has it built in.
+
+### Conversations Continue Within a Session
+
+```bash title="Terminal"
+# Invoke 1: Tell my name
+agentcore invoke \
+  --prompt "My name is Taro. Remember it." \
+  --session-id "session-taro-deploy-test-1234567890-pad"
+```
+
+```text title="Output"
+Hello Taro! Nice to meet you. I'll remember your name.
+```
+
+```bash title="Terminal"
+# Invoke 2: Ask my name (same session ID)
+agentcore invoke \
+  --prompt "What is my name?" \
+  --session-id "session-taro-deploy-test-1234567890-pad"
+```
+
+```text title="Output"
+Your name is Taro!
+```
+
+With the same session ID, the agent remembers the name from the first invocation. AgentCore processes requests within the same session on the same microVM (an isolated execution environment dedicated to the session). The agent process persists inside the microVM, so the `agent.messages` conversation history from [introductory part 4](/en/blog/2026/03/03/strands-agents-conversation) stays in memory and conversations continue automatically.
+
+### Different Sessions Are Isolated
+
+```bash title="Terminal"
+# Invoke 3: Ask my name (different session ID)
+agentcore invoke \
+  --prompt "What is my name?" \
+  --session-id "different-session-id-for-testing-12345"
+```
+
+```text title="Output"
+I don't know your name - you haven't told me yet!
+```
+
+With a different session ID, the agent has no access to the previous session's information. This is session isolation — each session runs on a dedicated microVM, so different users' conversations never mix.
+
+In [practical part 2](/en/blog/2026/03/29/strands-agents-session-management), we used `FileSessionManager` with a `session_id` to persist conversations. AgentCore has this mechanism built into the infrastructure — no code changes needed.
+
+Note that session IDs must be 33 characters or longer. Shorter session IDs result in a validation error.
+
+## Summary
+
+- **`agentcore create` + `agentcore deploy` completes the deployment** — Agent code, IAM roles, and CloudFormation stack are all auto-generated. No CDK knowledge required.
+- **Session isolation is built in** — Same session ID continues the conversation; different session IDs are isolated. The `FileSessionManager` from [practical part 2](/en/blog/2026/03/29/strands-agents-session-management) is no longer needed.
+- **Session IDs must be 33+ characters** — Shorter IDs cause a validation error. UUID format is recommended.
+- **See the AgentCore CLI series for details** — Local development (`agentcore dev`), Memory, Gateway, and Evaluations are covered in the [AgentCore CLI series](/en/blog/2026/03/24/agentcore-cli-create-dev-deploy).
+
+## Cleanup
+
+```bash title="Terminal"
+# Remove all resource definitions from the project
+agentcore remove all -y
+
+# Delete AWS resources (deploys empty state to remove the CloudFormation stack)
+agentcore deploy -y
+```

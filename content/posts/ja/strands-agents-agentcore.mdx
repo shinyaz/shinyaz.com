@@ -1,0 +1,171 @@
+---
+title: "Strands Agents SDK デプロイ — AgentCore CLI でマネージドデプロイする"
+description: "AgentCore CLI（Node.js）を使い、agentcore create + deploy の 2 コマンドで Strands エージェントを Bedrock AgentCore にデプロイする。セッション分離による会話継続も検証する。"
+date: 2026-04-12
+published: false
+featured: false
+categories: [ai-agents]
+tags: ["strands-agents", "bedrock", "python", "ai-agents", "agentcore", "agentcore-cli"]
+series: "strands-agents-deploy"
+seriesOrder: 3
+---
+
+## はじめに
+
+[前回の記事](/ja/blog/2026/04/12/strands-agents-lambda)では Lambda にサーバーレスデプロイした。Lambda は手軽だが、ステートレスなのでリクエスト間で会話を継続できない。[実践第 2 回](/ja/blog/2026/03/29/strands-agents-session-management)では `FileSessionManager` で会話を手動で永続化したが、本番環境ではインフラ側でセッションを管理したい。
+
+[Amazon Bedrock AgentCore Runtime](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/what-is-bedrock-agentcore.html) は、AI エージェント向けに設計されたマネージドランタイムだ。セッション分離（専用 microVM）、オートスケーリング、オブザーバビリティが組み込まれている。[AgentCore CLI](https://github.com/aws/agentcore-cli) を使えば、`create` + `deploy` の 2 コマンドで CDK の知識なしにデプロイが完了する。
+
+この記事では以下を試す。
+
+1. **プロジェクト作成とデプロイ** — `agentcore create` + `agentcore deploy` の最短パス
+2. **セッション継続の検証** — 同じセッション ID で会話が継続し、別セッションでは忘れることを確認する
+
+AgentCore CLI の詳細（ローカル開発、Memory、Gateway、Evaluations）は [AgentCore CLI シリーズ](/ja/blog/2026/03/24/agentcore-cli-create-dev-deploy)で扱っている。本記事ではデプロイとセッション分離に絞る。
+
+公式ドキュメントは [AgentCore CLI GitHub](https://github.com/aws/agentcore-cli) を参照。
+
+## セットアップ
+
+前提条件:
+
+- Node.js 20+（AgentCore CLI のインストールに必要）
+- [uv](https://docs.astral.sh/uv/)（Python エージェントのビルドに使用）
+- AWS CLI が設定済みで、Bedrock AgentCore の権限があること
+
+```bash title="Terminal"
+npm install -g @aws/agentcore
+agentcore --version
+```
+
+```text title="Output"
+0.4.0
+```
+
+## プロジェクト作成とデプロイ
+
+### プロジェクト作成
+
+`agentcore create --defaults` で、Python + Strands Agents + Bedrock のデフォルト構成でプロジェクトを生成する。`--defaults` を省略すると対話ウィザードが起動し、フレームワーク（Strands / LangChain / OpenAI Agents 等）やモデルプロバイダーを選択できる。
+
+```bash title="Terminal"
+agentcore create --name MyAgent --defaults
+cd MyAgent
+```
+
+```text title="Output"
+[done]  Create MyAgent/ project directory
+[done]  Prepare agentcore/ directory
+[done]  Initialize git repository
+[done]  Add agent to project
+[done]  Set up Python environment
+
+Project created successfully!
+```
+
+エージェントコード（`app/MyAgent/main.py`）、CDK インフラコード（`agentcore/cdk/`）、プロジェクト設定（`agentcore/agentcore.json`）がすべて自動生成される。[第 1 回](/ja/blog/2026/04/12/strands-agents-docker)では FastAPI のコードを手動で書き、[第 2 回](/ja/blog/2026/04/12/strands-agents-lambda)では Lambda ハンドラーを手動で書いたが、AgentCore CLI ではコードの記述が不要だ。
+
+### デプロイ
+
+```bash title="Terminal"
+agentcore deploy
+```
+
+```text title="Output (抜粋)"
+AgentCore Deploy
+
+Project: MyAgent
+Target: ap-northeast-1:123456789012
+
+[done]    Validate project
+[done]    Check dependencies
+[done]    Build CDK project
+[done]    Synthesize CloudFormation
+[done]    Check stack status
+[done]    Publish assets
+
+╭────────────────────────────────────────────────╮
+│ ✓ Deploy to AWS Complete                       │
+│ [████████████████████] 5/5                     │
+╰────────────────────────────────────────────────╯
+
+Deployed 1 stack(s): AgentCore-MyAgent-default
+```
+
+内部では CDK が CloudFormation スタックを作成し、IAM ロール、ポリシー、AgentCore Runtime がすべて自動でプロビジョニングされる。CDK Bootstrap が未実施のアカウント/リージョンでも、CLI が自動で Bootstrap を実行する。[第 2 回](/ja/blog/2026/04/12/strands-agents-lambda)の Lambda では IAM ロールを手動で作成したが、AgentCore CLI はこれを自動化する。
+
+### 動作確認
+
+```bash title="Terminal"
+agentcore invoke --prompt "What is 2+2? Answer in one word."
+```
+
+```text title="Output"
+Four
+```
+
+## セッション継続の検証
+
+AgentCore の最大の特徴は、セッション分離だ。同じセッション ID で呼び出すと、前の会話を覚えている。別のセッション ID で呼び出すと、忘れている。Lambda ではこの仕組みを自分で実装する必要があったが、AgentCore では組み込みで動く。
+
+### 同じセッションで会話が継続する
+
+```bash title="Terminal"
+# 1回目: 名前を伝える
+agentcore invoke \
+  --prompt "My name is Taro. Remember it." \
+  --session-id "session-taro-deploy-test-1234567890-pad"
+```
+
+```text title="Output"
+Hello Taro! Nice to meet you. I'll remember your name.
+```
+
+```bash title="Terminal"
+# 2回目: 名前を聞く（同じセッション ID）
+agentcore invoke \
+  --prompt "What is my name?" \
+  --session-id "session-taro-deploy-test-1234567890-pad"
+```
+
+```text title="Output"
+Your name is Taro!
+```
+
+同じセッション ID で呼び出すと、1 回目で伝えた名前を 2 回目で覚えている。AgentCore は同じセッション内のリクエストを同じ microVM（セッション専用の隔離された実行環境）で処理する。microVM 内でエージェントプロセスが維持されるため、[入門第 4 回](/ja/blog/2026/03/03/strands-agents-conversation)で学んだ `agent.messages` の会話履歴がメモリ上に残り、会話が自動的に継続する。
+
+### 別セッションでは忘れる
+
+```bash title="Terminal"
+# 3回目: 名前を聞く（別のセッション ID）
+agentcore invoke \
+  --prompt "What is my name?" \
+  --session-id "different-session-id-for-testing-12345"
+```
+
+```text title="Output"
+I don't know your name - you haven't told me yet!
+```
+
+別のセッション ID では、前のセッションの情報にアクセスできない。これがセッション分離だ。各セッションは専用の microVM で実行されるため、異なるユーザーの会話が混ざることはない。
+
+[実践第 2 回](/ja/blog/2026/03/29/strands-agents-session-management)では `FileSessionManager` で `session_id` を指定して会話を永続化した。AgentCore ではこの仕組みがインフラレベルで組み込まれており、コードの変更は不要だ。
+
+なお、セッション ID は 33 文字以上である必要がある。短いセッション ID を指定するとバリデーションエラーになる。
+
+## まとめ
+
+- **`agentcore create` + `agentcore deploy` の 2 コマンドでデプロイが完了する** — エージェントコード、IAM ロール、CloudFormation スタックがすべて自動生成される。CDK の知識は不要。
+- **セッション分離が組み込まれている** — 同じセッション ID で呼び出すと会話が継続し、別セッション ID では分離される。[実践第 2 回](/ja/blog/2026/03/29/strands-agents-session-management)の `FileSessionManager` が不要になる。
+- **セッション ID は 33 文字以上** — 短いセッション ID はバリデーションエラーになる。UUID 形式が推奨。
+- **詳細は AgentCore CLI シリーズを参照** — ローカル開発（`agentcore dev`）、Memory、Gateway、Evaluations については [AgentCore CLI シリーズ](/ja/blog/2026/03/24/agentcore-cli-create-dev-deploy)で詳しく扱っている。
+
+## クリーンアップ
+
+```bash title="Terminal"
+# プロジェクト内のリソース定義をすべて削除
+agentcore remove all -y
+
+# AWS リソースを削除（空の状態をデプロイして CloudFormation スタックを削除）
+agentcore deploy -y
+```

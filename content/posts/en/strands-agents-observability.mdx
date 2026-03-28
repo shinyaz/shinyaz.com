@@ -1,0 +1,283 @@
+---
+title: "Strands Agents SDK Deploy — Visualize Agent Traces with OpenTelemetry"
+description: "Enable the Strands Agents SDK's built-in OpenTelemetry support to visualize agent reasoning and tool calls as traces in Jaeger. Only 2 lines of code change required."
+date: 2026-04-12
+published: false
+featured: false
+categories: [ai-agents]
+tags: ["strands-agents", "bedrock", "python", "ai-agents", "opentelemetry", "observability"]
+series: "strands-agents-deploy"
+seriesOrder: 4
+---
+
+## Introduction
+
+From [part 1](/en/blog/2026/04/12/strands-agents-docker) through [part 3](/en/blog/2026/04/12/strands-agents-agentcore), we deployed agents to Docker, Lambda, and AgentCore. The deployment target is set, but production operation needs one more thing: a way to monitor agent behavior.
+
+In [practical part 5](/en/blog/2026/03/29/strands-agents-metrics), we used `result.metrics.get_summary()` to check cycle counts and token usage. But that was post-hoc analysis of a single request. In production, you need to analyze across multiple requests, identify bottlenecks, and detect anomalies.
+
+The Strands Agents SDK has built-in [OpenTelemetry](https://opentelemetry.io/) support. Just set an environment variable and the agent's reasoning and tool calls are recorded as traces.
+
+A trace records how a single request was processed through the system. Traces consist of multiple spans (individual processing steps), showing the duration and parent-child relationships of each step.
+
+This article covers:
+
+1. **Starting Jaeger locally** — preparing the trace visualization environment
+2. **Enabling OTEL in the Strands agent** — adding 2 lines of code to send traces
+3. **Examining traces** — verifying span structure and mapping to practical part 5's metrics
+4. **Console exporter** — inspecting detailed attributes recorded in each span
+5. **Custom attributes** — making traces searchable by session ID and user ID
+
+See the official documentation at [Traces](https://strandsagents.com/docs/user-guide/observability-evaluation/traces/).
+
+## Setup
+
+Prerequisites:
+
+- The [part 1](/en/blog/2026/04/12/strands-agents-docker) environment (`strands-agents` installed)
+- Docker installed (used for Jaeger)
+
+Install the OTEL dependency extras:
+
+```bash title="Terminal"
+pip install 'strands-agents[otel]' strands-agents-tools
+```
+
+`strands-agents[otel]` adds OpenTelemetry dependencies (`opentelemetry-api`, `opentelemetry-sdk`, etc.).
+
+## Starting Jaeger Locally
+
+[Jaeger](https://www.jaegertracing.io/) is an open-source distributed tracing tool. The all-in-one container provides trace collection and visualization out of the box.
+
+```bash title="Terminal"
+docker run -d --name jaeger \
+  -e COLLECTOR_OTLP_ENABLED=true \
+  -p 16686:16686 \
+  -p 4318:4318 \
+  jaegertracing/all-in-one:latest
+```
+
+- Port `16686` — Jaeger UI (view traces in the browser)
+- Port `4318` — OTLP HTTP endpoint (receives traces from the agent)
+
+After starting, verify the Jaeger UI is accessible at http://localhost:16686.
+
+## Enabling OTEL in the Strands Agent
+
+Only 2 lines need to be added to the agent code.
+
+```python title="trace_agent.py"
+import os
+os.environ["OTEL_EXPORTER_OTLP_ENDPOINT"] = "http://localhost:4318"
+
+from strands import Agent
+from strands.models import BedrockModel
+from strands.telemetry import StrandsTelemetry
+from strands_tools import calculator
+
+# Enable OTEL (just add these 2 lines)
+strands_telemetry = StrandsTelemetry()
+strands_telemetry.setup_otlp_exporter()
+
+bedrock_model = BedrockModel(
+    model_id="us.anthropic.claude-sonnet-4-20250514-v1:0",
+    region_name="us-east-1",
+)
+
+agent = Agent(model=bedrock_model, tools=[calculator], callback_handler=None)
+result = agent("What is 123 * 456?")
+print(f"Response: {result.message['content'][0]['text']}")
+```
+
+Key points:
+
+- **`OTEL_EXPORTER_OTLP_ENDPOINT`** — The trace destination. Points to Jaeger's OTLP HTTP endpoint
+- **`StrandsTelemetry().setup_otlp_exporter()`** — Enables the SDK's OTEL exporter. No other agent code changes needed. The SDK automatically records the agent loop, model calls, and tool executions as spans
+
+```bash title="Terminal"
+python -u trace_agent.py
+```
+
+```text title="Output"
+Response: The result of 123 * 456 is **56,088**.
+```
+
+The agent works normally. Traces are sent to Jaeger in the background.
+
+## Examining Traces
+
+Open the Jaeger UI (http://localhost:16686), select `strands-agents` from the Service dropdown, and click "Find Traces". A list of traces appears — click any trace to see the span timeline.
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">Querying traces via the Jaeger API</summary>
+
+```bash title="Terminal"
+curl -s "http://localhost:16686/api/traces?service=strands-agents&limit=1" \
+  | python3 -c "
+import sys, json
+data = json.load(sys.stdin)
+trace = data['data'][0]
+print(f'Trace ID: {trace[\"traceID\"]}')
+print(f'Spans: {len(trace[\"spans\"])}')
+for span in trace['spans']:
+    name = span['operationName']
+    duration = span['duration'] / 1000
+    print(f'  {name}: {duration:.0f}ms')
+"
+```
+
+</details>
+
+In this run, 6 spans were recorded.
+
+```text title="Span structure"
+invoke_agent Strands Agents (5511ms)     ← Entire agent
+├── execute_event_loop_cycle (5511ms)    ← Cycle 1
+│   ├── chat (4312ms)                    ← Model call (reasoning + tool selection)
+│   └── execute_tool calculator (3ms)    ← Tool execution
+└── execute_event_loop_cycle (1191ms)    ← Cycle 2
+    └── chat (1191ms)                    ← Model call (final answer)
+```
+
+The "2 cycles" and "1 calculator call" we confirmed with `result.metrics` in [practical part 5](/en/blog/2026/03/29/strands-agents-metrics) are now visualized as trace spans. While `result.metrics` provided post-hoc numerical data, traces show a timeline with duration and parent-child relationships for each step.
+
+## Inspecting Span Details with the Console Exporter
+
+The Jaeger UI shows span hierarchy and duration, but to examine the detailed attributes recorded in each span, the console exporter is useful. Replace (or add alongside) `setup_otlp_exporter()` in `trace_agent.py` with the following.
+
+```python title="Python"
+from strands.telemetry import StrandsTelemetry
+
+StrandsTelemetry().setup_console_exporter()
+```
+
+Call `setup_console_exporter()` instead of (or alongside) `setup_otlp_exporter()` to output spans as JSON to stdout. Key attributes:
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">console_trace.py (code and run command)</summary>
+
+```python title="console_trace.py"
+from strands import Agent
+from strands.models import BedrockModel
+from strands.telemetry import StrandsTelemetry
+from strands_tools import calculator
+
+strands_telemetry = StrandsTelemetry()
+strands_telemetry.setup_console_exporter()
+
+bedrock_model = BedrockModel(
+    model_id="us.anthropic.claude-sonnet-4-20250514-v1:0",
+    region_name="us-east-1",
+)
+
+agent = Agent(model=bedrock_model, tools=[calculator], callback_handler=None)
+result = agent("What is 123 * 456?")
+```
+
+```bash title="Terminal"
+python -u console_trace.py
+```
+
+</details>
+
+**Model call span (`chat`):**
+
+```json title="Output (excerpt)"
+{
+    "name": "chat",
+    "attributes": {
+        "gen_ai.request.model": "us.anthropic.claude-sonnet-4-20250514-v1:0",
+        "gen_ai.usage.input_tokens": 1514,
+        "gen_ai.usage.output_tokens": 69,
+        "gen_ai.usage.total_tokens": 1583,
+        "gen_ai.server.time_to_first_token": 3293
+    }
+}
+```
+
+**Tool execution span (`execute_tool calculator`):**
+
+```json title="Output (excerpt)"
+{
+    "name": "execute_tool calculator",
+    "attributes": {
+        "gen_ai.tool.name": "calculator",
+        "gen_ai.tool.call.id": "tooluse_1DfAEkjH8xUXal4n5oLtpd",
+        "gen_ai.tool.status": "success"
+    }
+}
+```
+
+The `inputTokens`, `outputTokens`, and `totalTokens` from `result.metrics` in [practical part 5](/en/blog/2026/03/29/strands-agents-metrics) appear as `gen_ai.usage.*` attributes in traces. Traces also include information not available in `result.metrics`, such as `gen_ai.server.time_to_first_token` (time until the first token is returned).
+
+## Making Traces Searchable with Custom Attributes
+
+In production, you often need to track specific users' requests or filter by session ID. The `Agent`'s `trace_attributes` parameter adds custom attributes to spans. Just add `trace_attributes` to the `Agent(...)` in `trace_agent.py` (run with Jaeger still running).
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">custom_trace.py (code and run command)</summary>
+
+```python title="custom_trace.py"
+import os
+os.environ["OTEL_EXPORTER_OTLP_ENDPOINT"] = "http://localhost:4318"
+
+from strands import Agent
+from strands.models import BedrockModel
+from strands.telemetry import StrandsTelemetry
+from strands_tools import calculator
+
+strands_telemetry = StrandsTelemetry()
+strands_telemetry.setup_otlp_exporter()
+
+bedrock_model = BedrockModel(
+    model_id="us.anthropic.claude-sonnet-4-20250514-v1:0",
+    region_name="us-east-1",
+)
+
+agent = Agent(
+    model=bedrock_model,
+    tools=[calculator],
+    callback_handler=None,
+    trace_attributes={
+        "session.id": "user-session-abc123",
+        "user.id": "taro",
+        "environment": "production",
+    },
+)
+
+result = agent("What is 123 * 456?")
+print(f"Response: {result.message['content'][0]['text']}")
+```
+
+```bash title="Terminal"
+python -u custom_trace.py
+```
+
+</details>
+
+After running the agent, custom attributes are recorded on the `invoke_agent` span.
+
+```text title="invoke_agent span attributes in Jaeger (excerpt)"
+session.id: user-session-abc123
+user.id: taro
+environment: production
+gen_ai.agent.name: Strands Agents
+gen_ai.request.model: us.anthropic.claude-sonnet-4-20250514-v1:0
+gen_ai.usage.total_tokens: 3197
+```
+
+In the Jaeger UI, entering `user.id=taro` in the Tags filter searches for only that user's traces. This is useful for tracking specific requests in production where multiple users' requests are mixed.
+
+## Summary
+
+- **Only 2 lines of code change** — Add `StrandsTelemetry()` and `setup_otlp_exporter()`, and the SDK automatically sends traces. Agent behavior is unchanged.
+- **Span structure mirrors the agent loop** — `invoke_agent` → `execute_event_loop_cycle` → `chat` / `execute_tool` maps directly to the "reasoning → tool selection → tool execution → reasoning" loop from [introductory part 1](/en/blog/2026/03/03/strands-agents-quickstart).
+- **Extends `result.metrics`** — Cycle counts and tool execution times from [practical part 5](/en/blog/2026/03/29/strands-agents-metrics) are visualized as timeline spans. The transition from post-hoc analysis to real-time monitoring.
+- **Works with any OTEL-compatible backend** — Since it uses the OpenTelemetry standard, you can switch to [AWS X-Ray](https://strandsagents.com/docs/user-guide/observability-evaluation/traces/#sending-traces-to-cloudwatch-x-ray), Grafana Tempo, Datadog, or any other backend.
+- **`trace_attributes` adds custom attributes to spans** — Record session IDs and user IDs on spans, then search by tag in Jaeger. Useful for tracking specific requests in production.
+
+## Cleanup
+
+```bash title="Terminal"
+docker rm -f jaeger
+```

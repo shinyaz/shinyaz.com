@@ -1,0 +1,300 @@
+---
+title: "Strands Agents SDK デプロイ — Lambda にサーバーレスデプロイする"
+description: "Strands Agents SDK の公式 Lambda Layer を使い、ハンドラー関数を書くだけでサーバーレスエージェントをデプロイする。コールドスタートとウォームスタートの実測値も共有する。"
+date: 2026-04-12
+published: false
+featured: false
+categories: [ai-agents]
+tags: ["strands-agents", "bedrock", "python", "ai-agents", "lambda", "serverless"]
+series: "strands-agents-deploy"
+seriesOrder: 2
+---
+
+## はじめに
+
+[前回の記事](/ja/blog/2026/04/12/strands-agents-docker)では FastAPI + Docker でエージェントをコンテナ化した。コンテナは汎用的だが、常時起動のインフラが必要だ。
+
+Lambda なら、リクエストが来たときだけ起動し、使った分だけ課金される。公式 Lambda Layer を使えば、ハンドラー関数を書くだけでサーバーレスエージェントが動く。
+
+ただし、Lambda ではレスポンスのストリーミングに対応していない点に注意が必要だ。ストリーミングが必要な場合は[前回](/ja/blog/2026/04/12/strands-agents-docker)の Docker + Fargate 方式を検討してほしい。
+
+この記事では以下を試す。
+
+1. **Lambda ハンドラーの実装** — エージェントを Lambda 関数に組み込む
+2. **公式 Lambda Layer を使ったデプロイ** — AWS CLI でデプロイし、invoke で動作確認
+3. **Function URL で HTTP エンドポイントを追加** — curl でエージェントを呼び出せるようにする
+4. **コールドスタートの測定** — Init Duration とウォームスタートの比較
+
+公式ドキュメントは [Deploying Strands Agents to AWS Lambda](https://strandsagents.com/docs/user-guide/deploy/deploy_to_aws_lambda/) を参照。
+
+## セットアップ
+
+前提条件:
+
+- Python 3.12（Lambda ランタイムに合わせる）
+- AWS CLI が設定済みで、Lambda と Bedrock の権限があること
+- [第 1 回](/ja/blog/2026/04/12/strands-agents-docker)の環境（`strands-agents` インストール済み）をローカルテストに使用
+
+作業ディレクトリを作成する。
+
+```bash title="Terminal"
+mkdir lambda_agent && cd lambda_agent
+```
+
+## Lambda ハンドラーの実装
+
+[前回](/ja/blog/2026/04/12/strands-agents-docker)の FastAPI では `def invoke(request)` でリクエストを受け取った。Lambda では `def handler(event, context)` がエントリポイントになる。以下のハンドラーは `aws lambda invoke` と後述の Function URL の両方に対応している。
+
+```python title="handler.py"
+import json
+from strands import Agent
+from strands.models import BedrockModel
+
+bedrock_model = BedrockModel(
+    model_id="us.anthropic.claude-sonnet-4-20250514-v1:0",
+    region_name="us-east-1",
+)
+
+def handler(event, context):
+    # Function URL: body が JSON 文字列で来る / lambda invoke: ペイロードがそのまま
+    if isinstance(event.get("body"), str):
+        body = json.loads(event["body"])
+    else:
+        body = event
+    prompt = body.get("prompt", "Hello")
+
+    agent = Agent(model=bedrock_model, callback_handler=None)
+    result = agent(prompt)
+    text = result.message["content"][0]["text"]
+
+    return {
+        "statusCode": 200,
+        "headers": {"Content-Type": "application/json"},
+        "body": json.dumps({"response": text}),
+    }
+```
+
+ポイントは 3 つだ。
+
+- **`BedrockModel` はモジュールレベルで作成する** — Lambda はウォーム起動時にモジュールレベルのオブジェクトを再利用する。`BedrockModel` はステートレスなので、ウォーム起動のたびに再作成する必要がない
+- **`Agent` はハンドラー内で作成する** — [前回](/ja/blog/2026/04/12/strands-agents-docker)と同じ理由で、リクエスト（invoke）ごとに新しいインスタンスを作成する
+- **event 形式の判定** — `aws lambda invoke` ではペイロードがそのまま event になるが、Function URL では `event.body` に JSON 文字列として格納される。`isinstance(event.get("body"), str)` で判定し、両方に対応する
+
+### ローカルテスト
+
+デプロイ前にローカルで動作確認する。
+
+```bash title="Terminal"
+python -c "
+from handler import handler
+result = handler({'prompt': 'What is 2+2? Answer in one word.'}, None)
+print(result)
+"
+```
+
+```text title="Output"
+{'statusCode': 200, 'headers': {'Content-Type': 'application/json'}, 'body': '{"response": "Four"}'}
+```
+
+## 公式 Lambda Layer を使ったデプロイ
+
+Strands Agents SDK は公式の Lambda Layer を提供している。Lambda Layer は関数コードとは別に依存パッケージを管理する仕組みで、この Layer には `strands-agents` パッケージが含まれている。ZIP パッケージにはハンドラーコードだけを入れればよい。今回使う Layer ARN は以下だ。
+
+```text title="Layer ARN"
+arn:aws:lambda:us-east-1:856699698935:layer:strands-agents-py3_12-x86_64:1
+```
+
+この Layer には `strands-agents v1.23.0` が含まれている。他のリージョンやアーキテクチャを使う場合は、以下のフォーマットで ARN を構成する。
+
+```text title="Layer ARN のフォーマット"
+arn:aws:lambda:{region}:856699698935:layer:strands-agents-py{python_version}-{architecture}:{layer_version}
+```
+
+`strands-agents-tools` など追加パッケージが必要な場合は、カスタム Layer を作成する必要がある（公式ドキュメントの [Using a Custom Dependencies Layer](https://strandsagents.com/docs/user-guide/deploy/deploy_to_aws_lambda/#using-a-custom-dependencies-layer) を参照）。
+
+### IAM ロールの作成
+
+Lambda 関数には、実行ロールと Bedrock の呼び出し権限が必要だ。
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">IAM ロール作成コマンド</summary>
+
+```bash title="Terminal"
+# Lambda 実行ロールを作成
+aws iam create-role \
+  --role-name strands-lambda-role \
+  --assume-role-policy-document '{
+    "Version": "2012-10-17",
+    "Statement": [{
+      "Effect": "Allow",
+      "Principal": {"Service": "lambda.amazonaws.com"},
+      "Action": "sts:AssumeRole"
+    }]
+  }'
+
+# 基本実行ポリシーをアタッチ（CloudWatch Logs への書き込み）
+aws iam attach-role-policy \
+  --role-name strands-lambda-role \
+  --policy-arn arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+
+# Bedrock の呼び出し権限を追加
+aws iam put-role-policy \
+  --role-name strands-lambda-role \
+  --policy-name bedrock-invoke \
+  --policy-document '{
+    "Version": "2012-10-17",
+    "Statement": [{
+      "Effect": "Allow",
+      "Action": ["bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream"],
+      "Resource": "*"
+    }]
+  }'
+```
+
+ロールの作成後、IAM の伝播に数秒かかる。
+
+</details>
+
+### デプロイ
+
+```bash title="Terminal"
+# ハンドラーを ZIP にパッケージング
+zip handler.zip handler.py
+
+# Lambda 関数を作成
+ROLE_ARN=$(aws iam get-role --role-name strands-lambda-role --query 'Role.Arn' --output text)
+
+aws lambda create-function \
+  --function-name strands-agent \
+  --runtime python3.12 \
+  --handler handler.handler \
+  --role "$ROLE_ARN" \
+  --zip-file fileb://handler.zip \
+  --timeout 60 \
+  --memory-size 256 \
+  --layers "arn:aws:lambda:us-east-1:856699698935:layer:strands-agents-py3_12-x86_64:1" \
+  --region us-east-1
+```
+
+`--timeout 60` はエージェントの応答に時間がかかるため、デフォルトの 3 秒では不足する。`--memory-size 256` は SDK のインポートに 111MB 程度使うため、128MB だと不足する可能性がある。
+
+関数の作成後、State が `Active` になるまで数秒かかる。`Active` になる前に invoke するとエラーになるため、少し待ってから動作確認に進む。
+
+## Function URL で HTTP エンドポイントを追加する
+
+ここまでの Lambda 関数は `aws lambda invoke` でしか呼び出せない。[第 1 回](/ja/blog/2026/04/12/strands-agents-docker)の FastAPI のように HTTP で呼び出すには、[Lambda Function URL](https://docs.aws.amazon.com/lambda/latest/dg/urls-configuration.html) を追加する。API Gateway を使わずに、Lambda 関数に専用の HTTPS エンドポイントを付与できる。
+
+```bash title="Terminal"
+aws lambda create-function-url-config \
+  --function-name strands-agent \
+  --auth-type AWS_IAM \
+  --region us-east-1
+```
+
+```text title="Output (抜粋)"
+{
+    "FunctionUrl": "https://xxxxx.lambda-url.us-east-1.on.aws/",
+    "AuthType": "AWS_IAM"
+}
+```
+
+`--auth-type AWS_IAM` は IAM 認証を使う設定だ。`NONE`（認証なし）も指定できるが、組織の SCP（サービスコントロールポリシー）でパブリックアクセスがブロックされている場合は 403 Forbidden になる。IAM 認証の方が確実だ。
+
+IAM 認証の Function URL を呼び出すには、リクエストに SigV4 署名が必要になる。[awscurl](https://github.com/okigan/awscurl) は curl の AWS SigV4 署名対応版で、AWS 認証情報を使って自動的に署名してくれる。
+
+```bash title="Terminal"
+pip install awscurl
+```
+
+出力された `FunctionUrl` の値を使って呼び出す。
+
+```bash title="Terminal"
+awscurl --service lambda --region us-east-1 \
+  -X POST "https://xxxxx.lambda-url.us-east-1.on.aws/" \
+  -H "Content-Type: application/json" \
+  -d '{"prompt": "What is the capital of Japan? Answer in one word."}'
+```
+
+```json title="Output"
+{"response": "Tokyo"}
+```
+
+[第 1 回](/ja/blog/2026/04/12/strands-agents-docker)の FastAPI と同じように、HTTP リクエストでエージェントを呼び出せるようになった。
+
+## コールドスタートの測定
+
+`aws lambda invoke` でコールドスタートとウォームスタートの性能差を測定する。以降のコマンドでは `--cli-binary-format raw-in-base64-out` を指定している。これは AWS CLI v2 で JSON ペイロードを直接渡すためのフラグだ。
+
+### コールドスタート（初回 invoke）
+
+```bash title="Terminal"
+aws lambda invoke \
+  --function-name strands-agent \
+  --cli-binary-format raw-in-base64-out \
+  --payload '{"prompt": "What is 2+2? Answer in one word."}' \
+  --region us-east-1 \
+  output.json
+
+cat output.json
+```
+
+```json title="Output"
+{"statusCode": 200, "headers": {"Content-Type": "application/json"}, "body": "{\"response\": \"Four\"}"}
+```
+
+### ウォームスタート（2回目 invoke）
+
+```bash title="Terminal"
+aws lambda invoke \
+  --function-name strands-agent \
+  --cli-binary-format raw-in-base64-out \
+  --payload '{"prompt": "What is the capital of Japan? Answer in one word."}' \
+  --region us-east-1 \
+  output.json
+
+cat output.json
+```
+
+```json title="Output"
+{"statusCode": 200, "headers": {"Content-Type": "application/json"}, "body": "{\"response\": \"Tokyo\"}"}
+```
+
+### コールドスタート vs ウォームスタートの比較
+
+Lambda のコールドスタートとは、関数が初めて（またはしばらくぶりに）呼び出されたときに、ランタイムの初期化が発生する起動のことだ。ウォームスタートは、前回の実行環境が再利用される起動で、初期化がスキップされる。
+
+CloudWatch Logs の REPORT 行から実測値を確認した。
+
+| 指標 | コールドスタート | ウォームスタート |
+|---|---|---|
+| Init Duration | 937 ms | — |
+| Duration | 1,780 ms | 745 ms |
+| Billed Duration | 2,718 ms | 745 ms |
+| Max Memory Used | 111 MB | 112 MB |
+
+コールドスタートでは Init Duration（937ms）が追加される。これは SDK のインポートと `BedrockModel` の初期化にかかる時間だ。ウォームスタートではこれがスキップされ、Duration も半分以下になる。
+
+## まとめ
+
+- **公式 Lambda Layer でデプロイが簡単** — `handler.py` を ZIP にして、Layer ARN を指定するだけ。依存パッケージの管理は Layer に任せられる。
+- **Function URL で HTTP エンドポイントを追加できる** — API Gateway なしで HTTPS エンドポイントが手に入る。IAM 認証の場合は `awscurl` で SigV4 署名付きリクエストを送る。ハンドラーは `aws lambda invoke` と Function URL の両方の event 形式に対応する必要がある。
+- **`BedrockModel` はモジュールレベル、`Agent` はハンドラー内** — ウォーム起動でモデルを再利用しつつ、リクエストごとに会話を分離する。[前回](/ja/blog/2026/04/12/strands-agents-docker)の FastAPI と同じ設計原則。
+- **コールドスタートの Init Duration は約 1 秒** — SDK のインポートが主因。ウォームスタートでは Duration が半分以下になる。`--memory-size 256` 以上を推奨（111MB 使用）。
+- **タイムアウトは 60 秒以上に設定する** — エージェントの応答（LLM の推論 + ツール実行）にはデフォルトの 3 秒では不足する。
+
+## クリーンアップ
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">リソース削除コマンド</summary>
+
+```bash title="Terminal"
+aws lambda delete-function-url-config --function-name strands-agent --region us-east-1
+aws lambda delete-function --function-name strands-agent --region us-east-1
+aws iam delete-role-policy --role-name strands-lambda-role --policy-name bedrock-invoke
+aws iam detach-role-policy --role-name strands-lambda-role \
+  --policy-arn arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+aws iam delete-role --role-name strands-lambda-role
+aws logs delete-log-group --log-group-name /aws/lambda/strands-agent --region us-east-1
+```
+
+</details>

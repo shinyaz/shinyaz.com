@@ -1,0 +1,283 @@
+---
+title: "Strands Agents SDK デプロイ — OpenTelemetry でエージェントのトレースを可視化する"
+description: "Strands Agents SDK に組み込まれた OpenTelemetry サポートを有効化し、エージェントの推論・ツール呼び出しをトレースとして Jaeger で可視化する。エージェントコードの変更は 2 行だけ。"
+date: 2026-04-12
+published: false
+featured: false
+categories: [ai-agents]
+tags: ["strands-agents", "bedrock", "python", "ai-agents", "opentelemetry", "observability"]
+series: "strands-agents-deploy"
+seriesOrder: 4
+---
+
+## はじめに
+
+[第 1 回](/ja/blog/2026/04/12/strands-agents-docker)から[第 3 回](/ja/blog/2026/04/12/strands-agents-agentcore)まで、エージェントを Docker、Lambda、AgentCore にデプロイした。デプロイ先は決まったが、本番運用にはもう 1 つ必要なものがある。エージェントの動作を監視する仕組みだ。
+
+[実践第 5 回](/ja/blog/2026/03/29/strands-agents-metrics)では `result.metrics.get_summary()` でサイクル数やトークン量を確認した。しかし、あれは 1 回のリクエストの事後分析だった。本番環境では、複数リクエストを横断的に分析し、ボトルネックを特定し、異常を検知する必要がある。
+
+Strands Agents SDK は [OpenTelemetry](https://opentelemetry.io/) を組み込みサポートしている。環境変数を設定するだけで、エージェントの推論とツール呼び出しがトレースとして記録される。
+
+トレースとは、1 つのリクエストがシステム内でどのように処理されたかを記録したものだ。トレースは複数のスパン（個々の処理ステップ）で構成され、各スパンの所要時間と親子関係を確認できる。
+
+この記事では以下を試す。
+
+1. **Jaeger のローカル起動** — トレースの可視化環境を準備する
+2. **Strands エージェントの OTEL 有効化** — 2 行のコード追加でトレースを送信する
+3. **トレースの確認** — スパン構造を確認し、実践第 5 回のメトリクスとの対応を見る
+4. **コンソールエクスポーター** — スパンに記録される属性の詳細を確認する
+5. **カスタム属性** — セッション ID やユーザー ID でトレースを検索可能にする
+
+公式ドキュメントは [Traces](https://strandsagents.com/docs/user-guide/observability-evaluation/traces/) を参照。
+
+## セットアップ
+
+前提条件:
+
+- [第 1 回](/ja/blog/2026/04/12/strands-agents-docker)の環境（`strands-agents` インストール済み）
+- Docker がインストール済みであること（Jaeger の起動に使用）
+
+OTEL の依存パッケージを追加インストールする。
+
+```bash title="Terminal"
+pip install 'strands-agents[otel]' strands-agents-tools
+```
+
+`strands-agents[otel]` は OpenTelemetry 関連の依存パッケージ（`opentelemetry-api`、`opentelemetry-sdk` 等）を追加する。
+
+## Jaeger のローカル起動
+
+[Jaeger](https://www.jaegertracing.io/) はオープンソースの分散トレーシングツールだ。all-in-one コンテナを起動するだけで、トレースの収集と可視化ができる。
+
+```bash title="Terminal"
+docker run -d --name jaeger \
+  -e COLLECTOR_OTLP_ENABLED=true \
+  -p 16686:16686 \
+  -p 4318:4318 \
+  jaegertracing/all-in-one:latest
+```
+
+- ポート `16686` — Jaeger UI（ブラウザでトレースを確認する）
+- ポート `4318` — OTLP HTTP エンドポイント（エージェントからトレースを受信する）
+
+起動後、http://localhost:16686 にアクセスして Jaeger UI が表示されることを確認する。
+
+## Strands エージェントの OTEL 有効化
+
+エージェントコードに追加するのは 2 行だけだ。
+
+```python title="trace_agent.py"
+import os
+os.environ["OTEL_EXPORTER_OTLP_ENDPOINT"] = "http://localhost:4318"
+
+from strands import Agent
+from strands.models import BedrockModel
+from strands.telemetry import StrandsTelemetry
+from strands_tools import calculator
+
+# OTEL を有効化（この 2 行を追加するだけ）
+strands_telemetry = StrandsTelemetry()
+strands_telemetry.setup_otlp_exporter()
+
+bedrock_model = BedrockModel(
+    model_id="us.anthropic.claude-sonnet-4-20250514-v1:0",
+    region_name="us-east-1",
+)
+
+agent = Agent(model=bedrock_model, tools=[calculator], callback_handler=None)
+result = agent("What is 123 * 456?")
+print(f"Response: {result.message['content'][0]['text']}")
+```
+
+ポイントは以下だ。
+
+- **`OTEL_EXPORTER_OTLP_ENDPOINT`** — トレースの送信先。Jaeger の OTLP HTTP エンドポイントを指定する
+- **`StrandsTelemetry().setup_otlp_exporter()`** — SDK の OTEL エクスポーターを有効化する。この 2 行以外にエージェントコードの変更は不要。SDK が自動的にエージェントループ、モデル呼び出し、ツール実行をスパンとして記録する
+
+```bash title="Terminal"
+python -u trace_agent.py
+```
+
+```text title="Output"
+Response: The result of 123 * 456 is **56,088**.
+```
+
+エージェントは通常通り動作する。バックグラウンドでトレースが Jaeger に送信されている。
+
+## トレースの確認
+
+Jaeger UI（http://localhost:16686）を開き、Service ドロップダウンから `strands-agents` を選択して「Find Traces」をクリックする。トレースの一覧が表示され、各トレースをクリックするとスパンのタイムラインが確認できる。
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">Jaeger API でトレースを確認する方法</summary>
+
+```bash title="Terminal"
+curl -s "http://localhost:16686/api/traces?service=strands-agents&limit=1" \
+  | python3 -c "
+import sys, json
+data = json.load(sys.stdin)
+trace = data['data'][0]
+print(f'Trace ID: {trace[\"traceID\"]}')
+print(f'Spans: {len(trace[\"spans\"])}')
+for span in trace['spans']:
+    name = span['operationName']
+    duration = span['duration'] / 1000
+    print(f'  {name}: {duration:.0f}ms')
+"
+```
+
+</details>
+
+今回の実行では 6 つのスパンが記録された。
+
+```text title="スパン構造"
+invoke_agent Strands Agents (5511ms)     ← エージェント全体
+├── execute_event_loop_cycle (5511ms)    ← Cycle 1
+│   ├── chat (4312ms)                    ← モデル呼び出し（推論 + ツール選択）
+│   └── execute_tool calculator (3ms)    ← ツール実行
+└── execute_event_loop_cycle (1191ms)    ← Cycle 2
+    └── chat (1191ms)                    ← モデル呼び出し（最終回答生成）
+```
+
+[実践第 5 回](/ja/blog/2026/03/29/strands-agents-metrics)の `result.metrics` で確認した「2 サイクル」「calculator 1 回呼び出し」が、トレースのスパンとして可視化されている。`result.metrics` が事後の数値データだったのに対し、トレースは時系列のタイムラインとして各ステップの所要時間と親子関係を示す。
+
+## コンソールエクスポーターでスパンの中身を見る
+
+Jaeger UI ではスパンの階層と所要時間が分かるが、各スパンに記録されている属性の詳細を確認するには、コンソールエクスポーターが便利だ。`trace_agent.py` の `setup_otlp_exporter()` を以下に置き換える（または併用する）。
+
+```python title="Python"
+from strands.telemetry import StrandsTelemetry
+
+StrandsTelemetry().setup_console_exporter()
+```
+
+`setup_otlp_exporter()` の代わりに（または併用して）`setup_console_exporter()` を呼ぶと、スパンが JSON 形式で標準出力に出力される。主要な属性を抜粋する。
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">console_trace.py（コードと実行コマンド）</summary>
+
+```python title="console_trace.py"
+from strands import Agent
+from strands.models import BedrockModel
+from strands.telemetry import StrandsTelemetry
+from strands_tools import calculator
+
+strands_telemetry = StrandsTelemetry()
+strands_telemetry.setup_console_exporter()
+
+bedrock_model = BedrockModel(
+    model_id="us.anthropic.claude-sonnet-4-20250514-v1:0",
+    region_name="us-east-1",
+)
+
+agent = Agent(model=bedrock_model, tools=[calculator], callback_handler=None)
+result = agent("What is 123 * 456?")
+```
+
+```bash title="Terminal"
+python -u console_trace.py
+```
+
+</details>
+
+**モデル呼び出しスパン（`chat`）:**
+
+```json title="Output (抜粋)"
+{
+    "name": "chat",
+    "attributes": {
+        "gen_ai.request.model": "us.anthropic.claude-sonnet-4-20250514-v1:0",
+        "gen_ai.usage.input_tokens": 1514,
+        "gen_ai.usage.output_tokens": 69,
+        "gen_ai.usage.total_tokens": 1583,
+        "gen_ai.server.time_to_first_token": 3293
+    }
+}
+```
+
+**ツール実行スパン（`execute_tool calculator`）:**
+
+```json title="Output (抜粋)"
+{
+    "name": "execute_tool calculator",
+    "attributes": {
+        "gen_ai.tool.name": "calculator",
+        "gen_ai.tool.call.id": "tooluse_1DfAEkjH8xUXal4n5oLtpd",
+        "gen_ai.tool.status": "success"
+    }
+}
+```
+
+[実践第 5 回](/ja/blog/2026/03/29/strands-agents-metrics)の `result.metrics` で確認した `inputTokens`、`outputTokens`、`totalTokens` が、トレースでは `gen_ai.usage.*` 属性として記録されている。さらに `gen_ai.server.time_to_first_token`（最初のトークンが返るまでの時間）など、`result.metrics` にはない情報も含まれている。
+
+## カスタム属性でトレースを検索可能にする
+
+本番環境では「特定のユーザーのリクエストだけ追跡したい」「セッション ID でフィルタリングしたい」といったニーズがある。`Agent` の `trace_attributes` パラメータでカスタム属性をスパンに付与できる。`trace_agent.py` の `Agent(...)` に `trace_attributes` を追加するだけだ（Jaeger が起動している状態で実行する）。
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">custom_trace.py（コードと実行コマンド）</summary>
+
+```python title="custom_trace.py"
+import os
+os.environ["OTEL_EXPORTER_OTLP_ENDPOINT"] = "http://localhost:4318"
+
+from strands import Agent
+from strands.models import BedrockModel
+from strands.telemetry import StrandsTelemetry
+from strands_tools import calculator
+
+strands_telemetry = StrandsTelemetry()
+strands_telemetry.setup_otlp_exporter()
+
+bedrock_model = BedrockModel(
+    model_id="us.anthropic.claude-sonnet-4-20250514-v1:0",
+    region_name="us-east-1",
+)
+
+agent = Agent(
+    model=bedrock_model,
+    tools=[calculator],
+    callback_handler=None,
+    trace_attributes={
+        "session.id": "user-session-abc123",
+        "user.id": "taro",
+        "environment": "production",
+    },
+)
+
+result = agent("What is 123 * 456?")
+print(f"Response: {result.message['content'][0]['text']}")
+```
+
+```bash title="Terminal"
+python -u custom_trace.py
+```
+
+</details>
+
+エージェントを実行すると、`invoke_agent` スパンにカスタム属性が記録される。
+
+```text title="Jaeger で確認した invoke_agent スパンの属性（抜粋）"
+session.id: user-session-abc123
+user.id: taro
+environment: production
+gen_ai.agent.name: Strands Agents
+gen_ai.request.model: us.anthropic.claude-sonnet-4-20250514-v1:0
+gen_ai.usage.total_tokens: 3197
+```
+
+Jaeger UI では Tags フィルタに `user.id=taro` と入力すると、そのユーザーのトレースだけを検索できる。本番環境で複数ユーザーのリクエストが混在する中から、特定のリクエストを追跡する際に有用だ。
+
+## まとめ
+
+- **エージェントコードの変更は 2 行だけ** — `StrandsTelemetry()` と `setup_otlp_exporter()` を追加するだけで、SDK が自動的にトレースを送信する。エージェントの動作は変わらない。
+- **スパン構造がエージェントループを反映する** — `invoke_agent` → `execute_event_loop_cycle` → `chat` / `execute_tool` の階層が、[入門第 1 回](/ja/blog/2026/03/03/strands-agents-quickstart)で学んだエージェントループの「推論 → ツール選択 → ツール実行 → 推論」に対応する。
+- **`result.metrics` の延長線上にある** — [実践第 5 回](/ja/blog/2026/03/29/strands-agents-metrics)のサイクル数やツール実行時間が、トレースのスパンとして時系列で可視化される。事後分析からリアルタイム監視への移行。
+- **Jaeger 以外のツールにも送信できる** — OpenTelemetry 標準なので、[AWS X-Ray](https://strandsagents.com/docs/user-guide/observability-evaluation/traces/#sending-traces-to-cloudwatch-x-ray)、Grafana Tempo、Datadog など任意のバックエンドに切り替え可能。
+- **`trace_attributes` でカスタム属性を付与できる** — セッション ID やユーザー ID をスパンに記録し、Jaeger でタグ検索できる。本番環境での特定リクエストの追跡に有用。
+
+## クリーンアップ
+
+```bash title="Terminal"
+docker rm -f jaeger
+```

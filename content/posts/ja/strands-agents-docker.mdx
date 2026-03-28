@@ -1,0 +1,304 @@
+---
+title: "Strands Agents SDK デプロイ — エージェントを HTTP API 化して Docker コンテナにする"
+description: "Strands Agents SDK のエージェントを FastAPI でラップして HTTP API 化し、Docker コンテナとしてパッケージングする。async def のハングや SSO 認証の問題など、実際に遭遇したハマりポイントも共有する。"
+date: 2026-04-12
+published: false
+featured: false
+categories: [ai-agents]
+tags: ["strands-agents", "bedrock", "python", "ai-agents", "docker", "fastapi"]
+series: "strands-agents-deploy"
+seriesOrder: 1
+---
+
+## はじめに
+
+[入門シリーズ](/ja/blog/2026/03/03/strands-agents-quickstart)から[マルチエージェント編](/ja/blog/2026/04/05/strands-agents-swarm)まで、エージェントはすべてローカルの Python スクリプトとして実行してきた。`python agent.py` で動くが、他のシステムから呼び出すことはできない。
+
+本番運用するには、エージェントを HTTP API として公開し、コンテナにパッケージングする必要がある。FastAPI でエージェントをラップするだけで、どこにでもデプロイできるコンテナが完成する。
+
+この記事では以下を試す。
+
+1. **FastAPI でエージェントを HTTP API 化** — `/invocations` エンドポイントの実装とローカル動作確認
+2. **Docker コンテナ化** — Dockerfile 作成、ビルド、コンテナ経由の動作確認
+
+公式ドキュメントは [Deploying Strands Agents to Docker](https://strandsagents.com/docs/user-guide/deploy/deploy_to_docker/python/) を参照。
+
+## セットアップ
+
+前提条件:
+
+- Python 3.10 以上
+- AWS CLI が設定済みで、Bedrock の Claude モデルへのアクセス権限があること
+- Docker がインストール済みであること（Docker セクションで使用）
+
+[入門シリーズ](/ja/blog/2026/03/03/strands-agents-quickstart)の環境をそのまま使う。新規の場合は以下を実行する。
+
+```bash title="Terminal"
+mkdir my_agent && cd my_agent
+python -m venv .venv
+source .venv/bin/activate
+pip install strands-agents fastapi "uvicorn[standard]"
+```
+
+最終的なプロジェクト構造は以下の通りだ。
+
+```text title="プロジェクト構造"
+my_agent/
+├── app.py              # FastAPI アプリケーション
+├── requirements.txt    # 依存パッケージ
+└── Dockerfile          # コンテナ設定
+```
+
+## FastAPI でエージェントを HTTP API 化する
+
+入門第 1 回で作った `agent("質問")` という呼び出しを、HTTP POST リクエストで受け付けるようにする。
+
+### エンドポイントの実装
+
+以下ではエンドポイント部分を抜粋して解説する。全体コードは折りたたみを参照してほしい。
+
+```python title="app.py (抜粋)"
+@app.get("/ping")
+def ping():
+    return {"status": "healthy"}
+
+
+@app.post("/invocations", response_model=InvokeResponse)
+def invoke(request: InvokeRequest):
+    try:
+        agent = Agent(model=bedrock_model, callback_handler=None)
+        result = agent(request.prompt)
+        text = result.message["content"][0]["text"]
+        return InvokeResponse(response=text)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+```
+
+`InvokeRequest` と `InvokeResponse` は Pydantic モデルで、リクエストとレスポンスの JSON 構造を定義している。[実践第 1 回](/ja/blog/2026/03/29/strands-agents-structured-output)では LLM の出力を構造化するために Pydantic を使ったが、ここでは FastAPI の入出力バリデーションとして使っている。
+
+ポイントは 3 つだ。
+
+- **リクエストごとに `Agent` を作成する** — [入門第 4 回](/ja/blog/2026/03/03/strands-agents-conversation)で学んだように、`Agent` は `messages` に会話履歴を蓄積する。グローバルに 1 つのインスタンスを共有すると、異なるリクエスト間で会話が混ざる。`BedrockModel` はステートレスなのでグローバルで共有して問題ない
+- **`callback_handler=None`** — これを設定しないと、エージェントの応答がストリーミングで stdout に出力される。HTTP API では不要なので無効化する
+- **`GET /ping`** と **`POST /invocations`** — ヘルスチェックとエージェント呼び出し用のエンドポイント
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">app.py 全体コード（コピペ用）</summary>
+
+```python title="app.py"
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
+from strands import Agent
+from strands.models import BedrockModel
+
+app = FastAPI(title="Strands Agent API")
+
+bedrock_model = BedrockModel(
+    model_id="us.anthropic.claude-sonnet-4-20250514-v1:0",
+    region_name="us-east-1",
+)
+
+
+class InvokeRequest(BaseModel):
+    prompt: str
+
+
+class InvokeResponse(BaseModel):
+    response: str
+
+
+@app.get("/ping")
+def ping():
+    return {"status": "healthy"}
+
+
+@app.post("/invocations", response_model=InvokeResponse)
+def invoke(request: InvokeRequest):
+    try:
+        agent = Agent(model=bedrock_model, callback_handler=None)
+        result = agent(request.prompt)
+        text = result.message["content"][0]["text"]
+        return InvokeResponse(response=text)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8080)  # python app.py で直接実行する場合に使う
+```
+
+</details>
+
+### ローカルで動作確認
+
+```bash title="Terminal"
+uvicorn app:app --host 0.0.0.0 --port 8080
+```
+
+別のターミナルから curl で呼び出す。
+
+```bash title="Terminal"
+# ヘルスチェック
+curl http://localhost:8080/ping
+```
+
+```json title="Output"
+{"status": "healthy"}
+```
+
+```bash title="Terminal"
+# エージェント呼び出し
+curl -X POST http://localhost:8080/invocations \
+  -H "Content-Type: application/json" \
+  -d '{"prompt": "What is 2+2? Answer in one word."}'
+```
+
+```json title="Output"
+{"response": "Four"}
+```
+
+入門第 1 回の `agent("質問")` と同じエージェントが、HTTP API として動いている。
+
+## Docker コンテナ化
+
+ローカルで動くことを確認できたので、次はこれをコンテナにパッケージングする。コンテナにすれば、ローカル環境に依存せずどこでも同じように動作する。
+
+### Dockerfile と requirements.txt の作成
+
+```text title="requirements.txt"
+strands-agents
+fastapi
+uvicorn[standard]
+```
+
+```dockerfile title="Dockerfile"
+FROM python:3.12-slim
+
+WORKDIR /app
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY app.py .
+
+EXPOSE 8080
+
+CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8080"]
+```
+
+`python:3.12-slim` は軽量な Python ベースイメージだ。`requirements.txt` を先にコピーして `pip install` することで、依存パッケージのインストール結果が Docker のレイヤーキャッシュに保存される。`app.py` を変更しても依存パッケージの再インストールは不要になる。
+
+### ビルドと実行
+
+```bash title="Terminal"
+docker build -t strands-agent:latest .
+```
+
+```bash title="Terminal"
+docker run -p 8080:8080 \
+  -e AWS_ACCESS_KEY_ID="$AWS_ACCESS_KEY_ID" \
+  -e AWS_SECRET_ACCESS_KEY="$AWS_SECRET_ACCESS_KEY" \
+  -e AWS_SESSION_TOKEN="$AWS_SESSION_TOKEN" \
+  -e AWS_REGION=us-east-1 \
+  strands-agent:latest
+```
+
+AWS 認証情報を環境変数で渡している。本番環境では IAM ロール（ECS タスクロール等）を使うべきだが、ローカルテストでは環境変数が手軽だ。AWS SSO を使っている場合はこれらの環境変数が設定されていないため、後述の[ハマりポイント](#sso-認証はコンテナに直接渡せない)を参照してほしい。
+
+### 動作確認
+
+ローカル実行と同じ curl コマンドで確認できる。
+
+```bash title="Terminal"
+curl http://localhost:8080/ping
+```
+
+```json title="Output"
+{"status": "healthy"}
+```
+
+```bash title="Terminal"
+curl -X POST http://localhost:8080/invocations \
+  -H "Content-Type: application/json" \
+  -d '{"prompt": "What is the capital of Japan? Answer in one word."}'
+```
+
+```json title="Output"
+{"response": "Tokyo"}
+```
+
+ローカル実行と同じ結果がコンテナ経由で得られた。このコンテナイメージを ECR にプッシュすれば、[Fargate](https://strandsagents.com/docs/user-guide/deploy/deploy_to_aws_fargate/)、[EKS](https://strandsagents.com/docs/user-guide/deploy/deploy_to_amazon_eks/)、[App Runner](https://strandsagents.com/docs/user-guide/deploy/deploy_to_aws_apprunner/) など任意のコンテナ実行環境にデプロイできる。
+
+## ハマりポイント
+
+### async def でエンドポイントを定義するとハングする
+
+FastAPI では `async def` でエンドポイントを定義するのが一般的だが、Strands の `agent()` はブロッキング呼び出しである。`async def` の中でブロッキング呼び出しを行うと、FastAPI のイベントループがブロックされてリクエストがハングする。
+
+```python title="Python (NG: ハングする)"
+@app.post("/invocations")
+async def invoke(request: InvokeRequest):  # async def → ハング
+    result = agent(request.prompt)
+    ...
+```
+
+```python title="Python (OK: 正常に動作)"
+@app.post("/invocations")
+def invoke(request: InvokeRequest):  # def → スレッドプールで実行
+    result = agent(request.prompt)
+    ...
+```
+
+`def`（同期関数）で定義すれば、FastAPI が自動的にスレッドプールで実行するためハングしない。FastAPI は `def` で定義されたエンドポイントを外部のスレッドプールで実行する仕組みを持っており、メインのイベントループをブロックしない。
+
+### SSO 認証はコンテナに直接渡せない
+
+AWS SSO（IAM Identity Center）で認証している場合、`~/.aws` ディレクトリをコンテナにマウントしても SSO トークンの解決に失敗する。
+
+```bash title="Terminal (NG: SSO トークンエラー)"
+docker run -v "$HOME/.aws:/root/.aws:ro" strands-agent:latest
+# Error when retrieving token from sso: Token has expired and refresh failed
+```
+
+ローカルテストでは、boto3 から一時的な認証情報を取得して環境変数で渡す方法が確実だ。
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">SSO 環境での Docker 実行コマンド</summary>
+
+```bash title="Terminal"
+# boto3 で一時認証情報を取得
+CREDS=$(python3 -c "
+import json, boto3
+creds = boto3.Session().get_credentials().get_frozen_credentials()
+print(json.dumps({'AK': creds.access_key, 'SK': creds.secret_key, 'ST': creds.token}))
+")
+
+# 一時認証情報を環境変数で渡してコンテナを実行
+docker run -p 8080:8080 \
+  -e AWS_ACCESS_KEY_ID=$(echo $CREDS | python3 -c "import sys,json; print(json.load(sys.stdin)['AK'])") \
+  -e AWS_SECRET_ACCESS_KEY=$(echo $CREDS | python3 -c "import sys,json; print(json.load(sys.stdin)['SK'])") \
+  -e AWS_SESSION_TOKEN=$(echo $CREDS | python3 -c "import sys,json; print(json.load(sys.stdin)['ST'])") \
+  -e AWS_REGION=us-east-1 \
+  strands-agent:latest
+```
+
+</details>
+
+本番環境では ECS タスクロールや EC2 インスタンスプロファイルを使えば、認証情報の管理は不要になる。
+
+## まとめ
+
+- **FastAPI でラップするだけで HTTP API になる** — `def` で同期エンドポイントを定義し、リクエストごとに `Agent` を作成する。`callback_handler=None` でストリーミング出力を無効化する。
+- **`async def` ではなく `def` を使う** — `agent()` はブロッキング呼び出しなので、`async def` だとイベントループがハングする。`def` なら FastAPI がスレッドプールで自動実行する。
+- **Docker コンテナ化は標準的な手順** — `python:3.12-slim` + `pip install` + `uvicorn` で完結する。このコンテナイメージが Fargate、EKS、App Runner など任意のコンテナ実行環境へのデプロイの土台になる。
+- **SSO 認証はコンテナに直接渡せない** — ローカルテストでは boto3 から一時認証情報を取得して環境変数で渡す。本番では IAM ロールを使う。
+
+## クリーンアップ
+
+```bash title="Terminal"
+# コンテナの停止と削除（実行中の場合）
+docker rm -f $(docker ps -q --filter ancestor=strands-agent:latest) 2>/dev/null
+# イメージの削除
+docker rmi strands-agent:latest
+```

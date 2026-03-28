@@ -1,0 +1,304 @@
+---
+title: "Strands Agents SDK Deploy — Turn Your Agent into an HTTP API with Docker"
+description: "Wrap a Strands Agents SDK agent with FastAPI to create an HTTP API, then package it as a Docker container. Covers the async def hang pitfall and SSO credential issues encountered during verification."
+date: 2026-04-12
+published: false
+featured: false
+categories: [ai-agents]
+tags: ["strands-agents", "bedrock", "python", "ai-agents", "docker", "fastapi"]
+series: "strands-agents-deploy"
+seriesOrder: 1
+---
+
+## Introduction
+
+From the [introductory series](/en/blog/2026/03/03/strands-agents-quickstart) through the [multi-agent series](/en/blog/2026/04/05/strands-agents-swarm), every agent ran as a local Python script. `python agent.py` works, but other systems can't call it.
+
+For production use, you need to expose the agent as an HTTP API and package it into a container. Just wrapping the agent with FastAPI gives you a container that can be deployed anywhere.
+
+This article covers:
+
+1. **Turning the agent into an HTTP API with FastAPI** — implementing the `/invocations` endpoint and verifying locally
+2. **Containerizing with Docker** — creating a Dockerfile, building, and verifying via the container
+
+See the official documentation at [Deploying Strands Agents to Docker](https://strandsagents.com/docs/user-guide/deploy/deploy_to_docker/python/).
+
+## Setup
+
+Prerequisites:
+
+- Python 3.10+
+- AWS CLI configured with access to Bedrock Claude models
+- Docker installed (used in the Docker section)
+
+Use the same environment from the [introductory series](/en/blog/2026/03/03/strands-agents-quickstart). For a fresh setup:
+
+```bash title="Terminal"
+mkdir my_agent && cd my_agent
+python -m venv .venv
+source .venv/bin/activate
+pip install strands-agents fastapi "uvicorn[standard]"
+```
+
+The final project structure looks like this:
+
+```text title="Project structure"
+my_agent/
+├── app.py              # FastAPI application
+├── requirements.txt    # Dependencies
+└── Dockerfile          # Container configuration
+```
+
+## Wrapping the Agent with FastAPI
+
+Turn the `agent("question")` call from the introductory series into an HTTP POST endpoint.
+
+### Endpoint Implementation
+
+The following shows the endpoint code in excerpt. See the collapsible section below for the full code.
+
+```python title="app.py (excerpt)"
+@app.get("/ping")
+def ping():
+    return {"status": "healthy"}
+
+
+@app.post("/invocations", response_model=InvokeResponse)
+def invoke(request: InvokeRequest):
+    try:
+        agent = Agent(model=bedrock_model, callback_handler=None)
+        result = agent(request.prompt)
+        text = result.message["content"][0]["text"]
+        return InvokeResponse(response=text)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+```
+
+`InvokeRequest` and `InvokeResponse` are Pydantic models that define the JSON structure for requests and responses. In [practical part 1](/en/blog/2026/03/29/strands-agents-structured-output), we used Pydantic to structure LLM output — here it's used for FastAPI input/output validation.
+
+Three key points:
+
+- **Create a new `Agent` per request** — As covered in [introductory part 4](/en/blog/2026/03/03/strands-agents-conversation), `Agent` accumulates conversation history in `messages`. Sharing a single global instance would mix conversations across requests. `BedrockModel` is stateless and safe to share globally
+- **`callback_handler=None`** — Without this, the agent streams output to stdout. Not needed for an HTTP API
+- **`GET /ping`** and **`POST /invocations`** — Health check and agent invocation endpoints
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">Full app.py code (copy-paste ready)</summary>
+
+```python title="app.py"
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
+from strands import Agent
+from strands.models import BedrockModel
+
+app = FastAPI(title="Strands Agent API")
+
+bedrock_model = BedrockModel(
+    model_id="us.anthropic.claude-sonnet-4-20250514-v1:0",
+    region_name="us-east-1",
+)
+
+
+class InvokeRequest(BaseModel):
+    prompt: str
+
+
+class InvokeResponse(BaseModel):
+    response: str
+
+
+@app.get("/ping")
+def ping():
+    return {"status": "healthy"}
+
+
+@app.post("/invocations", response_model=InvokeResponse)
+def invoke(request: InvokeRequest):
+    try:
+        agent = Agent(model=bedrock_model, callback_handler=None)
+        result = agent(request.prompt)
+        text = result.message["content"][0]["text"]
+        return InvokeResponse(response=text)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8080)  # Used when running directly with python app.py
+```
+
+</details>
+
+### Local Verification
+
+```bash title="Terminal"
+uvicorn app:app --host 0.0.0.0 --port 8080
+```
+
+From another terminal:
+
+```bash title="Terminal"
+# Health check
+curl http://localhost:8080/ping
+```
+
+```json title="Output"
+{"status": "healthy"}
+```
+
+```bash title="Terminal"
+# Agent invocation
+curl -X POST http://localhost:8080/invocations \
+  -H "Content-Type: application/json" \
+  -d '{"prompt": "What is 2+2? Answer in one word."}'
+```
+
+```json title="Output"
+{"response": "Four"}
+```
+
+The same agent from the introductory series is now running as an HTTP API.
+
+## Containerizing with Docker
+
+Now that the API works locally, let's package it into a container. Containers ensure the application runs the same way regardless of the host environment.
+
+### Creating the Dockerfile and requirements.txt
+
+```text title="requirements.txt"
+strands-agents
+fastapi
+uvicorn[standard]
+```
+
+```dockerfile title="Dockerfile"
+FROM python:3.12-slim
+
+WORKDIR /app
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY app.py .
+
+EXPOSE 8080
+
+CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8080"]
+```
+
+`python:3.12-slim` is a lightweight Python base image. Copying `requirements.txt` first and running `pip install` lets Docker cache the dependency layer — changing `app.py` won't trigger a reinstall.
+
+### Build and Run
+
+```bash title="Terminal"
+docker build -t strands-agent:latest .
+```
+
+```bash title="Terminal"
+docker run -p 8080:8080 \
+  -e AWS_ACCESS_KEY_ID="$AWS_ACCESS_KEY_ID" \
+  -e AWS_SECRET_ACCESS_KEY="$AWS_SECRET_ACCESS_KEY" \
+  -e AWS_SESSION_TOKEN="$AWS_SESSION_TOKEN" \
+  -e AWS_REGION=us-east-1 \
+  strands-agent:latest
+```
+
+AWS credentials are passed as environment variables. In production, use IAM roles (e.g., ECS task roles), but environment variables are convenient for local testing. If you're using AWS SSO, these environment variables won't be set — see the [Gotchas section](#sso-credentials-dont-work-in-containers) below.
+
+### Verification
+
+The same curl commands from the local test work here.
+
+```bash title="Terminal"
+curl http://localhost:8080/ping
+```
+
+```json title="Output"
+{"status": "healthy"}
+```
+
+```bash title="Terminal"
+curl -X POST http://localhost:8080/invocations \
+  -H "Content-Type: application/json" \
+  -d '{"prompt": "What is the capital of Japan? Answer in one word."}'
+```
+
+```json title="Output"
+{"response": "Tokyo"}
+```
+
+Same results as the local run, now through the container. Push this image to ECR and you can deploy to [Fargate](https://strandsagents.com/docs/user-guide/deploy/deploy_to_aws_fargate/), [EKS](https://strandsagents.com/docs/user-guide/deploy/deploy_to_amazon_eks/), [App Runner](https://strandsagents.com/docs/user-guide/deploy/deploy_to_aws_apprunner/), or any container runtime.
+
+## Gotchas
+
+### async def Endpoints Hang
+
+FastAPI commonly uses `async def` for endpoints, but Strands' `agent()` is a blocking call. Calling it inside `async def` blocks the event loop and hangs the request.
+
+```python title="Python (NG: hangs)"
+@app.post("/invocations")
+async def invoke(request: InvokeRequest):  # async def → hangs
+    result = agent(request.prompt)
+    ...
+```
+
+```python title="Python (OK: works correctly)"
+@app.post("/invocations")
+def invoke(request: InvokeRequest):  # def → runs in thread pool
+    result = agent(request.prompt)
+    ...
+```
+
+Using `def` (synchronous) lets FastAPI automatically run it in a thread pool, avoiding the hang. FastAPI runs `def` endpoints in an external thread pool, so the main event loop is never blocked.
+
+### SSO Credentials Don't Work in Containers
+
+When using AWS SSO (IAM Identity Center), mounting `~/.aws` into the container fails to resolve SSO tokens.
+
+```bash title="Terminal (NG: SSO token error)"
+docker run -v "$HOME/.aws:/root/.aws:ro" strands-agent:latest
+# Error when retrieving token from sso: Token has expired and refresh failed
+```
+
+For local testing, extract temporary credentials from boto3 and pass them as environment variables.
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">Docker run command for SSO environments</summary>
+
+```bash title="Terminal"
+# Extract temporary credentials from boto3
+CREDS=$(python3 -c "
+import json, boto3
+creds = boto3.Session().get_credentials().get_frozen_credentials()
+print(json.dumps({'AK': creds.access_key, 'SK': creds.secret_key, 'ST': creds.token}))
+")
+
+# Run container with temporary credentials
+docker run -p 8080:8080 \
+  -e AWS_ACCESS_KEY_ID=$(echo $CREDS | python3 -c "import sys,json; print(json.load(sys.stdin)['AK'])") \
+  -e AWS_SECRET_ACCESS_KEY=$(echo $CREDS | python3 -c "import sys,json; print(json.load(sys.stdin)['SK'])") \
+  -e AWS_SESSION_TOKEN=$(echo $CREDS | python3 -c "import sys,json; print(json.load(sys.stdin)['ST'])") \
+  -e AWS_REGION=us-east-1 \
+  strands-agent:latest
+```
+
+</details>
+
+In production, ECS task roles or EC2 instance profiles eliminate the need to manage credentials manually.
+
+## Summary
+
+- **Just wrap with FastAPI to get an HTTP API** — Define a synchronous endpoint with `def` and create a new `Agent` per request. Disable streaming with `callback_handler=None`.
+- **Use `def`, not `async def`** — `agent()` is a blocking call, so `async def` hangs the event loop. `def` lets FastAPI auto-run it in a thread pool.
+- **Docker containerization is straightforward** — `python:3.12-slim` + `pip install` + `uvicorn` is all you need. This container image becomes the foundation for deploying to Fargate, EKS, App Runner, or any container runtime.
+- **SSO credentials don't work directly in containers** — For local testing, extract temporary credentials from boto3. In production, use IAM roles.
+
+## Cleanup
+
+```bash title="Terminal"
+# Stop and remove the container (if running)
+docker rm -f $(docker ps -q --filter ancestor=strands-agent:latest) 2>/dev/null
+# Remove the image
+docker rmi strands-agent:latest
+```
