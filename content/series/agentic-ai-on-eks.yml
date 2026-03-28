@@ -1,3 +1,5 @@
 name: Agentic AI on EKS
 slug: agentic-ai-on-eks
 nameJa: Agentic AI on EKS 実践
+description: Run AI agents on Amazon EKS — workshop walkthrough, A2A multi-agent, agent UI, and BuildKit image builds
+descriptionJa: Amazon EKS 上で AI エージェントを動かす — ワークショップ、A2A マルチエージェント、エージェント UI、BuildKit イメージビルド

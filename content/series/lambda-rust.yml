@@ -1,3 +1,5 @@
 name: Lambda Rust
 slug: lambda-rust
 nameJa: Lambda Rust 検証
+description: Benchmark and verify Rust on AWS Lambda — official runtime support, cold start, and concurrency performance
+descriptionJa: AWS Lambda での Rust を検証 — 公式ランタイムサポート、コールドスタート、同時実行性能

@@ -1,3 +1,5 @@
 name: AgentCore CLI
 slug: agentcore-cli
 nameJa: AgentCore CLI 実践
+description: Build, deploy, and manage AI agents with AgentCore CLI — from creation to gateway, memory, and evaluation
+descriptionJa: AgentCore CLI でAIエージェントを構築・デプロイ・管理する — 作成からゲートウェイ、メモリ、評価まで

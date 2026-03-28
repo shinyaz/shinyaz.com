@@ -21,6 +21,7 @@ export const ja = {
     empty: "記事がありません。",
     browseCategories: "カテゴリ一覧",
     browseTags: "タグ一覧",
+    browseSeries: "シリーズ一覧",
   },
   til: {
     title: "TIL",
@@ -31,6 +32,7 @@ export const ja = {
   nav: {
     blog: "ブログ",
     til: "TIL",
+    series: "シリーズ",
     projects: "プロジェクト",
     uses: "使用ツール",
     now: "Now",
@@ -92,6 +94,9 @@ export const ja = {
     extra: "番外編",
     prev: "前の記事",
     next: "次の記事",
+    indexTitle: "シリーズ一覧",
+    indexDescription: "テーマごとに深掘りする連載記事シリーズ",
+    postCount: "{count} 記事",
   },
   relatedPosts: {
     title: "関連記事",

@@ -1,3 +1,5 @@
 name: AWS Payment Cryptography Practical Guide
 slug: aws-payment-cryptography
 nameJa: AWS Payment Cryptography 実践ガイド
+description: Hands-on guide to AWS Payment Cryptography — key management, issuer/acquirer operations, and TR-31 key exchange
+descriptionJa: AWS Payment Cryptography 実践ガイド — 鍵管理、イシュア/アクワイアラ操作、TR-31 鍵交換

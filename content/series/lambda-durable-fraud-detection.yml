@@ -1,3 +1,5 @@
 name: Lambda Durable Fraud Detection
 slug: lambda-durable-fraud-detection
 nameJa: Lambda Durable Functions 不正検知
+description: Build a fraud detection workflow with Lambda Durable Functions — hands-on, operational tips, and best practices
+descriptionJa: Lambda Durable Functions で不正検知ワークフローを構築 — ハンズオン、運用 Tips、ベストプラクティス
