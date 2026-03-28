@@ -233,6 +233,9 @@ var pvk = createKey(controlPlane, KeyUsage.TR31_V2_VISA_PIN_VERIFICATION_KEY,
 
 イシュア編と同じ `GeneratePinData` で PIN を生成する。この PIN ブロックは PEK-A で暗号化されている。
 
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">GeneratePinData のコード（イシュア編と同じ）</summary>
+
 ```java title="Java"
 var pinResp = dataPlane.generatePinData(GeneratePinDataRequest.builder()
         .generationKeyIdentifier(pvkArn)
@@ -244,6 +247,8 @@ var pinResp = dataPlane.generatePinData(GeneratePinDataRequest.builder()
                 .build())
         .build());
 ```
+
+</details>
 
 ```text title="Output"
 Step 1 - PIN 生成（PEK-A）
@@ -330,7 +335,7 @@ MAC 検証（正しいメッセージ）: 成功
 MAC 検証（改ざんメッセージ）: 失敗 — INVALID_MAC
 ```
 
-メッセージの最後の 1 バイトを変更しただけで MAC 検証が失敗する。これにより、トランザクションデータが送信中に 1 ビットでも改ざんされた場合に検知できる。
+検証では、元のメッセージ `48656C6C6F576F726C64`（"HelloWorld"）の最後の 1 バイトを `64` → `65` に変更して改ざんをシミュレートした。1 バイトの変更でも MAC 検証が失敗し、トランザクションデータの改ざんを検知できる。
 
 ## アクワイアラ処理の API と鍵の見取り図
 

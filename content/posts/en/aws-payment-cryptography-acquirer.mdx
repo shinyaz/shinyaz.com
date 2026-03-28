@@ -222,6 +222,9 @@ var pvk = createKey(controlPlane, KeyUsage.TR31_V2_VISA_PIN_VERIFICATION_KEY,
 
 ### Step 1: Generate PIN with PEK-A
 
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">GeneratePinData code (same as issuer edition)</summary>
+
 ```java title="Java"
 var pinResp = dataPlane.generatePinData(GeneratePinDataRequest.builder()
         .generationKeyIdentifier(pvkArn)
@@ -233,6 +236,8 @@ var pinResp = dataPlane.generatePinData(GeneratePinDataRequest.builder()
                 .build())
         .build());
 ```
+
+</details>
 
 ```text title="Output"
 Step 1 - PIN generation (PEK-A)
@@ -310,7 +315,7 @@ MAC verification (correct message): Success
 MAC verification (tampered message): Failed — INVALID_MAC
 ```
 
-Changing even the last byte of the message causes MAC verification to fail, detecting any tampering during transmission.
+The verification tampers the original message `48656C6C6F576F726C64` ("HelloWorld") by changing the last byte from `64` to `65`. Even this single byte change causes MAC verification to fail, detecting any data tampering during transmission.
 
 ## Acquirer Operations: API and Key Map
 
