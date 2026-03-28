@@ -5,7 +5,7 @@ import { formatDate, formatReadingTime } from "@/lib/utils";
 import { MdxContent } from "@/components/mdx/mdx-content";
 import { TagBadge } from "@/components/blog/tag-badge";
 import { SocialShare } from "@/components/blog/social-share";
-import { SITE_URL, AUTHOR } from "@/lib/constants";
+import { SITE_URL, AUTHOR, OG_IMAGE_PATH } from "@/lib/constants";
 import { locales, isValidLocale, getDictionary, defaultLocale } from "@/lib/i18n";
 import { ProfileCard } from "@/components/common/profile-card";
 import { generateTilStaticParams } from "@/lib/til-params";
@@ -82,6 +82,7 @@ export default async function TilDetailPage({ params }: TilPageProps) {
       "@type": "WebPage",
       "@id": `${SITE_URL}${til.permalink}`,
     },
+    image: `${SITE_URL}${OG_IMAGE_PATH}`,
     ...(til.tags.length > 0 ? { keywords: til.tags.join(", ") } : {}),
   };
 

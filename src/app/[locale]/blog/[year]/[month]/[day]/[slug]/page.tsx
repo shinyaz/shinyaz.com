@@ -1,13 +1,13 @@
 import type { Metadata } from "next";
 import { notFound } from "next/navigation";
-import { getPostBySlug, getRelatedPosts, getSeriesPosts, getSeriesTitle } from "@/lib/posts";
+import { getPostBySlug, getRelatedPosts, getSeriesPosts, getSeriesTitle, getCategoryBySlug, getCategoryName } from "@/lib/posts";
 import { formatDate, formatReadingTime } from "@/lib/utils";
 import { MdxContent } from "@/components/mdx/mdx-content";
 import { CategoryBadge } from "@/components/blog/category-badge";
 import { TagBadge } from "@/components/blog/tag-badge";
 import { SocialShare } from "@/components/blog/social-share";
 import { RelatedPosts } from "@/components/blog/related-posts";
-import { SITE_URL, AUTHOR } from "@/lib/constants";
+import { SITE_URL, AUTHOR, OG_IMAGE_PATH } from "@/lib/constants";
 import { locales, isValidLocale, getDictionary, defaultLocale } from "@/lib/i18n";
 import { extractHeadings } from "@/lib/toc";
 import { TableOfContents } from "@/components/blog/table-of-contents";
@@ -27,6 +27,13 @@ export async function generateMetadata({ params }: PostPageProps): Promise<Metad
   if (!isValidLocale(locale)) return {};
   const post = getPostBySlug(year, month, day, slug, locale);
   if (!post) return {};
+
+  const firstCategory = post.categories[0]
+    ? getCategoryBySlug(post.categories[0])
+    : undefined;
+  const sectionName = firstCategory
+    ? getCategoryName(firstCategory, locale)
+    : undefined;
 
   const languages: Record<string, string> = {};
   for (const l of locales) {
@@ -52,6 +59,7 @@ export async function generateMetadata({ params }: PostPageProps): Promise<Metad
       locale: locale === "ja" ? "ja_JP" : "en_US",
       authors: [AUTHOR],
       tags: post.tags,
+      ...(sectionName ? { section: sectionName } : {}),
     },
     alternates: {
       canonical: `${SITE_URL}${post.permalink}`,
@@ -93,7 +101,7 @@ export default async function PostPage({ params }: PostPageProps) {
       "@type": "WebPage",
       "@id": `${SITE_URL}${post.permalink}`,
     },
-    ...(post.cover ? { image: `${SITE_URL}${post.cover}` } : {}),
+    ...(post.cover ? { image: `${SITE_URL}${post.cover}` } : { image: `${SITE_URL}${OG_IMAGE_PATH}` }),
     ...(post.tags.length > 0 ? { keywords: post.tags.join(", ") } : {}),
   };
 

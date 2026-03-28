@@ -23,6 +23,7 @@ export async function generateMetadata({ params, searchParams }: TilPageProps): 
   return {
     title: t.til.title,
     description: t.til.description,
+    ...(pageNum > 1 ? { robots: { index: false } } : {}),
     openGraph: {
       title: t.til.title,
       description: t.til.description,

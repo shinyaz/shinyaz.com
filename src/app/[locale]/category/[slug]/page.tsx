@@ -39,6 +39,7 @@ export async function generateMetadata({ params, searchParams }: CategoryPagePro
   return {
     title: name,
     description: description ?? `${name}`,
+    ...(pageNum > 1 ? { robots: { index: false } } : {}),
     openGraph: {
       title: name,
       description: description ?? `${name}`,

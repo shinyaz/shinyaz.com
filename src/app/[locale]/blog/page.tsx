@@ -23,6 +23,7 @@ export async function generateMetadata({ params, searchParams }: BlogPageProps):
   return {
     title: t.blog.title,
     description: t.blog.description,
+    ...(pageNum > 1 ? { robots: { index: false } } : {}),
     openGraph: {
       title: t.blog.title,
       description: t.blog.description,

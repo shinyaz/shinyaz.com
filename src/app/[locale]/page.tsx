@@ -7,7 +7,6 @@ import { FeaturedPostCard } from "@/components/blog/featured-post-card";
 import { ProfileCard } from "@/components/common/profile-card";
 import { getDictionary, isValidLocale } from "@/lib/i18n";
 import { SITE_URL } from "@/lib/constants";
-import { defaultLocale } from "@/lib/i18n";
 import { buildAlternateLanguages } from "@/lib/seo";
 import Link from "next/link";
 import { notFound } from "next/navigation";
@@ -20,14 +19,13 @@ export async function generateMetadata({ params }: HomePageProps): Promise<Metad
   const { locale } = await params;
   if (!isValidLocale(locale)) return {};
 
-  const canonicalUrl = locale === defaultLocale ? SITE_URL : `${SITE_URL}/${locale}`;
+  const canonicalUrl = `${SITE_URL}/${locale}`;
 
   return {
     alternates: {
       canonical: canonicalUrl,
       languages: {
         ...buildAlternateLanguages((l) => `/${l}`),
-        "x-default": SITE_URL,
       },
     },
   };

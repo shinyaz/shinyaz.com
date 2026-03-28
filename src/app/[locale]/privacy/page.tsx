@@ -4,7 +4,7 @@ import { getPageBySlug } from "@/lib/posts";
 import { MdxContent } from "@/components/mdx/mdx-content";
 import { SITE_URL } from "@/lib/constants";
 import { locales, isValidLocale } from "@/lib/i18n";
-import { buildAlternateLanguages } from "@/lib/seo";
+import { buildAlternateLanguages, buildBreadcrumbJsonLd } from "@/lib/seo";
 
 interface PrivacyPageProps {
   params: Promise<{ locale: string }>;
@@ -42,8 +42,14 @@ export default async function PrivacyPage({ params }: PrivacyPageProps) {
   const page = getPageBySlug("privacy", locale);
   if (!page) notFound();
 
+  const breadcrumbJsonLd = buildBreadcrumbJsonLd(locale, page.title, "privacy");
+
   return (
     <div className="mx-auto max-w-3xl px-4 py-6 md:py-12">
+      <script
+        type="application/ld+json"
+        dangerouslySetInnerHTML={{ __html: JSON.stringify(breadcrumbJsonLd) }}
+      />
       <article>
         <header className="mb-8">
           <h1 className="text-2xl font-bold tracking-tight md:text-3xl">

@@ -1,6 +1,11 @@
 import Link from "next/link";
+import type { Metadata } from "next";
 import { headers } from "next/headers";
 import { defaultLocale, isValidLocale, getDictionary } from "@/lib/i18n";
+
+export const metadata: Metadata = {
+  robots: { index: false },
+};
 
 function getLocaleFromUrl(url: string): string | undefined {
   try {

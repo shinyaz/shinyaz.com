@@ -22,6 +22,7 @@ interface FeedItem {
   categories: string[];
   tags: string[];
   updated?: string;
+  content?: string;
 }
 
 function getMergedFeedItems(locale: Locale): FeedItem[] {
@@ -33,6 +34,7 @@ function getMergedFeedItems(locale: Locale): FeedItem[] {
     categories: post.categories,
     tags: post.tags,
     updated: post.updated,
+    content: post.content,
   }));
   const tilItems = getPublishedTils(locale).map((til) => ({
     title: til.title,
@@ -42,6 +44,7 @@ function getMergedFeedItems(locale: Locale): FeedItem[] {
     categories: [] as string[],
     tags: til.tags,
     updated: undefined,
+    content: til.content,
   }));
   return [...posts, ...tilItems]
     .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime())
@@ -72,13 +75,13 @@ export function generateRss(locale: Locale): string {
       <guid isPermaLink="true">${link}</guid>
       <pubDate>${pubDate}</pubDate>
       <author>${escapeXml(AUTHOR)}</author>
-${item.description ? `      <description>${escapeXml(item.description)}</description>\n` : ""}${categories}
+${item.description ? `      <description>${escapeXml(item.description)}</description>\n` : ""}${item.content ? `      <content:encoded><![CDATA[${item.content}]]></content:encoded>\n` : ""}${categories}
     </item>`;
     })
     .join("\n");
 
   return `<?xml version="1.0" encoding="UTF-8"?>
-<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom">
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:content="http://purl.org/rss/1.0/modules/content/">
   <channel>
     <title>${escapeXml(t.site.name)}</title>
     <link>${siteLink}</link>
@@ -119,7 +122,7 @@ export function generateAtom(locale: Locale): string {
       <published>${published}</published>
       <updated>${itemUpdated}</updated>
       <author><name>${escapeXml(AUTHOR)}</name></author>
-${item.description ? `      <summary>${escapeXml(item.description)}</summary>\n` : ""}${categories}
+${item.description ? `      <summary>${escapeXml(item.description)}</summary>\n` : ""}${item.content ? `      <content type="html"><![CDATA[${item.content}]]></content>\n` : ""}${categories}
     </entry>`;
     })
     .join("\n");

@@ -42,7 +42,7 @@ export async function generateMetadata({
   if (!isValidLocale(locale)) return {};
   const t = getDictionary(locale);
 
-  const homeUrl = locale === defaultLocale ? SITE_URL : `${SITE_URL}/${locale}`;
+  const homeUrl = `${SITE_URL}/${locale}`;
   const alternateLanguages: Record<string, string> = {};
   for (const l of locales) {
     alternateLanguages[l] = `${SITE_URL}/${l}`;
@@ -81,7 +81,7 @@ export async function generateMetadata({
       canonical: homeUrl,
       languages: {
         ...alternateLanguages,
-        "x-default": SITE_URL,
+        "x-default": `${SITE_URL}/${defaultLocale}`,
       },
     },
   };

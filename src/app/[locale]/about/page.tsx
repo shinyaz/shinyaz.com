@@ -5,7 +5,7 @@ import { getPageBySlug } from "@/lib/posts";
 import { MdxContent } from "@/components/mdx/mdx-content";
 import { SITE_URL, AUTHOR, SOCIAL_LINKS } from "@/lib/constants";
 import { locales, isValidLocale, getDictionary } from "@/lib/i18n";
-import { buildAlternateLanguages } from "@/lib/seo";
+import { buildAlternateLanguages, buildBreadcrumbJsonLd } from "@/lib/seo";
 
 interface AboutPageProps {
   params: Promise<{ locale: string }>;
@@ -59,11 +59,17 @@ export default async function AboutPage({ params }: AboutPageProps) {
     ],
   };
 
+  const breadcrumbJsonLd = buildBreadcrumbJsonLd(locale, page.title, "about");
+
   return (
     <div className="mx-auto max-w-3xl px-4 py-6 md:py-12">
       <script
         type="application/ld+json"
         dangerouslySetInnerHTML={{ __html: JSON.stringify(personJsonLd) }}
+      />
+      <script
+        type="application/ld+json"
+        dangerouslySetInnerHTML={{ __html: JSON.stringify(breadcrumbJsonLd) }}
       />
       <article>
         <header className="mb-8">
