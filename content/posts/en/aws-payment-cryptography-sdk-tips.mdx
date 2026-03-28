@@ -1,0 +1,126 @@
+---
+title: "AWS Payment Cryptography Extra — Gotchas and Workarounds for Payment Cryptographic Operations"
+description: "A collection of Java SDK v2 gotchas discovered across the 3-part series. HMAC gaps, enum naming mismatches, class name confusion, and other undocumented pitfalls with workarounds."
+date: 2026-03-29
+published: true
+featured: false
+categories: [infrastructure]
+tags: ["aws", "payment-cryptography", "java", "security", "hsm"]
+series: "aws-payment-cryptography"
+seriesOrder: 4
+seriesExtra: true
+---
+
+## Introduction
+
+Across the [3-part AWS Payment Cryptography series](/en/blog/2026/03/29/aws-payment-cryptography-intro), we implemented payment cryptographic operations using Java SDK v2 (`software.amazon.awssdk` v2.31.9). Along the way, we discovered several SDK-specific gotchas that aren't predictable from the documentation or CLI.
+
+This article compiles those gotchas with workarounds, so developers starting with AWS Payment Cryptography in Java can avoid the same traps.
+
+## 1. KeyAlgorithm Enum Names Differ from CLI
+
+CLI uses `TDES_2KEY`, but Java SDK v2 uses `TDES_2_KEY` (with underscore).
+
+```java title="Java"
+// ✗ Compile error
+KeyAlgorithm.TDES_2KEY
+
+// ✓ Correct
+KeyAlgorithm.TDES_2_KEY
+KeyAlgorithm.TDES_3_KEY
+```
+
+`AES_128` and `AES_256` are unchanged. Only TDES variants have the extra underscore.
+
+## 2. Two ValidationException Classes Exist
+
+Both the Control Plane (`paymentcryptography.model`) and Data Plane (`paymentcryptographydata.model`) define `ValidationException`. Wildcard imports cause ambiguity.
+
+```java title="Java"
+// ✗ Ambiguous reference — compile error
+import software.amazon.awssdk.services.paymentcryptography.model.*;
+import software.amazon.awssdk.services.paymentcryptographydata.model.*;
+// ... catch (ValidationException e) — which one?
+
+// ✓ Use fully qualified name for Data Plane
+catch (software.amazon.awssdk.services.paymentcryptographydata.model.ValidationException e) {
+    // ...
+}
+```
+
+## 3. HMAC_SHA256 Missing from KeyAlgorithm Enum
+
+SDK v2.31.9's `KeyAlgorithm` enum has no HMAC constants. The API accepts `HMAC_SHA256` (CLI works fine), but the Java SDK can't create the key.
+
+```java title="Java"
+// ✗ fromValue returns UNKNOWN_TO_SDK_VERSION, sends null to API
+KeyAlgorithm.fromValue("HMAC_SHA256")
+```
+
+Workarounds:
+- **Use CMAC instead** — `TR31_M6_ISO_9797_5_CMAC_KEY` + `AES_256` + `MacAlgorithm.CMAC` is fully supported
+- **Create the key via CLI, use the ARN in Java** — Only key creation needs CLI; GenerateMac/VerifyMac work fine in Java SDK
+
+Similarly, the Data Plane's `MacAlgorithm` enum has `HMAC_SHA256`, but using it with an HMAC_SHA256 key returns an error saying "use 'HMAC' MacAlgorithm." However, `HMAC` doesn't exist as an enum value in the SDK.
+
+## 4. Three Different PIN-Related Class Names
+
+PIN operations use different classes depending on the operation, which is confusing.
+
+| Operation | Class Name | Usage |
+|---|---|---|
+| Random PIN generation | `VisaPin` | `GeneratePinData` generationAttributes |
+| PVV from existing PIN | `VisaPinVerificationValue` | `GeneratePinData` generationAttributes (different scheme) |
+| PIN verification | `VisaPinVerification` | `VerifyPinData` verificationAttributes |
+
+```java title="Java"
+// PIN generation
+PinGenerationAttributes.builder()
+        .visaPin(VisaPin.builder()  // ← VisaPin
+                .pinVerificationKeyIndex(1).build())
+
+// PIN verification
+PinVerificationAttributes.builder()
+        .visaPin(VisaPinVerification.builder()  // ← VisaPinVerification
+                .pinVerificationKeyIndex(1)
+                .verificationValue("1234").build())
+```
+
+## 5. CLI Parameter Names Don't Match SDK Class Names
+
+Multiple APIs have SDK class names that don't match what you'd guess from CLI parameter names.
+
+| CLI Parameter | Expected Class Name | Actual SDK Class Name |
+|---|---|---|
+| `--incoming-translation-attributes IsoFormat0` | `TranslationIsoFormatAttributes` | `TranslationIsoFormats` |
+| `--session-key-derivation-attributes` | `SessionKeyDerivationAttributes` | `SessionKeyDerivation` |
+| PIN block format | `PinBlockFormat` | `PinBlockFormatForPinData` |
+
+When you hit a compile error, search the JAR contents:
+
+```bash title="Terminal"
+jar tf ~/.m2/repository/software/amazon/awssdk/paymentcryptographydata/2.31.9/paymentcryptographydata-2.31.9.jar | grep -i "Translation"
+```
+
+## 6. Plaintext Data Must Be hexBinary
+
+EncryptData / DecryptData plaintext is a hexBinary string. Passing a raw string hits block size constraints.
+
+```java title="Java"
+// ✗ Error — 16 hex chars = 8 bytes, less than AES block size of 16 bytes
+"4111111111111111"
+
+// ✓ 32 hex chars = 16 bytes (AES block size multiple)
+"41111111111111110000000000000000"
+```
+
+ECB mode does not auto-pad. The caller must ensure block size alignment.
+
+## Summary
+
+Most of these gotchas stem from SDK enum/class names not matching CLI parameter names. Payment Cryptography is a relatively new service, and the SDK's type definitions haven't fully caught up with API evolution (e.g., missing HMAC_SHA256).
+
+General approach:
+- **Check the JAR contents on compile errors** — Use `jar tf` to find the correct class name
+- **Use CMAC or CLI for HMAC** — Either substitute with CMAC or create keys via CLI
+- **Use fully qualified names** — Especially for `ValidationException` which exists in both packages

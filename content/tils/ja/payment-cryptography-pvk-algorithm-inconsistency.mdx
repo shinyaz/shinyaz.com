@@ -1,0 +1,14 @@
+---
+title: "AWS Payment Cryptography の PVK アルゴリズムでドキュメント間に不整合がある"
+date: 2026-03-29
+published: true
+tags:
+  - aws
+  - payment-cryptography
+---
+
+AWS Payment Cryptography で VISA PIN スキームの `GeneratePinData` を実装していて、PVK（PIN Verification Key, `TR31_V2`）のアルゴリズムに関するドキュメント間の矛盾に気づいた。
+
+[PVV チュートリアル](https://docs.aws.amazon.com/payment-cryptography/latest/userguide/use-cases-issuers.generalfunctions.pvv.html)では「The PGK must be a key of algorithm TDES_2KEY」と明記されている。一方、[Valid keys ページ](https://docs.aws.amazon.com/payment-cryptography/latest/userguide/crypto-ops-validkeys-ops.html)の GeneratePinData (VISA) テーブルでは PIN Generation Key のアルゴリズムが `TDES_3KEY` のみ記載されている。
+
+実際に TDES_2KEY で PVK を作成して `GeneratePinData` を実行したところ、正常に動作した。PVV チュートリアルの記述が実際の API の挙動と一致しており、Valid keys テーブルに TDES_2KEY の記載が漏れていると思われる。詳しくは [AWS Payment Cryptography イシュア編](/ja/blog/2026/03/29/aws-payment-cryptography-issuer) を参照。

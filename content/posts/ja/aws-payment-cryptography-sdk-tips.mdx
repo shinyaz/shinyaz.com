@@ -1,0 +1,126 @@
+---
+title: "AWS Payment Cryptography 番外編 — 決済暗号処理を実装する際の落とし穴と対処法"
+description: "シリーズ全 3 回の検証で発見した Java SDK v2 のハマりポイントを整理。HMAC 未対応、enum 名の不一致、クラス名の混乱など 6 つの落とし穴と対処法。"
+date: 2026-03-29
+published: true
+featured: false
+categories: [infrastructure]
+tags: ["aws", "payment-cryptography", "java", "security", "hsm"]
+series: "aws-payment-cryptography"
+seriesOrder: 4
+seriesExtra: true
+---
+
+## はじめに
+
+[AWS Payment Cryptography シリーズ](/ja/blog/2026/03/29/aws-payment-cryptography-intro)の全 3 回を通じて、Java SDK v2（`software.amazon.awssdk` v2.31.9）で決済暗号処理を実装した。その過程で、ドキュメントや CLI からは予測できない SDK 固有の落とし穴がいくつも見つかった。
+
+本記事では、これらのハマりポイントを整理し、対処法をまとめる。これから AWS Payment Cryptography を Java で実装する開発者が同じ罠にはまらないための参考になれば幸いである。
+
+## 1. KeyAlgorithm の enum 名が CLI と異なる
+
+CLI では `TDES_2KEY` だが、Java SDK v2 では `TDES_2_KEY`（アンダースコアあり）。
+
+```java title="Java"
+// ✗ コンパイルエラー
+KeyAlgorithm.TDES_2KEY
+
+// ✓ 正しい
+KeyAlgorithm.TDES_2_KEY
+KeyAlgorithm.TDES_3_KEY
+```
+
+`AES_128`, `AES_256` はそのまま。TDES 系のみアンダースコアが追加されている。
+
+## 2. ValidationException が 2 つ存在する
+
+Control Plane（`paymentcryptography.model`）と Data Plane（`paymentcryptographydata.model`）の両方に `ValidationException` が定義されている。ワイルドカード import を使うとコンパイルエラーになる。
+
+```java title="Java"
+// ✗ 曖昧な参照でコンパイルエラー
+import software.amazon.awssdk.services.paymentcryptography.model.*;
+import software.amazon.awssdk.services.paymentcryptographydata.model.*;
+// ... catch (ValidationException e) — どちらの ValidationException？
+
+// ✓ Data Plane 側を完全修飾名で catch
+catch (software.amazon.awssdk.services.paymentcryptographydata.model.ValidationException e) {
+    // ...
+}
+```
+
+## 3. HMAC_SHA256 が KeyAlgorithm enum に未定義
+
+SDK v2.31.9 の `KeyAlgorithm` enum には HMAC 系の定数が存在しない。API 自体は `HMAC_SHA256` を受け付ける（CLI では正常に動作する）が、Java SDK からは鍵を作成できない。
+
+```java title="Java"
+// ✗ fromValue は UNKNOWN_TO_SDK_VERSION を返し、API に null が送信される
+KeyAlgorithm.fromValue("HMAC_SHA256")
+```
+
+対処法：
+- **CMAC で代替する** — `TR31_M6_ISO_9797_5_CMAC_KEY` + `AES_256` + `MacAlgorithm.CMAC` は SDK で完全にサポートされている
+- **CLI で鍵を作成し、ARN を Java コードで使う** — 鍵の作成だけ CLI で行い、GenerateMac/VerifyMac は Java SDK で実行
+
+同様に、Data Plane の `MacAlgorithm` enum には `HMAC_SHA256` は存在するが、HMAC_SHA256 鍵と組み合わせると API が「`HMAC` MacAlgorithm を使え」とエラーを返す。しかし `HMAC` という enum 値は SDK に存在しない。
+
+## 4. PIN 関連のクラス名が 3 種類ある
+
+PIN 処理で使うクラスが操作ごとに異なり、混乱しやすい。
+
+| 操作 | クラス名 | 用途 |
+|---|---|---|
+| ランダム PIN 生成 | `VisaPin` | `GeneratePinData` の `generationAttributes` |
+| 既存 PIN の PVV 生成 | `VisaPinVerificationValue` | `GeneratePinData` の `generationAttributes`（別スキーム） |
+| PIN 検証 | `VisaPinVerification` | `VerifyPinData` の `verificationAttributes` |
+
+```java title="Java"
+// PIN 生成時
+PinGenerationAttributes.builder()
+        .visaPin(VisaPin.builder()  // ← VisaPin
+                .pinVerificationKeyIndex(1).build())
+
+// PIN 検証時
+PinVerificationAttributes.builder()
+        .visaPin(VisaPinVerification.builder()  // ← VisaPinVerification
+                .pinVerificationKeyIndex(1)
+                .verificationValue("1234").build())
+```
+
+## 5. CLI のパラメータ名と SDK のクラス名が一致しない
+
+複数の API で、CLI のパラメータ名から推測されるクラス名が SDK に存在しないパターンがある。
+
+| CLI パラメータ | 推測されるクラス名 | 実際の SDK クラス名 |
+|---|---|---|
+| `--incoming-translation-attributes IsoFormat0` | `TranslationIsoFormatAttributes` | `TranslationIsoFormats` |
+| `--session-key-derivation-attributes` | `SessionKeyDerivationAttributes` | `SessionKeyDerivation` |
+| PIN ブロック形式 | `PinBlockFormat` | `PinBlockFormatForPinData` |
+
+コンパイルエラーが出たら `jar tf` でクラス名を検索するのが確実。
+
+```bash title="Terminal"
+jar tf ~/.m2/repository/software/amazon/awssdk/paymentcryptographydata/2.31.9/paymentcryptographydata-2.31.9.jar | grep -i "Translation"
+```
+
+## 6. 平文データは hexBinary 文字列
+
+EncryptData / DecryptData の平文は hexBinary 文字列で渡す。文字列をそのまま渡すとブロックサイズの制約でエラーになる。
+
+```java title="Java"
+// ✗ 文字列をそのまま渡すとエラー（16 chars = 16 bytes ではなく 16 hex chars = 8 bytes）
+"4111111111111111"  // 16 hex chars = 8 bytes → AES ブロックサイズ 16 bytes に不足
+
+// ✓ 32 hex chars = 16 bytes（AES ブロックサイズの倍数）
+"41111111111111110000000000000000"
+```
+
+ECB モードではパディングが自動で行われないため、呼び出し側でブロックサイズの倍数に調整する必要がある。
+
+## まとめ
+
+これらのハマりポイントの多くは、SDK の enum やクラス名が CLI のパラメータ名と一致しないことに起因する。Payment Cryptography は比較的新しいサービスであり、SDK の型定義が API の進化に追いついていない部分がある（HMAC_SHA256 の未定義など）。
+
+対処の基本方針：
+- **コンパイルエラーが出たら JAR の中身を確認する** — `jar tf` でクラス名を検索し、正しい名前を特定する
+- **HMAC が必要なら CMAC で代替するか CLI を併用する** — SDK の更新を待つか、鍵作成だけ CLI で行う
+- **完全修飾名を使う習慣をつける** — 特に `ValidationException` は両パッケージに存在するため

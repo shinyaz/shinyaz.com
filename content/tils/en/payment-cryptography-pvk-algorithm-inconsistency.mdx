@@ -1,0 +1,14 @@
+---
+title: "AWS Payment Cryptography PVK algorithm has a documentation inconsistency"
+date: 2026-03-29
+published: true
+tags:
+  - aws
+  - payment-cryptography
+---
+
+While implementing the VISA PIN scheme with `GeneratePinData`, I noticed a contradiction between two AWS docs about the PVK (PIN Verification Key, `TR31_V2`) algorithm.
+
+The [PVV tutorial](https://docs.aws.amazon.com/payment-cryptography/latest/userguide/use-cases-issuers.generalfunctions.pvv.html) explicitly states "The PGK must be a key of algorithm TDES_2KEY." But the [Valid keys page](https://docs.aws.amazon.com/payment-cryptography/latest/userguide/crypto-ops-validkeys-ops.html) GeneratePinData (VISA) table lists only `TDES_3KEY` for the PIN Generation Key.
+
+I created a PVK with TDES_2KEY and ran `GeneratePinData` — it worked fine. The PVV tutorial matches the actual API behavior; the Valid keys table appears to be missing TDES_2KEY. See [AWS Payment Cryptography Issuer Edition](/en/blog/2026/03/29/aws-payment-cryptography-issuer) for the full verification.

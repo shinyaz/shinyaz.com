@@ -1,0 +1,20 @@
+---
+title: "AWS Payment Cryptography HMAC keys can't be created from Java SDK v2.31.9"
+date: 2026-03-29
+published: true
+tags:
+  - aws
+  - payment-cryptography
+  - java
+---
+
+Tried creating an HMAC_SHA256 MAC key via Java SDK v2 for AWS Payment Cryptography. The `KeyAlgorithm` enum doesn't have `HMAC_SHA256`. `fromValue("HMAC_SHA256")` returns `UNKNOWN_TO_SDK_VERSION` and sends null to the API.
+
+It gets worse on the Data Plane side. `MacAlgorithm` enum has `HMAC_SHA256`, but using it with an HMAC_SHA256 key returns an error telling you to use `HMAC` MacAlgorithm — which doesn't exist as an enum value.
+
+```text title="Output"
+Invalid MacAlgorithm HMAC_SHA256 used with KeyAlgorithm HMAC_SHA256.
+Please use HMAC Key with 'HMAC' MacAlgorithm.
+```
+
+Two workarounds: use CMAC instead (`TR31_M6_ISO_9797_5_CMAC_KEY` + `AES_256` + `MacAlgorithm.CMAC`), or create the key via CLI and use the ARN in Java. See [AWS Payment Cryptography Extra](/en/blog/2026/03/29/aws-payment-cryptography-sdk-tips) for details.

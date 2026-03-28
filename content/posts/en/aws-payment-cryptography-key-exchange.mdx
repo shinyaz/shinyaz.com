@@ -1,0 +1,231 @@
+---
+title: "AWS Payment Cryptography Extra — Implement TR-31 Key Export and Import"
+description: "Export a CVV key wrapped with KEK via TR-31, import it, and verify the same CVV2 is generated. Key material transfer and KCV-based identity verification with Java SDK."
+date: 2026-03-29
+published: true
+featured: false
+categories: [infrastructure]
+tags: ["aws", "payment-cryptography", "java", "security", "hsm"]
+series: "aws-payment-cryptography"
+seriesOrder: 5
+seriesExtra: true
+---
+
+## Introduction
+
+The [main series](/en/blog/2026/03/29/aws-payment-cryptography-intro) focused on key creation and usage. In production, however, you'll need to migrate keys from existing HSMs or exchange keys with partners.
+
+This article implements TR-31 key export and import with the Java SDK. We wrap a CVV key with a KEK, export it, import it back, and verify the imported key produces the same CVV2.
+
+## Prerequisites
+
+- Familiarity with the [introductory article](/en/blog/2026/03/29/aws-payment-cryptography-intro)
+- Java 17+, AWS SDK for Java v2
+- IAM permissions: `payment-cryptography:*` (for testing)
+- Test region: us-east-1
+
+## How TR-31 Key Exchange Works
+
+TR-31 (ANSI X9 TR-31) is an industry standard format for securely exchanging symmetric keys. Key material is encrypted with a KEK, and key attributes (usage, algorithm, operation modes) are included in the key block header.
+
+Flow:
+1. Sender wraps the key with KEK (export)
+2. Transfer the key block
+3. Receiver unwraps with the same KEK (import)
+
+
+## Source Code and Build
+
+Here is the full program used in the verification. If you want to follow along on your machine, place the files below and build. The results are explained in the following sections.
+
+The Maven dependencies (`pom.xml`) are the same as the [introductory article](/en/blog/2026/03/29/aws-payment-cryptography-intro).
+
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">KeyExchangeDemo.java (runnable code)</summary>
+
+```java title="KeyExchangeDemo.java"
+package demo;
+
+import software.amazon.awssdk.regions.Region;
+import software.amazon.awssdk.services.paymentcryptography.PaymentCryptographyClient;
+import software.amazon.awssdk.services.paymentcryptography.model.*;
+import software.amazon.awssdk.services.paymentcryptographydata.PaymentCryptographyDataClient;
+import software.amazon.awssdk.services.paymentcryptographydata.model.*;
+
+public class KeyExchangeDemo {
+
+    static final Region REGION = Region.US_EAST_1;
+
+    public static void main(String[] args) {
+        try (var cp = PaymentCryptographyClient.builder().region(REGION).build();
+             var dp = PaymentCryptographyDataClient.builder().region(REGION).build()) {
+
+            var kek = cp.createKey(CreateKeyRequest.builder().exportable(true)
+                    .keyAttributes(KeyAttributes.builder()
+                            .keyUsage(KeyUsage.TR31_K0_KEY_ENCRYPTION_KEY)
+                            .keyClass(KeyClass.SYMMETRIC_KEY).keyAlgorithm(KeyAlgorithm.AES_256)
+                            .keyModesOfUse(KeyModesOfUse.builder().encrypt(true).decrypt(true)
+                                    .wrap(true).unwrap(true).build()).build()).build()).key();
+
+            var cvk = cp.createKey(CreateKeyRequest.builder().exportable(true)
+                    .keyAttributes(KeyAttributes.builder()
+                            .keyUsage(KeyUsage.TR31_C0_CARD_VERIFICATION_KEY)
+                            .keyClass(KeyClass.SYMMETRIC_KEY).keyAlgorithm(KeyAlgorithm.TDES_2_KEY)
+                            .keyModesOfUse(KeyModesOfUse.builder()
+                                    .generate(true).verify(true).build()).build()).build()).key();
+
+            var original = dp.generateCardValidationData(
+                    GenerateCardValidationDataRequest.builder()
+                            .keyIdentifier(cvk.keyArn()).primaryAccountNumber("4111111111111111")
+                            .validationDataLength(3).generationAttributes(
+                                    CardGenerationAttributes.builder().cardVerificationValue2(
+                                            CardVerificationValue2.builder()
+                                                    .cardExpiryDate("0328").build()).build())
+                            .build());
+            System.out.printf("Original CVV2: %s (KCV: %s)%n", original.validationData(),
+                    cvk.keyCheckValue());
+
+            var exp = cp.exportKey(ExportKeyRequest.builder()
+                    .exportKeyIdentifier(cvk.keyArn())
+                    .keyMaterial(ExportKeyMaterial.builder()
+                            .tr31KeyBlock(ExportTr31KeyBlock.builder()
+                                    .wrappingKeyIdentifier(kek.keyArn()).build())
+                            .build()).build());
+            var keyBlock = exp.wrappedKey().keyMaterial();
+
+            var imp = cp.importKey(ImportKeyRequest.builder()
+                    .keyMaterial(ImportKeyMaterial.builder()
+                            .tr31KeyBlock(ImportTr31KeyBlock.builder()
+                                    .wrappingKeyIdentifier(kek.keyArn())
+                                    .wrappedKeyBlock(keyBlock).build())
+                            .build()).build());
+            System.out.printf("Imported KCV: %s, Origin: %s%n",
+                    imp.key().keyCheckValue(), imp.key().keyOriginAsString());
+
+            var imported = dp.generateCardValidationData(
+                    GenerateCardValidationDataRequest.builder()
+                            .keyIdentifier(imp.key().keyArn())
+                            .primaryAccountNumber("4111111111111111").validationDataLength(3)
+                            .generationAttributes(CardGenerationAttributes.builder()
+                                    .cardVerificationValue2(CardVerificationValue2.builder()
+                                            .cardExpiryDate("0328").build()).build())
+                            .build());
+            System.out.printf("Imported CVV2: %s, Match: %s%n",
+                    imported.validationData(),
+                    original.validationData().equals(imported.validationData()));
+
+            for (var arn : new String[]{cvk.keyArn(), imp.key().keyArn(), kek.keyArn()})
+                cp.deleteKey(DeleteKeyRequest.builder()
+                        .keyIdentifier(arn).deleteKeyInDays(3).build());
+        }
+    }
+}
+```
+
+</details>
+
+
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">Build and run instructions</summary>
+
+Uses the same project structure as the [introductory article](/en/blog/2026/03/29/aws-payment-cryptography-intro). Place `KeyExchangeDemo.java` in `src/main/java/demo/`.
+
+```bash title="Terminal"
+cd payment-crypto-demo
+
+# Place KeyExchangeDemo.java in src/main/java/demo/
+
+# Build and run
+mvn clean compile -q
+mvn exec:java -Dexec.mainClass=demo.KeyExchangeDemo
+```
+
+</details>
+
+## Verification: CVV Key Export and Import
+
+### Step 1: Create KEK
+
+The KEK uses `TR31_K0_KEY_ENCRYPTION_KEY` with Encrypt, Decrypt, Wrap, and Unwrap modes.
+
+```java title="Java"
+var kek = controlPlane.createKey(CreateKeyRequest.builder().exportable(true)
+        .keyAttributes(KeyAttributes.builder()
+                .keyUsage(KeyUsage.TR31_K0_KEY_ENCRYPTION_KEY)
+                .keyClass(KeyClass.SYMMETRIC_KEY)
+                .keyAlgorithm(KeyAlgorithm.AES_256)
+                .keyModesOfUse(KeyModesOfUse.builder()
+                        .encrypt(true).decrypt(true)
+                        .wrap(true).unwrap(true).build())
+                .build()).build()).key();
+```
+
+### Step 2: Create CVV Key and Generate CVV2
+
+```text title="Output"
+[CVK] TDES_2KEY KCV:B85317
+Original CVV2: 964
+```
+
+### Step 3: TR-31 Export
+
+```java title="Java"
+var exportResp = controlPlane.exportKey(ExportKeyRequest.builder()
+        .exportKeyIdentifier(cvk.keyArn())
+        .keyMaterial(ExportKeyMaterial.builder()
+                .tr31KeyBlock(ExportTr31KeyBlock.builder()
+                        .wrappingKeyIdentifier(kek.keyArn())
+                        .build())
+                .build())
+        .build());
+var keyBlock = exportResp.wrappedKey().keyMaterial();
+```
+
+```text title="Output"
+WrappedKeyBlock: D0112C0TC00E0000A087CF3DCE5CDECCE24F3273...
+```
+
+The header `D0112C0TC00E0000` contains key attributes. `C0` indicates `TR31_C0_CARD_VERIFICATION_KEY`.
+
+### Step 4: TR-31 Import
+
+```java title="Java"
+var importResp = controlPlane.importKey(ImportKeyRequest.builder()
+        .keyMaterial(ImportKeyMaterial.builder()
+                .tr31KeyBlock(ImportTr31KeyBlock.builder()
+                        .wrappingKeyIdentifier(kek.keyArn())
+                        .wrappedKeyBlock(keyBlock)
+                        .build())
+                .build())
+        .build());
+```
+
+```text title="Output"
+[Imported] TR31_C0_CARD_VERIFICATION_KEY TDES_2KEY KCV:B85317 Origin:EXTERNAL
+```
+
+Key observations:
+- **KCV matches** (`B85317`) — Proves key material was correctly transferred
+- **KeyOrigin is EXTERNAL** — Distinguishes imported keys from service-generated ones (`AWS_PAYMENT_CRYPTOGRAPHY`)
+- **Attributes auto-populated from TR-31 header** — No need to specify KeyUsage or KeyAlgorithm during import
+
+### Step 5: Generate CVV2 with Imported Key
+
+```text title="Output"
+Imported CVV2: 964
+Match with original: true
+```
+
+The original and imported keys produce the same CVV2 (`964`), proving key material integrity through TR-31 export/import.
+
+## Summary
+
+- **TR-31 transfers key attributes along with key material** — The key block header contains KeyUsage and algorithm, so import doesn't require specifying attributes separately
+- **KCV verifies key material identity** — Matching KCVs before and after export guarantee correct transfer
+- **Imported keys have KeyOrigin EXTERNAL** — Distinguishable from service-generated keys
+
+## Cleanup
+
+Cleanup runs automatically when the program executes. All keys are scheduled for deletion after 3 days (`deleteKeyInDays(3)`). Keys in `DELETE_PENDING` state can be restored with `RestoreKey`.
