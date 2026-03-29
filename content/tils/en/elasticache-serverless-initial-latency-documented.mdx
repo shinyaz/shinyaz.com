@@ -1,0 +1,15 @@
+---
+title: "ElastiCache Serverless initial latency is documented by AWS"
+description: "The official troubleshooting guide explicitly states that the first request has higher latency. Found in the 'Reuse connections' section."
+date: "2026-03-30"
+published: true
+tags: ["aws", "elasticache", "valkey", "serverless"]
+---
+
+When I hit slow initial connections with ElastiCache Serverless, I thought it might be a bug. Turns out it's documented in the [official troubleshooting guide](https://docs.aws.amazon.com/AmazonElastiCache/latest/dg/wwe-troubleshooting.html) under "Reuse connections":
+
+> Initiating the connection (including authenticating the connection, if configured) takes time so the latency of the first request is higher than typical. Requests over an already initialized connection deliver ElastiCache's consistent low latency.
+
+AWS explicitly acknowledges that the first request is slower and recommends connection pooling or reusing existing connections.
+
+In my testing with the JDBC Wrapper's Remote Query Cache Plugin, the Serverless initial connection took ~2.5-4 seconds, exceeding the plugin's internal timeout (2 seconds) and causing a `TimeoutException`. A warmup connection that pre-completes the TLS handshake avoids this.

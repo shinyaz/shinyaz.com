@@ -1,0 +1,30 @@
+---
+title: "Spring Boot + HikariCP warmup helps even with node-based ElastiCache"
+description: "Warmup was unnecessary with plain JDBC for node-based clusters, but HikariCP's connection pool initialization makes it beneficial in Spring Boot. First request improved from 2443ms to 264ms."
+date: "2026-03-30"
+published: false
+tags: ["aws", "elasticache", "valkey", "spring-boot", "jdbc"]
+---
+
+When using the JDBC Wrapper's Remote Query Cache Plugin with node-based ElastiCache (TLS enabled), plain JDBC tests showed no initial timeout — warmup was unnecessary ([Article 3](/en/blog/2026/03/30/jdbc-query-cache-valkey-serverless-workaround)).
+
+But through Spring Boot + HikariCP, the first request without warmup took 2443ms. HikariCP's connection pool initialization + TLS handshake + cache plugin initialization add up.
+
+Adding an `ApplicationRunner` that sends a dummy query to pre-initialize everything brought the first request down to 264ms.
+
+```java title="Java"
+@Component
+public class CacheWarmupRunner implements ApplicationRunner {
+    @Override
+    public void run(ApplicationArguments args) throws Exception {
+        try (Connection conn = dataSource.getConnection();
+             Statement stmt = conn.createStatement();
+             ResultSet rs = stmt.executeQuery("/* CACHE_PARAM(ttl=1s) */ SELECT 1")) {
+            rs.next();
+        }
+        Thread.sleep(5000);
+    }
+}
+```
+
+"No warmup needed for node-based" only applies to plain JDBC. In Spring Boot + HikariCP, warmup is recommended regardless of ElastiCache configuration.

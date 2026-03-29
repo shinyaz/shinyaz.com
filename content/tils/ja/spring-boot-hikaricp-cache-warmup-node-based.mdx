@@ -1,0 +1,30 @@
+---
+title: "Spring Boot + HikariCP ではノードベース ElastiCache でもウォームアップが効く"
+description: "素の JDBC では不要だったウォームアップが、HikariCP のコネクションプール初期化により Spring Boot 環境では有効。初回リクエストが 2443ms → 264ms に改善した。"
+date: "2026-03-30"
+published: false
+tags: ["aws", "elasticache", "valkey", "spring-boot", "jdbc"]
+---
+
+JDBC Wrapper の Remote Query Cache Plugin をノードベース ElastiCache（TLS 有効）で使う場合、素の JDBC テストでは初回タイムアウトが発生せず、ウォームアップは不要だった（[第3回記事](/ja/blog/2026/03/30/jdbc-query-cache-valkey-serverless-workaround)）。
+
+ところが Spring Boot + HikariCP 経由だと、ウォームアップなしの初回リクエストが 2443ms かかった。HikariCP のコネクションプール初期化 + TLS ハンドシェイク + キャッシュプラグイン初期化のオーバーヘッドが加わるためだ。
+
+`ApplicationRunner` でダミークエリを発行してこれらの初期化を事前に済ませると、初回リクエストが 264ms に改善した。
+
+```java title="Java"
+@Component
+public class CacheWarmupRunner implements ApplicationRunner {
+    @Override
+    public void run(ApplicationArguments args) throws Exception {
+        try (Connection conn = dataSource.getConnection();
+             Statement stmt = conn.createStatement();
+             ResultSet rs = stmt.executeQuery("/* CACHE_PARAM(ttl=1s) */ SELECT 1")) {
+            rs.next();
+        }
+        Thread.sleep(5000);
+    }
+}
+```
+
+「ノードベースならウォームアップ不要」は素の JDBC の話であって、Spring Boot + HikariCP 環境では構成に関わらずウォームアップを入れた方がよい。

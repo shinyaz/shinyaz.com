@@ -1,0 +1,606 @@
+---
+title: "JDBC Wrapper Valkey Cache — Integrating with Spring Boot + HikariCP"
+description: "Integrate the Remote Query Cache Plugin into a Spring Boot app with application.yml config and ApplicationRunner warmup. Verified with both node-based TLS and Serverless ElastiCache."
+date: 2026-03-30
+published: false
+featured: false
+categories:
+  - infrastructure
+tags: ["aws", "aurora", "postgresql", "elasticache", "valkey", "java", "jdbc", "database", "spring-boot"]
+series: "jdbc-query-cache-valkey"
+seriesOrder: 5
+seriesExtra: true
+---
+
+## Introduction
+
+In Articles 1-4 of this series, we verified the Remote Query Cache Plugin using plain JDBC code. However, most real-world Java applications use Spring Boot + HikariCP. This article shows how to integrate the plugin into a Spring Boot application.
+
+The official [Remote Query Cache Plugin documentation](https://github.com/aws/aws-advanced-jdbc-wrapper/blob/main/docs/using-the-jdbc-driver/using-plugins/UsingTheRemoteQueryCachePlugin.md) includes Spring JDBC (`DriverManagerDataSource`) and Hibernate examples, but not Spring Boot + HikariCP + `application.yml`. This article fills that gap.
+
+Changes to an existing Spring Boot app are minimal:
+
+1. Add 3 dependencies to `pom.xml`
+2. Add 2 lines to `application.yml` under `data-source-properties`
+3. For Serverless: add 1 `ApplicationRunner` file for warmup
+4. Add `/* CACHE_PARAM(ttl=Xs) */` hints to queries you want cached
+
+## Test Environment
+
+| Item | Value |
+| --- | --- |
+| Region | ap-northeast-1 (Tokyo) |
+| DB | Aurora PostgreSQL Serverless v2 (16.6, 0.5-2 ACU) |
+| Cache ① | ElastiCache for Valkey node-based (cache.t3.micro, TLS enabled) |
+| Cache ② | ElastiCache for Valkey Serverless (Valkey 8) |
+| Client | EC2 t3.small (Amazon Linux 2023, same VPC) |
+| Java | Amazon Corretto 21 |
+| Spring Boot | 3.4.4 |
+| AWS JDBC Wrapper | 3.3.0 |
+| Test data | products table, 1 million rows |
+
+Prerequisites:
+
+- AWS CLI configured (`rds:*`, `elasticache:*`, `ec2:*` permissions)
+- Java 21 + Maven
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">Infrastructure setup (VPC / Aurora / ElastiCache × 2 / EC2)</summary>
+
+### VPC, subnets, and security groups
+
+```bash title="Terminal"
+export AWS_REGION=ap-northeast-1
+MY_IP="$(curl -s https://checkip.amazonaws.com)/32"
+
+VPC_ID=$(aws ec2 create-vpc --cidr-block 10.0.0.0/16 \
+  --tag-specifications 'ResourceType=vpc,Tags=[{Key=Name,Value=jdbc-cache-test}]' \
+  --query 'Vpc.VpcId' --output text --region $AWS_REGION)
+aws ec2 modify-vpc-attribute --enable-dns-hostnames '{"Value":true}' --vpc-id $VPC_ID
+
+SUBNET_A=$(aws ec2 create-subnet --vpc-id $VPC_ID --cidr-block 10.0.1.0/24 \
+  --availability-zone ${AWS_REGION}a --query 'Subnet.SubnetId' --output text --region $AWS_REGION)
+SUBNET_C=$(aws ec2 create-subnet --vpc-id $VPC_ID --cidr-block 10.0.2.0/24 \
+  --availability-zone ${AWS_REGION}c --query 'Subnet.SubnetId' --output text --region $AWS_REGION)
+SUBNET_D=$(aws ec2 create-subnet --vpc-id $VPC_ID --cidr-block 10.0.3.0/24 \
+  --availability-zone ${AWS_REGION}d --query 'Subnet.SubnetId' --output text --region $AWS_REGION)
+
+IGW_ID=$(aws ec2 create-internet-gateway --query 'InternetGateway.InternetGatewayId' \
+  --output text --region $AWS_REGION)
+aws ec2 attach-internet-gateway --internet-gateway-id $IGW_ID --vpc-id $VPC_ID
+RTB_ID=$(aws ec2 describe-route-tables --filters "Name=vpc-id,Values=$VPC_ID" \
+  --query 'RouteTables[0].RouteTableId' --output text --region $AWS_REGION)
+aws ec2 create-route --route-table-id $RTB_ID --destination-cidr-block 0.0.0.0/0 --gateway-id $IGW_ID
+aws ec2 modify-subnet-attribute --subnet-id $SUBNET_A --map-public-ip-on-launch
+
+SG_EC2=$(aws ec2 create-security-group --group-name jdbc-cache-test-ec2 \
+  --description "EC2" --vpc-id $VPC_ID --query 'GroupId' --output text --region $AWS_REGION)
+SG_AURORA=$(aws ec2 create-security-group --group-name jdbc-cache-test-aurora \
+  --description "Aurora" --vpc-id $VPC_ID --query 'GroupId' --output text --region $AWS_REGION)
+SG_CACHE=$(aws ec2 create-security-group --group-name jdbc-cache-test-cache \
+  --description "ElastiCache" --vpc-id $VPC_ID --query 'GroupId' --output text --region $AWS_REGION)
+
+aws ec2 authorize-security-group-ingress --group-id $SG_EC2 --protocol tcp --port 22 --cidr $MY_IP
+aws ec2 authorize-security-group-ingress --group-id $SG_AURORA --protocol tcp --port 5432 --source-group $SG_EC2
+aws ec2 authorize-security-group-ingress --group-id $SG_CACHE --protocol tcp --port 6379 --source-group $SG_EC2
+```
+
+### Aurora PostgreSQL Serverless v2
+
+```bash title="Terminal"
+aws rds create-db-subnet-group --db-subnet-group-name jdbc-cache-test \
+  --db-subnet-group-description "JDBC cache test" \
+  --subnet-ids "$SUBNET_A" "$SUBNET_C" "$SUBNET_D" --region $AWS_REGION
+
+aws rds create-db-cluster --db-cluster-identifier jdbc-cache-test \
+  --engine aurora-postgresql --engine-version 16.6 \
+  --master-username postgres --master-user-password '<password>' \
+  --db-subnet-group-name jdbc-cache-test \
+  --vpc-security-group-ids $SG_AURORA \
+  --serverless-v2-scaling-configuration MinCapacity=0.5,MaxCapacity=2 \
+  --storage-encrypted --no-deletion-protection --region $AWS_REGION
+
+aws rds create-db-instance --db-instance-identifier jdbc-cache-test-writer \
+  --db-cluster-identifier jdbc-cache-test \
+  --db-instance-class db.serverless --engine aurora-postgresql --region $AWS_REGION
+
+aws rds wait db-instance-available --db-instance-identifier jdbc-cache-test-writer --region $AWS_REGION
+```
+
+### ElastiCache for Valkey node-based (TLS enabled)
+
+```bash title="Terminal"
+aws elasticache create-cache-subnet-group \
+  --cache-subnet-group-name jdbc-cache-test \
+  --cache-subnet-group-description "JDBC cache test" \
+  --subnet-ids "$SUBNET_A" "$SUBNET_C" "$SUBNET_D" --region $AWS_REGION
+
+aws elasticache create-replication-group \
+  --replication-group-id jdbc-cache-test-tls \
+  --replication-group-description "JDBC cache test node-based TLS" \
+  --engine valkey \
+  --cache-node-type cache.t3.micro \
+  --num-cache-clusters 1 \
+  --cache-subnet-group-name jdbc-cache-test \
+  --security-group-ids $SG_CACHE \
+  --transit-encryption-enabled \
+  --region $AWS_REGION
+
+aws elasticache wait replication-group-available \
+  --replication-group-id jdbc-cache-test-tls --region $AWS_REGION
+```
+
+### ElastiCache for Valkey Serverless
+
+```bash title="Terminal"
+aws elasticache create-serverless-cache \
+  --serverless-cache-name jdbc-cache-test \
+  --engine valkey \
+  --subnet-ids "$SUBNET_A" "$SUBNET_C" "$SUBNET_D" \
+  --security-group-ids $SG_CACHE --region $AWS_REGION
+```
+
+### EC2 instance
+
+```bash title="Terminal"
+AMI_ID=$(aws ec2 describe-images --owners amazon \
+  --filters "Name=name,Values=al2023-ami-2023.*-x86_64" "Name=state,Values=available" \
+  --query 'sort_by(Images, &CreationDate)[-1].ImageId' --output text --region $AWS_REGION)
+
+aws ec2 create-key-pair --key-name jdbc-cache-test --key-type ed25519 \
+  --query 'KeyMaterial' --output text > jdbc-cache-test.pem
+chmod 600 jdbc-cache-test.pem
+
+aws ec2 run-instances --image-id $AMI_ID --instance-type t3.small \
+  --key-name jdbc-cache-test --security-group-ids $SG_EC2 \
+  --subnet-id $SUBNET_A \
+  --tag-specifications 'ResourceType=instance,Tags=[{Key=Name,Value=jdbc-cache-test}]' \
+  --region $AWS_REGION
+
+ssh ec2-user@<public-ip> 'sudo dnf install -y java-21-amazon-corretto-devel maven postgresql16'
+```
+
+### Test data (1 million rows)
+
+```bash title="Terminal"
+PGPASSWORD='<password>' psql -h <aurora-endpoint> -U postgres -d postgres -c "
+CREATE TABLE products (
+  id SERIAL PRIMARY KEY,
+  name VARCHAR(100) NOT NULL,
+  category VARCHAR(50) NOT NULL,
+  price NUMERIC(10,2) NOT NULL,
+  stock INT NOT NULL DEFAULT 0
+);
+INSERT INTO products (name, category, price, stock)
+SELECT
+  'Product-' || i,
+  (ARRAY['laptop','phone','tablet','audio','camera','monitor','keyboard','mouse'])[1 + (i % 8)],
+  (random() * 500000 + 1000)::numeric(10,2),
+  (random() * 1000)::int
+FROM generate_series(1, 1000000) AS i;
+ANALYZE products;
+"
+```
+
+</details>
+
+## Spring Boot Application
+
+### application.yml
+
+The key is `spring.datasource.hikari.data-source-properties`. Properties set here are passed by HikariCP to the JDBC driver when creating connections.
+
+```yaml title="application.yml (node-based TLS)"
+spring:
+  datasource:
+    url: jdbc:aws-wrapper:postgresql://<aurora-endpoint>:5432/postgres
+    username: postgres
+    password: <password>
+    driver-class-name: software.amazon.jdbc.Driver
+    hikari:
+      data-source-properties:
+        wrapperPlugins: remoteQueryCache
+        cacheEndpointAddrRw: <cache-endpoint>:6379
+```
+
+Three key points:
+
+- Set the URL scheme to `jdbc:aws-wrapper:postgresql://`
+- Set `driver-class-name` to `software.amazon.jdbc.Driver`
+- Add `wrapperPlugins` and `cacheEndpointAddrRw` under `data-source-properties`
+
+For node-based TLS, `cacheUseSSL` defaults to `true` so no explicit setting is needed. For node-based without TLS, add `cacheUseSSL: "false"`. For Serverless, just swap the endpoint — all other settings are the same.
+
+### Controller
+
+Add a `/* CACHE_PARAM(ttl=Xs) */` hint to queries you want cached. Queries without the hint execute directly against the DB as usual.
+
+```java title="Java (cached query)"
+@GetMapping("/stats")
+public List<Map<String, Object>> categoryStats() {
+    return jdbc.queryForList(
+        "/* CACHE_PARAM(ttl=300s) */ "
+        + "SELECT category, COUNT(*) as cnt, "
+        + "AVG(price)::numeric(10,2) as avg_price "
+        + "FROM products GROUP BY category ORDER BY cnt DESC");
+}
+```
+
+### ApplicationRunner warmup
+
+As confirmed in the [third article](/en/blog/2026/03/30/jdbc-query-cache-valkey-serverless-workaround), Serverless has an initial connection timeout. In Spring Boot, use `ApplicationRunner` to run warmup automatically at startup.
+
+```java title="Java (CacheWarmupRunner.java)"
+@Component
+public class CacheWarmupRunner implements ApplicationRunner {
+    private final DataSource dataSource;
+
+    public CacheWarmupRunner(DataSource dataSource) {
+        this.dataSource = dataSource;
+    }
+
+    @Override
+    public void run(ApplicationArguments args) throws Exception {
+        log.info("[Warmup] Sending dummy query...");
+        try (Connection conn = dataSource.getConnection();
+             Statement stmt = conn.createStatement();
+             ResultSet rs = stmt.executeQuery(
+                 "/* CACHE_PARAM(ttl=1s) */ SELECT 1")) {
+            rs.next();
+        }
+        log.info("[Warmup] Waiting 5 seconds for CacheMonitor recovery...");
+        Thread.sleep(5000);
+        log.info("[Warmup] Done. Cache is ready.");
+    }
+}
+```
+
+For node-based clusters, warmup is not strictly required since there's no initial timeout. However, as shown in the verification below, warmup still improves first-request latency even with node-based clusters.
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">pom.xml (full)</summary>
+
+```xml title="pom.xml"
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0
+           https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+    <parent>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-starter-parent</artifactId>
+        <version>3.4.4</version>
+    </parent>
+    <groupId>cachetest</groupId>
+    <artifactId>spring-cache-test</artifactId>
+    <version>1.0</version>
+    <properties>
+        <java.version>21</java.version>
+    </properties>
+    <dependencies>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-web</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-jdbc</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>software.amazon.jdbc</groupId>
+            <artifactId>aws-advanced-jdbc-wrapper</artifactId>
+            <version>3.3.0</version>
+        </dependency>
+        <dependency>
+            <groupId>org.postgresql</groupId>
+            <artifactId>postgresql</artifactId>
+            <version>42.7.8</version>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.commons</groupId>
+            <artifactId>commons-pool2</artifactId>
+            <version>2.12.0</version>
+        </dependency>
+        <dependency>
+            <groupId>io.valkey</groupId>
+            <artifactId>valkey-glide</artifactId>
+            <version>2.3.0</version>
+        </dependency>
+    </dependencies>
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>org.springframework.boot</groupId>
+                <artifactId>spring-boot-maven-plugin</artifactId>
+            </plugin>
+        </plugins>
+    </build>
+</project>
+```
+
+The 3 dependencies to add to an existing project are `aws-advanced-jdbc-wrapper`, `commons-pool2`, and `valkey-glide`. `postgresql` is typically already present.
+
+</details>
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">Full source code (Application.java / ProductController.java / CacheWarmupRunner.java)</summary>
+
+```java title="Application.java"
+package cachetest;
+
+import org.springframework.boot.SpringApplication;
+import org.springframework.boot.autoconfigure.SpringBootApplication;
+
+@SpringBootApplication
+public class Application {
+    public static void main(String[] args) {
+        SpringApplication.run(Application.class, args);
+    }
+}
+```
+
+```java title="ProductController.java"
+package cachetest;
+
+import java.util.List;
+import java.util.Map;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.RestController;
+
+@RestController
+public class ProductController {
+    private final JdbcTemplate jdbc;
+
+    public ProductController(JdbcTemplate jdbc) {
+        this.jdbc = jdbc;
+    }
+
+    @GetMapping("/stats")
+    public List<Map<String, Object>> categoryStats() {
+        return jdbc.queryForList(
+            "/* CACHE_PARAM(ttl=300s) */ "
+            + "SELECT category, COUNT(*) as cnt, "
+            + "AVG(price)::numeric(10,2) as avg_price "
+            + "FROM products GROUP BY category "
+            + "ORDER BY cnt DESC");
+    }
+
+    @GetMapping("/stats/nocache")
+    public List<Map<String, Object>> categoryStatsNoCache() {
+        return jdbc.queryForList(
+            "SELECT category, COUNT(*) as cnt, "
+            + "AVG(price)::numeric(10,2) as avg_price "
+            + "FROM products GROUP BY category "
+            + "ORDER BY cnt DESC");
+    }
+}
+```
+
+```java title="CacheWarmupRunner.java"
+package cachetest;
+
+import java.sql.Connection;
+import java.sql.ResultSet;
+import java.sql.Statement;
+import javax.sql.DataSource;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.boot.ApplicationArguments;
+import org.springframework.boot.ApplicationRunner;
+import org.springframework.stereotype.Component;
+
+@Component
+public class CacheWarmupRunner implements ApplicationRunner {
+    private static final Logger log =
+        LoggerFactory.getLogger(CacheWarmupRunner.class);
+    private final DataSource dataSource;
+
+    public CacheWarmupRunner(DataSource dataSource) {
+        this.dataSource = dataSource;
+    }
+
+    @Override
+    public void run(ApplicationArguments args) throws Exception {
+        log.info("[Warmup] Sending dummy query to "
+            + "initialize cache connection...");
+        long start = System.currentTimeMillis();
+        try (Connection conn = dataSource.getConnection();
+             Statement stmt = conn.createStatement();
+             ResultSet rs = stmt.executeQuery(
+                 "/* CACHE_PARAM(ttl=1s) */ SELECT 1")) {
+            rs.next();
+        }
+        log.info("[Warmup] Dummy query completed in {} ms",
+            System.currentTimeMillis() - start);
+        log.info("[Warmup] Waiting 5 seconds for "
+            + "CacheMonitor recovery...");
+        Thread.sleep(5000);
+        log.info("[Warmup] Done. Cache is ready.");
+    }
+}
+```
+
+</details>
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">Build and run</summary>
+
+```bash title="Terminal"
+export JAVA_HOME=/usr/lib/jvm/java-21-amazon-corretto
+cd spring-cache-test && mvn package -q -DskipTests
+
+java -jar target/spring-cache-test-1.0.jar
+```
+
+Access from another terminal with `curl http://localhost:8080/stats`.
+
+</details>
+
+## Verification 1: Node-Based + TLS
+
+### Without warmup
+
+With `CacheWarmupRunner` disabled (`@Component` commented out):
+
+```text title="Output"
+=== Node-based TLS, no warmup ===
+  Request 1: 2443 ms
+  Request 2: 25 ms
+  Request 3: 21 ms
+  Request 4: 20 ms
+  Request 5: 19 ms
+```
+
+Request 1 at 2443ms. In the [third article](/en/blog/2026/03/30/jdbc-query-cache-valkey-serverless-workaround)'s plain JDBC test, node-based+TLS had no initial timeout (910ms). The additional latency comes from HikariCP connection pool initialization + TLS handshake + cache plugin initialization overhead in the Spring Boot stack.
+
+### With warmup
+
+Startup log shows the dummy query completed in 1907ms with no TimeoutException:
+
+```text title="Output (startup log)"
+[Warmup] Dummy query completed in 1907 ms
+[Warmup] Waiting 5 seconds for CacheMonitor recovery...
+[Warmup] Done. Cache is ready.
+```
+
+```text title="Output"
+=== Node-based TLS, with warmup ===
+  Request 1: 264 ms
+  Request 2: 21 ms
+  Request 3: 85 ms
+  Request 4: 40 ms
+  Request 5: 22 ms
+```
+
+**Warmup improved Request 1 from 2443ms to 264ms.** The dummy query handles HikariCP pool initialization and cache plugin setup, so the first user request only needs cache miss → DB access → cache write.
+
+Requests 2+ at 21-85ms. Higher than plain JDBC tests (2-8ms) due to HTTP processing, HikariCP connection borrow, and JSON serialization overhead.
+
+## Verification 2: Serverless
+
+Swapped `cacheEndpointAddrRw` in `application.yml` to the Serverless endpoint.
+
+### Without warmup
+
+```text title="Output"
+=== Serverless, no warmup ===
+  Request 1: 4461 ms
+  Request 2: 25 ms
+  Request 3: 20 ms
+  Request 4: 20 ms
+  Request 5: 18 ms
+```
+
+Request 1 at 4461ms — the Serverless-specific initial timeout (TimeoutException) plus HikariCP initialization. About 2 seconds slower than node-based (2443ms).
+
+### With warmup
+
+Startup log shows TimeoutException absorbed by warmup:
+
+```text title="Output (startup log)"
+[Warmup] Dummy query completed in 4007 ms
+[Warmup] Waiting 5 seconds for CacheMonitor recovery...
+[Warmup] Done. Cache is ready.
+```
+
+```text title="Output"
+=== Serverless, with warmup ===
+  Request 1: 698 ms
+  Request 2: 23 ms
+  Request 3: 19 ms
+  Request 4: 19 ms
+  Request 5: 52 ms
+```
+
+**Warmup improved Request 1 from 4461ms to 698ms.** Requests 2+ at 19-52ms.
+
+### Stability (20 requests)
+
+With warmup enabled on Serverless, 20 consecutive requests:
+
+```text title="Output"
+=== Serverless, with warmup (20 requests) ===
+  Request  1: 20 ms    Request 11: 17 ms
+  Request  2: 19 ms    Request 12: 52 ms
+  Request  3: 18 ms    Request 13: 43 ms
+  Request  4: 18 ms    Request 14: 18 ms
+  Request  5: 17 ms    Request 15: 17 ms
+  Request  6: 20 ms    Request 16: 16 ms
+  Request  7: 19 ms    Request 17: 16 ms
+  Request  8: 18 ms    Request 18: 16 ms
+  Request  9: 17 ms    Request 19: 16 ms
+  Request 10: 16 ms    Request 20: 16 ms
+```
+
+18 of 20 at 16-20ms, 2 sporadic spikes at 43-52ms — the same CacheMonitor health check pattern observed in the [fourth article](/en/blog/2026/03/30/jdbc-query-cache-valkey-serverless-long-running).
+
+## Configuration Comparison
+
+| Configuration | Warmup | Request 1 | Request 2-5 | Notes |
+| --- | --- | --- | --- | --- |
+| Node-based+TLS | No | 2443ms | 19-25ms | HikariCP init overhead |
+| Node-based+TLS | Yes | 264ms | 21-85ms | Warmup handles init |
+| Serverless | No | 4461ms | 18-25ms | Timeout + HikariCP init |
+| Serverless | Yes | 698ms | 19-52ms | Warmup absorbs timeout |
+| No cache | — | 248ms | 196-248ms | Always hits DB |
+
+**Warmup is beneficial for both configurations.** Especially for Serverless (4461ms → 698ms), but also for node-based (2443ms → 264ms). In a Spring Boot + HikariCP environment, `ApplicationRunner` warmup is recommended regardless of ElastiCache configuration.
+
+## Summary
+
+- **Works with just application.yml config** — Change `driver-class-name` to `software.amazon.jdbc.Driver` and add `wrapperPlugins` and `cacheEndpointAddrRw` under `data-source-properties`. No changes to existing query logic required
+- **Warmup via ApplicationRunner** — Get a connection from `DataSource`, send a dummy query, wait 5 seconds. Essential for Serverless, recommended for node-based
+- **Minimal changes to existing apps** — 3 dependencies in pom.xml, 2 lines in application.yml, 1 ApplicationRunner file, cache hints on target queries. No structural changes to application code
+
+This article demonstrated integration with Spring JDBC (`JdbcTemplate`), but the same `application.yml` configuration works with Spring Data JPA (Hibernate). For JPA, cache hints are specified differently using `@QueryHint` annotations or `Query.setHint()`. See the [official documentation's Hibernate section](https://github.com/aws/aws-advanced-jdbc-wrapper/blob/main/docs/using-the-jdbc-driver/using-plugins/UsingTheRemoteQueryCachePlugin.md) for details.
+
+## Cleanup
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">Resource deletion commands</summary>
+
+```bash title="Terminal"
+# ElastiCache node-based TLS
+aws elasticache delete-replication-group \
+  --replication-group-id jdbc-cache-test-tls \
+  --no-final-snapshot-identifier \
+  --region ap-northeast-1
+
+# ElastiCache Serverless
+aws elasticache delete-serverless-cache \
+  --serverless-cache-name jdbc-cache-test \
+  --region ap-northeast-1
+
+# Aurora
+aws rds delete-db-instance --db-instance-identifier jdbc-cache-test-writer \
+  --skip-final-snapshot --region ap-northeast-1
+aws rds wait db-instance-deleted \
+  --db-instance-identifier jdbc-cache-test-writer --region ap-northeast-1
+aws rds delete-db-cluster --db-cluster-identifier jdbc-cache-test \
+  --skip-final-snapshot --region ap-northeast-1
+
+# EC2
+aws ec2 terminate-instances --instance-ids <instance-id> --region ap-northeast-1
+
+# Wait for deletions, then remove network resources
+aws ec2 delete-key-pair --key-name jdbc-cache-test --region ap-northeast-1
+aws ec2 delete-security-group --group-id <sg-aurora> --region ap-northeast-1
+aws ec2 delete-security-group --group-id <sg-cache> --region ap-northeast-1
+aws ec2 delete-security-group --group-id <sg-ec2> --region ap-northeast-1
+aws elasticache delete-cache-subnet-group \
+  --cache-subnet-group-name jdbc-cache-test --region ap-northeast-1
+aws rds delete-db-subnet-group \
+  --db-subnet-group-name jdbc-cache-test --region ap-northeast-1
+aws ec2 detach-internet-gateway \
+  --internet-gateway-id <igw-id> --vpc-id <vpc-id> --region ap-northeast-1
+aws ec2 delete-internet-gateway \
+  --internet-gateway-id <igw-id> --region ap-northeast-1
+aws ec2 delete-subnet --subnet-id <subnet-a> --region ap-northeast-1
+aws ec2 delete-subnet --subnet-id <subnet-c> --region ap-northeast-1
+aws ec2 delete-subnet --subnet-id <subnet-d> --region ap-northeast-1
+aws ec2 delete-vpc --vpc-id <vpc-id> --region ap-northeast-1
+```
+
+</details>

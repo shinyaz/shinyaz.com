@@ -1,0 +1,15 @@
+---
+title: "ElastiCache Serverless の初回レイテンシは公式ドキュメントに記載がある"
+description: "「初回リクエストは通常より高レイテンシになる」ことが AWS 公式トラブルシューティングガイドの Reuse connections セクションに明記されている。"
+date: "2026-03-30"
+published: true
+tags: ["aws", "elasticache", "valkey", "serverless"]
+---
+
+ElastiCache Serverless で初回接続が遅い問題に遭遇したとき、AWS 側のバグかと思ったが、実は[公式トラブルシューティングガイド](https://docs.aws.amazon.com/AmazonElastiCache/latest/dg/wwe-troubleshooting.html)の「Reuse connections」セクションに明記されていた。
+
+> Initiating the connection (including authenticating the connection, if configured) takes time so the latency of the first request is higher than typical. Requests over an already initialized connection deliver ElastiCache's consistent low latency.
+
+AWS 自身が「初回リクエストは通常より高レイテンシになる」と認めており、対策として「接続プーリングまたは既存接続の再利用」を推奨している。
+
+JDBC Wrapper の Remote Query Cache Plugin で検証したところ、Serverless の初回接続は約2.5〜4秒かかり、プラグイン内部のタイムアウト（2秒）を超えて `TimeoutException` が発生した。ウォームアップ接続で事前に TLS ハンドシェイクを済ませることで回避できる。

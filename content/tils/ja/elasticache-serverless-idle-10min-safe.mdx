@@ -1,0 +1,13 @@
+---
+title: "ElastiCache Serverless の接続は10分アイドルでは切断されない"
+description: "公式ドキュメントではアイドルタイムアウトが非公開だが、実機検証で10分のアイドル後もキャッシュ接続が維持されることを確認した。"
+date: "2026-03-30"
+published: true
+tags: ["aws", "elasticache", "valkey", "serverless"]
+---
+
+ElastiCache Serverless のサーバー側アイドルタイムアウトについて、[公式ドキュメント](https://docs.aws.amazon.com/AmazonElastiCache/latest/dg/BestPractices.Clients.Redis.ServerTimeout.html)には「This setting is not available on serverless caches」とだけ書かれており、Serverless がアイドル接続をいつ切断するかは非公開だ。
+
+JDBC Wrapper の Remote Query Cache Plugin で検証したところ、ウォームアップ後に5分間クエリを実行し、10分間完全にアイドルにした後、再度クエリを実行しても **タイムアウトは再発しなかった**。Post-idle フェーズは30クエリ全てキャッシュヒット（最大 21ms）だった。
+
+少なくとも10分程度のアイドルであれば、定期的なキープアライブクエリは不要だ。30分〜1時間のアイドルでどうなるかは未検証。

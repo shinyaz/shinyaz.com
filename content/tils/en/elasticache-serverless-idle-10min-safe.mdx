@@ -1,0 +1,13 @@
+---
+title: "ElastiCache Serverless connections survive 10 minutes of idle"
+description: "Official docs don't disclose the idle timeout for Serverless. Empirically confirmed that connections survive at least 10 minutes of idle with no timeout recurrence."
+date: "2026-03-30"
+published: true
+tags: ["aws", "elasticache", "valkey", "serverless"]
+---
+
+The [official documentation](https://docs.aws.amazon.com/AmazonElastiCache/latest/dg/BestPractices.Clients.Redis.ServerTimeout.html) on server-side idle timeout for ElastiCache states "This setting is not available on serverless caches" — meaning when Serverless disconnects idle connections is undisclosed.
+
+Testing with the JDBC Wrapper's Remote Query Cache Plugin, I ran queries for 5 minutes, idled for 10 minutes, then resumed. **No timeout recurred.** The post-idle phase hit the cache on all 30 queries (max 21ms).
+
+At least for 10-minute idle periods, periodic keepalive queries are unnecessary. Behavior with 30-60 minute idle periods remains untested.
