@@ -426,6 +426,8 @@ However, after CacheMonitor recovered to HEALTHY, cache hits stabilized at 1-2ms
 
 With ElastiCache Serverless, the initial connection timeout and CacheMonitor instability are significant concerns. As confirmed in the [node-based article](/en/blog/2026/03/27/jdbc-query-cache-valkey-node-based), a node-based ElastiCache cluster (without TLS) does not exhibit these issues and works correctly from the first query. I strongly recommend testing with your actual query patterns and latency requirements before production adoption.
 
+In the [next article](/en/blog/2026/03/30/jdbc-query-cache-valkey-serverless-workaround), we isolate whether the root cause is TLS itself or something Serverless-specific, and test an application-side warmup workaround.
+
 ## Cleanup
 
 <details className="my-4 rounded-lg border border-border bg-muted/30 p-4">

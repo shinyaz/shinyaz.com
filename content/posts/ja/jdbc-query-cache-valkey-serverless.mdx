@@ -427,6 +427,8 @@ ANALYZE products;
 
 ElastiCache Serverless との組み合わせでは、初回接続のタイムアウトと CacheMonitor の不安定さが課題だ。[1本目の記事](/ja/blog/2026/03/27/jdbc-query-cache-valkey-node-based)で検証した通り、ノードベースの ElastiCache クラスター（TLS なし）ではこれらの問題は発生せず、初回から正常に動作する。本番導入を検討する場合は、実際のクエリパターンとレイテンシ要件で事前検証することを強く推奨する。
 
+[次回の記事](/ja/blog/2026/03/30/jdbc-query-cache-valkey-serverless-workaround)では、この初回タイムアウトの原因がTLS自体なのかServerless固有なのかを切り分け、アプリ側のウォームアップによる回避策を検証する。
+
 ## クリーンアップ
 
 <details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
