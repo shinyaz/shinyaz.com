@@ -110,5 +110,6 @@ export const ja = {
   footer: {
     copyright: "All rights reserved.",
     privacy: "プライバシーポリシー",
+    colophon: "サイト構成",
   },
 } as const;

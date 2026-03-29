@@ -27,12 +27,6 @@ export function Header({ locale }: HeaderProps) {
           <Link href={`/${locale}/series`} className="text-sm text-muted-foreground hover:text-foreground transition-colors">
             {t.nav.series}
           </Link>
-          <Link href={`/${locale}/projects`} className="text-sm text-muted-foreground hover:text-foreground transition-colors">
-            {t.nav.projects}
-          </Link>
-          <Link href={`/${locale}/uses`} className="text-sm text-muted-foreground hover:text-foreground transition-colors">
-            {t.nav.uses}
-          </Link>
           <Link href={`/${locale}/now`} className="text-sm text-muted-foreground hover:text-foreground transition-colors">
             {t.nav.now}
           </Link>
