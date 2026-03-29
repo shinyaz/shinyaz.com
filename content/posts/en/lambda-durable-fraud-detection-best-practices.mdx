@@ -13,7 +13,7 @@ seriesOrder: 2
 
 ## Introduction
 
-[Part 1](/en/blog/2026/03/26/lambda-durable-fraud-detection-overview) covered the demo overview and basic behavior across three risk patterns. This article verifies the six best practices from the [AWS Compute Blog post](https://aws.amazon.com/blogs/compute/best-practices-for-lambda-durable-functions-using-a-fraud-detection-example/).
+[Part 1](/en/blog/2026/03/30/lambda-durable-fraud-detection-overview) covered the demo overview and basic behavior across three risk patterns. This article verifies the six best practices from the [AWS Compute Blog post](https://aws.amazon.com/blogs/compute/best-practices-for-lambda-durable-functions-using-a-fraud-detection-example/).
 
 The common principle across all six best practices is "design assuming replay will happen." Durable Functions use a checkpoint-and-replay model, meaning steps can execute more than once. Without understanding this, you risk duplicate charges or indefinite waits.
 
@@ -241,4 +241,4 @@ Unifying principle: design assuming replay will happen
 - **Design timeout hierarchies deliberately** — Callback timeout (24h) < ExecutionTimeout (25h) < max execution lifetime (1 year). Verify that each layer nests correctly.
 - **The ESM intermediary pattern is common in production** — Event-driven processing from SQS or Kinesis is standard in financial systems. The intermediary Lambda + Powertools idempotency + DLQ combination is a pattern worth internalizing.
 
-Next: [Part 3](/en/blog/2026/03/26/lambda-durable-fraud-detection-operations) shares practical insights from deployment, testing, and operations.
+Next: [Part 3](/en/blog/2026/03/30/lambda-durable-fraud-detection-operations) shares practical insights from deployment, testing, and operations.

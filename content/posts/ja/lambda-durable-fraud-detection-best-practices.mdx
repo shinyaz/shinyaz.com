@@ -13,7 +13,7 @@ seriesOrder: 2
 
 ## はじめに
 
-[Part 1](/ja/blog/2026/03/26/lambda-durable-fraud-detection-overview) では不正検知デモの全体像と3パターンの基本動作を確認した。本記事では、[AWS Compute Blog の記事](https://aws.amazon.com/blogs/compute/best-practices-for-lambda-durable-functions-using-a-fraud-detection-example/)に記載された6つのベストプラクティスを実機検証する。
+[Part 1](/ja/blog/2026/03/30/lambda-durable-fraud-detection-overview) では不正検知デモの全体像と3パターンの基本動作を確認した。本記事では、[AWS Compute Blog の記事](https://aws.amazon.com/blogs/compute/best-practices-for-lambda-durable-functions-using-a-fraud-detection-example/)に記載された6つのベストプラクティスを実機検証する。
 
 6つのベストプラクティスに共通する原則は「リプレイされる前提で設計する」ことだ。Durable Functions はチェックポイント＆リプレイモデルで動作するため、ステップは複数回実行される可能性がある。この前提を理解していないと、重複課金や無限待機といった問題が発生する。
 
@@ -241,4 +241,4 @@ try {
 - **タイムアウトの階層設計を意識する** — コールバックタイムアウト（24時間）< ExecutionTimeout（25時間）< 最大実行期間（1年）。各レイヤーのタイムアウトが正しく入れ子になっていることを確認する。
 - **ESM 経由のパターンは本番で頻出する** — SQS や Kinesis からのイベント駆動は金融系で一般的だ。中間 Lambda + Powertools の冪等性 + DLQ の組み合わせを標準パターンとして押さえておくとよい。
 
-次の [Part 3](/ja/blog/2026/03/26/lambda-durable-fraud-detection-operations) では、デプロイ・テスト・運用で得た実践的な知見を共有する。
+次の [Part 3](/ja/blog/2026/03/30/lambda-durable-fraud-detection-operations) では、デプロイ・テスト・運用で得た実践的な知見を共有する。
