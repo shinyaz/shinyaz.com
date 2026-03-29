@@ -1,0 +1,652 @@
+---
+title: "JDBC Wrapper Valkey Cache — Isolating the Serverless Timeout Root Cause and a Warmup Workaround"
+description: "Compared node-based+TLS to confirm the initial timeout is Serverless-specific. A warmup connection with a 5-second wait recovers CacheMonitor to healthy state, making Serverless viable for production."
+date: 2026-03-30
+published: true
+featured: false
+categories:
+  - infrastructure
+tags: ["aws", "aurora", "postgresql", "elasticache", "valkey", "java", "jdbc", "database"]
+series: "jdbc-query-cache-valkey"
+seriesOrder: 3
+---
+
+## Introduction
+
+In the [previous article](/en/blog/2026/03/27/jdbc-query-cache-valkey-serverless), we discovered that combining ElastiCache for Valkey Serverless with the JDBC Wrapper's Remote Query Cache Plugin **always causes a timeout on the first connection, pushing CacheMonitor into SUSPECT state**.
+
+Two questions remained:
+
+1. **Is the root cause TLS itself, or something Serverless-specific?** — The [first article](/en/blog/2026/03/27/jdbc-query-cache-valkey-node-based) used a node-based cluster without TLS, so we couldn't rule out TLS as the culprit
+2. **Can an application-side workaround avoid the issue?** — If we can absorb the initial timeout before user requests arrive, we can keep Serverless's operational benefits (no scaling management, lower overhead)
+
+This article answers both questions with hands-on verification. See the official documentation at [Remote Query Cache Plugin](https://github.com/aws/aws-advanced-jdbc-wrapper/blob/main/docs/using-the-jdbc-driver/using-plugins/UsingTheRemoteQueryCachePlugin.md).
+
+Skip to [Configuration Comparison](#configuration-comparison) if you only want the findings.
+
+## Test Environment
+
+| Item | Value |
+| --- | --- |
+| Region | ap-northeast-1 (Tokyo) |
+| DB | Aurora PostgreSQL Serverless v2 (16.6, 0.5-2 ACU) |
+| Cache ① | ElastiCache for Valkey Serverless (Valkey 8) |
+| Cache ② | ElastiCache for Valkey node-based (cache.t3.micro, TLS enabled) |
+| Client | EC2 t3.small (Amazon Linux 2023, same VPC) |
+| Java | Amazon Corretto 21 |
+| AWS JDBC Wrapper | 3.3.0 |
+| PostgreSQL JDBC | 42.7.8 |
+| Valkey Glide | 2.3.0 |
+| Test data | products table, 1 million rows |
+
+Prerequisites:
+
+- AWS CLI configured (`rds:*`, `elasticache:*`, `ec2:*` permissions)
+- Java 21 + Maven
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">Infrastructure setup (VPC / Aurora / ElastiCache × 2 / EC2)</summary>
+
+### VPC, subnets, and security groups
+
+```bash title="Terminal"
+export AWS_REGION=ap-northeast-1
+MY_IP="$(curl -s https://checkip.amazonaws.com)/32"
+
+# VPC
+VPC_ID=$(aws ec2 create-vpc --cidr-block 10.0.0.0/16 \
+  --tag-specifications 'ResourceType=vpc,Tags=[{Key=Name,Value=jdbc-cache-test}]' \
+  --query 'Vpc.VpcId' --output text --region $AWS_REGION)
+aws ec2 modify-vpc-attribute --enable-dns-hostnames '{"Value":true}' --vpc-id $VPC_ID
+
+# Subnets (3 AZs)
+SUBNET_A=$(aws ec2 create-subnet --vpc-id $VPC_ID --cidr-block 10.0.1.0/24 \
+  --availability-zone ${AWS_REGION}a --query 'Subnet.SubnetId' --output text --region $AWS_REGION)
+SUBNET_C=$(aws ec2 create-subnet --vpc-id $VPC_ID --cidr-block 10.0.2.0/24 \
+  --availability-zone ${AWS_REGION}c --query 'Subnet.SubnetId' --output text --region $AWS_REGION)
+SUBNET_D=$(aws ec2 create-subnet --vpc-id $VPC_ID --cidr-block 10.0.3.0/24 \
+  --availability-zone ${AWS_REGION}d --query 'Subnet.SubnetId' --output text --region $AWS_REGION)
+
+# IGW (for SSH to EC2)
+IGW_ID=$(aws ec2 create-internet-gateway --query 'InternetGateway.InternetGatewayId' \
+  --output text --region $AWS_REGION)
+aws ec2 attach-internet-gateway --internet-gateway-id $IGW_ID --vpc-id $VPC_ID
+RTB_ID=$(aws ec2 describe-route-tables --filters "Name=vpc-id,Values=$VPC_ID" \
+  --query 'RouteTables[0].RouteTableId' --output text --region $AWS_REGION)
+aws ec2 create-route --route-table-id $RTB_ID --destination-cidr-block 0.0.0.0/0 --gateway-id $IGW_ID
+aws ec2 modify-subnet-attribute --subnet-id $SUBNET_A --map-public-ip-on-launch
+
+# Security groups
+SG_EC2=$(aws ec2 create-security-group --group-name jdbc-cache-test-ec2 \
+  --description "EC2" --vpc-id $VPC_ID --query 'GroupId' --output text --region $AWS_REGION)
+SG_AURORA=$(aws ec2 create-security-group --group-name jdbc-cache-test-aurora \
+  --description "Aurora" --vpc-id $VPC_ID --query 'GroupId' --output text --region $AWS_REGION)
+SG_CACHE=$(aws ec2 create-security-group --group-name jdbc-cache-test-cache \
+  --description "ElastiCache" --vpc-id $VPC_ID --query 'GroupId' --output text --region $AWS_REGION)
+
+aws ec2 authorize-security-group-ingress --group-id $SG_EC2 --protocol tcp --port 22 --cidr $MY_IP
+aws ec2 authorize-security-group-ingress --group-id $SG_AURORA --protocol tcp --port 5432 --source-group $SG_EC2
+aws ec2 authorize-security-group-ingress --group-id $SG_CACHE --protocol tcp --port 6379 --source-group $SG_EC2
+```
+
+### Aurora PostgreSQL Serverless v2
+
+```bash title="Terminal"
+aws rds create-db-subnet-group --db-subnet-group-name jdbc-cache-test \
+  --db-subnet-group-description "JDBC cache test" \
+  --subnet-ids "$SUBNET_A" "$SUBNET_C" "$SUBNET_D" --region $AWS_REGION
+
+aws rds create-db-cluster --db-cluster-identifier jdbc-cache-test \
+  --engine aurora-postgresql --engine-version 16.6 \
+  --master-username postgres --master-user-password '<password>' \
+  --db-subnet-group-name jdbc-cache-test \
+  --vpc-security-group-ids $SG_AURORA \
+  --serverless-v2-scaling-configuration MinCapacity=0.5,MaxCapacity=2 \
+  --storage-encrypted --no-deletion-protection --region $AWS_REGION
+
+aws rds create-db-instance --db-instance-identifier jdbc-cache-test-writer \
+  --db-cluster-identifier jdbc-cache-test \
+  --db-instance-class db.serverless --engine aurora-postgresql --region $AWS_REGION
+
+aws rds wait db-instance-available --db-instance-identifier jdbc-cache-test-writer --region $AWS_REGION
+```
+
+### ElastiCache for Valkey node-based (TLS enabled)
+
+```bash title="Terminal"
+aws elasticache create-cache-subnet-group \
+  --cache-subnet-group-name jdbc-cache-test \
+  --cache-subnet-group-description "JDBC cache test" \
+  --subnet-ids "$SUBNET_A" "$SUBNET_C" "$SUBNET_D" --region $AWS_REGION
+
+aws elasticache create-replication-group \
+  --replication-group-id jdbc-cache-test-tls \
+  --replication-group-description "JDBC cache test node-based TLS" \
+  --engine valkey \
+  --cache-node-type cache.t3.micro \
+  --num-cache-clusters 1 \
+  --cache-subnet-group-name jdbc-cache-test \
+  --security-group-ids $SG_CACHE \
+  --transit-encryption-enabled \
+  --region $AWS_REGION
+
+aws elasticache wait replication-group-available \
+  --replication-group-id jdbc-cache-test-tls --region $AWS_REGION
+```
+
+Adding `--transit-encryption-enabled` is all it takes. For node-based clusters, the default `transit-encryption-mode` is `required`, so only encrypted connections are allowed.
+
+### ElastiCache for Valkey Serverless
+
+```bash title="Terminal"
+aws elasticache create-serverless-cache \
+  --serverless-cache-name jdbc-cache-test \
+  --engine valkey \
+  --subnet-ids "$SUBNET_A" "$SUBNET_C" "$SUBNET_D" \
+  --security-group-ids $SG_CACHE --region $AWS_REGION
+```
+
+### EC2 instance
+
+```bash title="Terminal"
+AMI_ID=$(aws ec2 describe-images --owners amazon \
+  --filters "Name=name,Values=al2023-ami-2023.*-x86_64" "Name=state,Values=available" \
+  --query 'sort_by(Images, &CreationDate)[-1].ImageId' --output text --region $AWS_REGION)
+
+aws ec2 create-key-pair --key-name jdbc-cache-test --key-type ed25519 \
+  --query 'KeyMaterial' --output text > jdbc-cache-test.pem
+chmod 600 jdbc-cache-test.pem
+
+aws ec2 run-instances --image-id $AMI_ID --instance-type t3.small \
+  --key-name jdbc-cache-test --security-group-ids $SG_EC2 \
+  --subnet-id $SUBNET_A \
+  --tag-specifications 'ResourceType=instance,Tags=[{Key=Name,Value=jdbc-cache-test}]' \
+  --region $AWS_REGION
+
+ssh ec2-user@<public-ip> 'sudo dnf install -y java-21-amazon-corretto-devel maven postgresql16'
+```
+
+### Test data (1 million rows)
+
+```bash title="Terminal"
+PGPASSWORD='<password>' psql -h <aurora-endpoint> -U postgres -d postgres -c "
+CREATE TABLE products (
+  id SERIAL PRIMARY KEY,
+  name VARCHAR(100) NOT NULL,
+  category VARCHAR(50) NOT NULL,
+  price NUMERIC(10,2) NOT NULL,
+  stock INT NOT NULL DEFAULT 0
+);
+INSERT INTO products (name, category, price, stock)
+SELECT
+  'Product-' || i,
+  (ARRAY['laptop','phone','tablet','audio','camera','monitor','keyboard','mouse'])[1 + (i % 8)],
+  (random() * 500000 + 1000)::numeric(10,2),
+  (random() * 1000)::int
+FROM generate_series(1, 1000000) AS i;
+ANALYZE products;
+"
+```
+
+</details>
+
+## Test Application
+
+We added two features to the test app from previous articles:
+
+1. **TLS toggle via argument** — test both node-based TLS and Serverless with the same code
+2. **Warmup mode** — send a dummy query before the main workload, then wait a specified number of seconds
+
+```java title="Java (warmup logic)"
+// Warmup: absorb the initial timeout with a dummy query
+if (warmupWaitSec > 0) {
+    try (Statement s = conn.createStatement();
+         ResultSet r = s.executeQuery("/* CACHE_PARAM(ttl=1s) */ SELECT 1")) {
+        r.next();
+    }
+    // Wait for CacheMonitor to recover from SUSPECT → HEALTHY
+    Thread.sleep(warmupWaitSec * 1000L);
+}
+```
+
+The `CACHE_PARAM(ttl=1s)` hint on the dummy query forces the cache plugin to initialize (TLS handshake, CacheMonitor startup). A 1-second TTL is sufficient.
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">pom.xml (same as previous articles)</summary>
+
+```xml title="pom.xml"
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0
+           http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+    <groupId>cachetest</groupId>
+    <artifactId>jdbc-cache-test</artifactId>
+    <version>1.0</version>
+    <properties>
+        <maven.compiler.source>21</maven.compiler.source>
+        <maven.compiler.target>21</maven.compiler.target>
+    </properties>
+    <dependencies>
+        <dependency>
+            <groupId>software.amazon.jdbc</groupId>
+            <artifactId>aws-advanced-jdbc-wrapper</artifactId>
+            <version>3.3.0</version>
+        </dependency>
+        <dependency>
+            <groupId>org.postgresql</groupId>
+            <artifactId>postgresql</artifactId>
+            <version>42.7.8</version>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.commons</groupId>
+            <artifactId>commons-pool2</artifactId>
+            <version>2.12.0</version>
+        </dependency>
+        <dependency>
+            <groupId>io.valkey</groupId>
+            <artifactId>valkey-glide</artifactId>
+            <version>2.3.0</version>
+        </dependency>
+        <dependency>
+            <groupId>org.slf4j</groupId>
+            <artifactId>slf4j-simple</artifactId>
+            <version>2.0.16</version>
+        </dependency>
+    </dependencies>
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-jar-plugin</artifactId>
+                <version>3.4.2</version>
+                <configuration>
+                    <archive><manifest>
+                        <mainClass>cachetest.QueryCacheTest</mainClass>
+                    </manifest></archive>
+                </configuration>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-dependency-plugin</artifactId>
+                <version>3.8.1</version>
+                <executions>
+                    <execution>
+                        <id>copy-deps</id><phase>package</phase>
+                        <goals><goal>copy-dependencies</goal></goals>
+                        <configuration>
+                            <outputDirectory>
+                                ${project.build.directory}/lib
+                            </outputDirectory>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+        </plugins>
+    </build>
+</project>
+```
+
+</details>
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">QueryCacheTest.java (full source)</summary>
+
+```java title="QueryCacheTest.java"
+package cachetest;
+
+import java.sql.*;
+import java.time.Duration;
+import java.time.Instant;
+import java.util.Properties;
+
+public class QueryCacheTest {
+    public static void main(String[] args) throws Exception {
+        if (args.length < 4) {
+            System.out.println("Usage: QueryCacheTest <db-endpoint> <password> "
+                + "<cache-endpoint> <tls:true|false> [warmup-wait-sec]");
+            return;
+        }
+        String dbEndpoint = args[0], dbPassword = args[1], cacheEndpoint = args[2];
+        boolean useTls = Boolean.parseBoolean(args[3]);
+        int warmupWaitSec = args.length >= 5 ? Integer.parseInt(args[4]) : 0;
+
+        Properties props = new Properties();
+        props.setProperty("user", "postgres");
+        props.setProperty("password", dbPassword);
+        props.setProperty("wrapperPlugins", "remoteQueryCache");
+        props.setProperty("cacheEndpointAddrRw", cacheEndpoint + ":6379");
+        if (!useTls) props.setProperty("cacheUseSSL", "false");
+
+        String url = "jdbc:aws-wrapper:postgresql://" + dbEndpoint + ":5432/postgres";
+        String query = "/* CACHE_PARAM(ttl=60s) */ "
+            + "SELECT category, COUNT(*), AVG(price)::numeric(10,2) "
+            + "FROM products GROUP BY category ORDER BY COUNT(*) DESC";
+
+        System.out.printf("=== TLS=%s, warmup=%ds ===%n", useTls, warmupWaitSec);
+
+        try (Connection conn = DriverManager.getConnection(url, props)) {
+            if (warmupWaitSec > 0) {
+                System.out.println("[Warmup] Sending dummy query...");
+                Instant ws = Instant.now();
+                try (Statement s = conn.createStatement();
+                     ResultSet r = s.executeQuery(
+                         "/* CACHE_PARAM(ttl=1s) */ SELECT 1")) {
+                    r.next();
+                }
+                long wms = Duration.between(ws, Instant.now()).toMillis();
+                System.out.printf("[Warmup] Dummy query: %d ms%n", wms);
+                System.out.printf("[Warmup] Waiting %d seconds for CacheMonitor recovery...%n",
+                    warmupWaitSec);
+                Thread.sleep(warmupWaitSec * 1000L);
+                System.out.println("[Warmup] Done. Starting main queries.");
+            }
+
+            for (int i = 1; i <= 8; i++) {
+                Instant start = Instant.now();
+                try (Statement s = conn.createStatement();
+                     ResultSet r = s.executeQuery(query)) {
+                    int count = 0;
+                    while (r.next()) count++;
+                    long ms = Duration.between(start, Instant.now()).toMillis();
+                    System.out.printf("  Query %d: %d rows, %d ms%n",
+                        i, count, ms);
+                }
+                if (i <= 2) Thread.sleep(1000);
+            }
+        }
+    }
+}
+```
+
+</details>
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">Build and run</summary>
+
+```bash title="Terminal"
+# Create directory structure
+mkdir -p jdbc-cache-test/src/main/java/cachetest
+# Place pom.xml in jdbc-cache-test/,
+# QueryCacheTest.java in jdbc-cache-test/src/main/java/cachetest/
+
+export JAVA_HOME=/usr/lib/jvm/java-21-amazon-corretto
+cd jdbc-cache-test && mvn package -q
+
+CP="target/jdbc-cache-test-1.0.jar"
+for jar in target/lib/*.jar; do CP="$CP:$jar"; done
+
+# Example: node-based TLS enabled (no warmup)
+java -cp "$CP" cachetest.QueryCacheTest \
+  <aurora-endpoint> <password> <cache-endpoint> true
+
+# Example: Serverless + 5-second warmup
+java -cp "$CP" cachetest.QueryCacheTest \
+  <aurora-endpoint> <password> <cache-endpoint> true 5
+```
+
+</details>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-dependency-plugin</artifactId>
+                <version>3.8.1</version>
+                <executions>
+                    <execution>
+                        <id>copy-deps</id><phase>package</phase>
+                        <goals><goal>copy-dependencies</goal></goals>
+                        <configuration>
+                            <outputDirectory>
+                                ${project.build.directory}/lib
+                            </outputDirectory>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+        </plugins>
+    </build>
+</project>
+```
+
+</details>
+
+## Verification 1: Node-Based + TLS — Root Cause Isolation
+
+To determine whether the initial timeout is caused by "TLS handshake overhead" or "something Serverless-specific," we ran the same test (8 queries on a single connection) against a node-based ElastiCache cluster with TLS enabled. We ran the test twice in succession to confirm reproducibility.
+
+```bash title="Terminal"
+java -cp "$CP" cachetest.QueryCacheTest \
+  <aurora-endpoint> <password> \
+  master.jdbc-cache-test-tls.xxx.apne1.cache.amazonaws.com \
+  true
+```
+
+```text title="Output (first run)"
+=== TLS=true, warmup=0s ===
+  Query 1: 8 rows, 910 ms
+  Query 2: 8 rows, 8 ms
+  Query 3: 8 rows, 3 ms
+  Query 4: 8 rows, 3 ms
+  Query 5: 8 rows, 3 ms
+  Query 6: 8 rows, 2 ms
+  Query 7: 8 rows, 2 ms
+  Query 8: 8 rows, 3 ms
+```
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">Output (second run — reproducibility check)</summary>
+
+```text title="Output (second run)"
+=== TLS=true, warmup=0s ===
+  Query 1: 8 rows, 517 ms
+  Query 2: 8 rows, 3 ms
+  Query 3: 8 rows, 2 ms
+  Query 4: 8 rows, 4 ms
+  Query 5: 8 rows, 2 ms
+  Query 6: 8 rows, 2 ms
+  Query 7: 8 rows, 3 ms
+  Query 8: 8 rows, 2 ms
+```
+
+No initial timeout in the second run either. Query 1 at 517ms is a DB execution, not a cache hit (which would be 2-8ms). The cache entry likely expired beyond the 60-second TTL between runs.
+
+</details>
+
+**No initial timeout occurred.** CacheMonitor stayed `HEALTHY` throughout — no `SUSPECT` transition at all. The second run confirmed the same behavior (see collapsible above).
+
+Query 1 at 910ms is the first execution with an empty cache: cache miss → DB aggregation over 1 million rows → write result to cache. No `TimeoutException` or `HEALTHY→SUSPECT` transition occurred — fundamentally different from the Serverless behavior. Queries 2-8 stabilized at 2-8ms, with TLS adding only a few milliseconds compared to the [first article](/en/blog/2026/03/27/jdbc-query-cache-valkey-node-based)'s TLS-off results (1-4ms).
+
+**Conclusion: The initial timeout is not caused by TLS handshake itself — it's Serverless-specific.** The initial connection to a Serverless endpoint likely involves internal routing and resource allocation that exceeds the plugin's internal connection timeout (2 seconds by default).
+
+## Verification 2: Warmup Connection — Serverless Workaround
+
+With the root cause identified as Serverless-specific, we tested an application-side workaround: send a dummy query at startup to absorb the initial timeout, wait for CacheMonitor to recover, then run the real workload.
+
+First, the baseline without warmup:
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">Baseline — no warmup (confirming same behavior as previous article)</summary>
+
+```bash title="Terminal"
+java -cp "$CP" cachetest.QueryCacheTest \
+  <aurora-endpoint> <password> \
+  jdbc-cache-test-xxx.serverless.apne1.cache.amazonaws.com \
+  true
+```
+
+```text title="Output"
+=== TLS=true, warmup=0s ===
+[HEALTHY→SUSPECT] READ failed: TimeoutException: Request timed out
+  Query 1: 8 rows, 2961 ms
+  Query 2: 8 rows, 173 ms
+  Query 3: 8 rows, 7 ms
+  Query 4: 8 rows, 3 ms
+  Query 5: 8 rows, 2 ms
+  Query 6: 8 rows, 2 ms
+  Query 7: 8 rows, 1 ms
+  Query 8: 8 rows, 1 ms
+```
+
+Same behavior as the previous article. Initial `TimeoutException`, `HEALTHY→SUSPECT` transition, Query 1 at ~3 seconds. Query 2's 173ms reflects a DB direct access while CacheMonitor is still in SUSPECT state (bypassing cache). By Query 3, CacheMonitor has recovered to HEALTHY and cache hits resume.
+
+</details>
+
+The baseline reproduced the initial timeout (Query 1: 2961ms). Now we apply the warmup.
+
+### 5-Second Warmup
+
+```bash title="Terminal"
+java -cp "$CP" cachetest.QueryCacheTest \
+  <aurora-endpoint> <password> \
+  jdbc-cache-test-xxx.serverless.apne1.cache.amazonaws.com \
+  true 5
+```
+
+```text title="Output (5-second warmup)"
+=== TLS=true, warmup=5s ===
+[Warmup] Sending dummy query...
+[HEALTHY→SUSPECT] READ failed: TimeoutException: Request timed out
+[Warmup] Dummy query: 2534 ms
+[Warmup] Waiting 5 seconds for CacheMonitor recovery...
+[Warmup] Done. Starting main queries.
+  Query 1: 8 rows, 6 ms
+  Query 2: 8 rows, 2 ms
+  Query 3: 8 rows, 2 ms
+  Query 4: 8 rows, 2 ms
+  Query 5: 8 rows, 2 ms
+  Query 6: 8 rows, 1 ms
+  Query 7: 8 rows, 1 ms
+  Query 8: 8 rows, 2 ms
+```
+
+**Query 1 at 6ms — cache hit from the very first query.** The dummy query absorbed the initial timeout, and the 5-second wait gave CacheMonitor enough time to recover from `SUSPECT` to `HEALTHY`.
+
+An important nuance: the warmup's effect is not "pre-warming the cache." Query 1 hit the cache because the baseline run (executed moments before) had written the aggregation result, and it was still within the 60-second TTL. The warmup's real effect is **recovering CacheMonitor to HEALTHY state so it can read from the cache**. During the baseline run, the result was written to cache, but CacheMonitor was in SUSPECT state and bypassed cache reads. After warmup recovery, the existing cache entry became readable.
+
+In a production cold start (empty cache), the first query will always hit the DB. The warmup ensures that this first DB result is correctly written to cache and that subsequent queries reliably hit the cache — rather than being bypassed due to SUSPECT state.
+
+All subsequent queries stabilized at 1-6ms.
+
+### 10-Second Warmup
+
+```text title="Output (10-second warmup)"
+=== TLS=true, warmup=10s ===
+[Warmup] Dummy query: 2584 ms
+[Warmup] Waiting 10 seconds for CacheMonitor recovery...
+[Warmup] Done. Starting main queries.
+  Query 1: 8 rows, 6 ms
+  Query 2: 8 rows, 2 ms
+  Query 3: 8 rows, 2 ms
+  Query 4: 8 rows, 2 ms
+  Query 5: 8 rows, 1 ms
+  Query 6: 8 rows, 2 ms
+  Query 7: 8 rows, 2 ms
+  Query 8: 8 rows, 2 ms
+```
+
+Same results as the 5-second warmup.
+
+### 15-Second Warmup
+
+```text title="Output (15-second warmup)"
+=== TLS=true, warmup=15s ===
+[Warmup] Dummy query: 2544 ms
+[Warmup] Waiting 15 seconds for CacheMonitor recovery...
+[Warmup] Done. Starting main queries.
+  Query 1: 8 rows, 217 ms
+  Query 2: 8 rows, 7 ms
+  Query 3: 8 rows, 2 ms
+  Query 4: 8 rows, 2 ms
+  Query 5: 8 rows, 2 ms
+  Query 6: 8 rows, 1 ms
+  Query 7: 8 rows, 3 ms
+  Query 8: 8 rows, 2 ms
+```
+
+Query 1 degraded to 217ms. This is likely related to the CacheMonitor health check failure we reported in the previous article (borrow timeout fixed at 100ms). During the longer wait, repeated health check failures may have pushed CacheMonitor back to `SUSPECT`, though we did not directly confirm the re-transition in logs for this test.
+
+**The wait time is a Goldilocks problem — too short and CacheMonitor hasn't recovered; too long and it may relapse. 5-10 seconds is the sweet spot.**
+
+### Warmup Results Summary
+
+| Wait Time | Dummy Query | Query 1 | Query 2-8 | Verdict |
+| --- | --- | --- | --- | --- |
+| 0s (baseline) | — | 2961ms | 1-173ms | ❌ |
+| 5s | 2534ms | 6ms | 1-2ms | ✅ |
+| 10s | 2584ms | 6ms | 1-2ms | ✅ |
+| 15s | 2544ms | 217ms | 1-7ms | ⚠️ |
+
+## Configuration Comparison
+
+Side-by-side comparison of all configurations tested across the three articles in this series.
+
+| Configuration | Initial Timeout | CacheMonitor | Hit Latency | Operational Considerations |
+| --- | --- | --- | --- | --- |
+| Node-based, TLS off ([Article 1](/en/blog/2026/03/27/jdbc-query-cache-valkey-node-based)) | None | Stays HEALTHY | 1-4ms | Node sizing and scaling management required |
+| Node-based, TLS on (this article, V1) | None | Stays HEALTHY | 2-8ms | Node management + slight TLS overhead |
+| Serverless ([Article 2](/en/blog/2026/03/27/jdbc-query-cache-valkey-serverless)) | Yes (~3s) | Health check always fails | 1-216ms | Unstable without warmup |
+| Serverless + 5s warmup (this article, V2) | Absorbed by warmup | HEALTHY after recovery | 1-6ms | ~8s initialization at startup |
+
+**Node-based is stable regardless of TLS.** TLS adds only a few milliseconds, and CacheMonitor issues don't occur.
+
+**Serverless becomes production-viable with warmup.** However, the underlying CacheMonitor health check issue (100ms borrow timeout) remains, and long-running stability needs further investigation.
+
+The best configuration depends on your application's characteristics:
+
+- **Web apps (ECS / EC2, long-running)** — Serverless + warmup is a strong choice. The ~8s startup cost is acceptable, and eliminating scaling management is a significant operational win. Note that rolling deployments will trigger warmup on each container restart
+- **Lambda (frequent cold starts)** — Node-based is more stable. Adding ~8s of warmup to Lambda's cold start may push latency beyond acceptable thresholds
+- **Batch processing (infrequent starts)** — Either works. The ~8s startup is negligible, so Serverless's lower management overhead makes it the pragmatic choice
+
+## Summary
+
+- **The initial timeout is Serverless-specific** — Node-based + TLS showed no timeout at all. The root cause is not TLS handshake overhead but Serverless endpoint initialization latency exceeding the plugin's internal connection timeout
+- **Warmup + 5-second wait is an effective workaround** — A dummy query absorbs the initial timeout, and after CacheMonitor recovers, cache reads and writes function correctly. Waiting too long (15s) can cause instability, so 5-10 seconds is optimal
+- **Configuration choice depends on application characteristics** — For long-running services, Serverless + warmup works well. For frequent cold starts, node-based is more stable. See [Configuration Comparison](#configuration-comparison) for details
+
+## Cleanup
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">Resource deletion commands</summary>
+
+```bash title="Terminal"
+# ElastiCache node-based TLS
+aws elasticache delete-replication-group \
+  --replication-group-id jdbc-cache-test-tls \
+  --no-final-snapshot-identifier \
+  --region ap-northeast-1
+
+# ElastiCache Serverless
+aws elasticache delete-serverless-cache \
+  --serverless-cache-name jdbc-cache-test \
+  --region ap-northeast-1
+
+# Aurora
+aws rds delete-db-instance --db-instance-identifier jdbc-cache-test-writer \
+  --skip-final-snapshot --region ap-northeast-1
+aws rds wait db-instance-deleted \
+  --db-instance-identifier jdbc-cache-test-writer --region ap-northeast-1
+aws rds delete-db-cluster --db-cluster-identifier jdbc-cache-test \
+  --skip-final-snapshot --region ap-northeast-1
+
+# EC2
+aws ec2 terminate-instances --instance-ids <instance-id> --region ap-northeast-1
+
+# Wait for deletions, then remove network resources
+aws ec2 delete-key-pair --key-name jdbc-cache-test --region ap-northeast-1
+aws ec2 delete-security-group --group-id <sg-aurora> --region ap-northeast-1
+aws ec2 delete-security-group --group-id <sg-cache> --region ap-northeast-1
+aws ec2 delete-security-group --group-id <sg-ec2> --region ap-northeast-1
+aws elasticache delete-cache-subnet-group \
+  --cache-subnet-group-name jdbc-cache-test --region ap-northeast-1
+aws rds delete-db-subnet-group \
+  --db-subnet-group-name jdbc-cache-test --region ap-northeast-1
+aws ec2 detach-internet-gateway \
+  --internet-gateway-id <igw-id> --vpc-id <vpc-id> --region ap-northeast-1
+aws ec2 delete-internet-gateway \
+  --internet-gateway-id <igw-id> --region ap-northeast-1
+aws ec2 delete-subnet --subnet-id <subnet-a> --region ap-northeast-1
+aws ec2 delete-subnet --subnet-id <subnet-c> --region ap-northeast-1
+aws ec2 delete-subnet --subnet-id <subnet-d> --region ap-northeast-1
+aws ec2 delete-vpc --vpc-id <vpc-id> --region ap-northeast-1
+```
+
+</details>

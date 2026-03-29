@@ -1,0 +1,631 @@
+---
+title: "JDBC Wrapper Valkey キャッシュ検証 — Serverless 初回タイムアウトの原因切り分けとウォームアップ回避策"
+description: "ノードベース+TLS構成との比較で初回タイムアウトがServerless固有の問題と確定。ウォームアップ接続+5秒待機でCacheMonitorを回復させ、Serverlessの運用メリットを活かせることを実機検証した。"
+date: 2026-03-30
+published: true
+featured: false
+categories:
+  - infrastructure
+tags: ["aws", "aurora", "postgresql", "elasticache", "valkey", "java", "jdbc", "database"]
+series: "jdbc-query-cache-valkey"
+seriesOrder: 3
+---
+
+## はじめに
+
+[前回の記事](/ja/blog/2026/03/27/jdbc-query-cache-valkey-serverless)では、ElastiCache for Valkey Serverless と JDBC Wrapper の Remote Query Cache Plugin を組み合わせた際に、**初回接続で必ずタイムアウトが発生し CacheMonitor が SUSPECT 状態に陥る**問題を発見した。
+
+この問題に対して2つの疑問が残っていた。
+
+1. **原因は TLS 自体なのか、Serverless 固有なのか** — [1本目の記事](/ja/blog/2026/03/27/jdbc-query-cache-valkey-node-based)のノードベース構成は TLS なしだったため、TLS が原因の可能性を排除できていなかった
+2. **アプリ側のワークアラウンドで回避できるのか** — 初回タイムアウトをユーザーリクエスト前に吸収できれば、Serverless の運用メリット（スケーリング不要・管理コスト低）を享受できる
+
+本記事ではこの2点を実機検証で明らかにする。公式ドキュメントは [Remote Query Cache Plugin](https://github.com/aws/aws-advanced-jdbc-wrapper/blob/main/docs/using-the-jdbc-driver/using-plugins/UsingTheRemoteQueryCachePlugin.md) を参照。
+
+結果だけ知りたい場合は[構成別比較](#構成別比較)にスキップできる。
+
+## 検証環境
+
+| 項目 | 値 |
+| --- | --- |
+| リージョン | ap-northeast-1（東京） |
+| DB | Aurora PostgreSQL Serverless v2（16.6、0.5-2 ACU） |
+| キャッシュ① | ElastiCache for Valkey Serverless（Valkey 8） |
+| キャッシュ② | ElastiCache for Valkey ノードベース（cache.t3.micro、TLS 有効） |
+| 実行環境 | EC2 t3.small（Amazon Linux 2023、同一 VPC 内） |
+| Java | Amazon Corretto 21 |
+| AWS JDBC Wrapper | 3.3.0 |
+| PostgreSQL JDBC | 42.7.8 |
+| Valkey Glide | 2.3.0 |
+| テストデータ | products テーブル 100万行 |
+
+前提条件:
+
+- AWS CLI セットアップ済み（`rds:*`、`elasticache:*`、`ec2:*` の操作権限）
+- Java 21 + Maven
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">インフラ構築手順（VPC / Aurora / ElastiCache × 2 / EC2）</summary>
+
+### VPC・サブネット・セキュリティグループ
+
+```bash title="Terminal"
+export AWS_REGION=ap-northeast-1
+MY_IP="$(curl -s https://checkip.amazonaws.com)/32"
+
+# VPC
+VPC_ID=$(aws ec2 create-vpc --cidr-block 10.0.0.0/16 \
+  --tag-specifications 'ResourceType=vpc,Tags=[{Key=Name,Value=jdbc-cache-test}]' \
+  --query 'Vpc.VpcId' --output text --region $AWS_REGION)
+aws ec2 modify-vpc-attribute --enable-dns-hostnames '{"Value":true}' --vpc-id $VPC_ID
+
+# サブネット（3 AZ）
+SUBNET_A=$(aws ec2 create-subnet --vpc-id $VPC_ID --cidr-block 10.0.1.0/24 \
+  --availability-zone ${AWS_REGION}a --query 'Subnet.SubnetId' --output text --region $AWS_REGION)
+SUBNET_C=$(aws ec2 create-subnet --vpc-id $VPC_ID --cidr-block 10.0.2.0/24 \
+  --availability-zone ${AWS_REGION}c --query 'Subnet.SubnetId' --output text --region $AWS_REGION)
+SUBNET_D=$(aws ec2 create-subnet --vpc-id $VPC_ID --cidr-block 10.0.3.0/24 \
+  --availability-zone ${AWS_REGION}d --query 'Subnet.SubnetId' --output text --region $AWS_REGION)
+
+# IGW（EC2 への SSH 用）
+IGW_ID=$(aws ec2 create-internet-gateway --query 'InternetGateway.InternetGatewayId' \
+  --output text --region $AWS_REGION)
+aws ec2 attach-internet-gateway --internet-gateway-id $IGW_ID --vpc-id $VPC_ID
+RTB_ID=$(aws ec2 describe-route-tables --filters "Name=vpc-id,Values=$VPC_ID" \
+  --query 'RouteTables[0].RouteTableId' --output text --region $AWS_REGION)
+aws ec2 create-route --route-table-id $RTB_ID --destination-cidr-block 0.0.0.0/0 --gateway-id $IGW_ID
+aws ec2 modify-subnet-attribute --subnet-id $SUBNET_A --map-public-ip-on-launch
+
+# セキュリティグループ
+SG_EC2=$(aws ec2 create-security-group --group-name jdbc-cache-test-ec2 \
+  --description "EC2" --vpc-id $VPC_ID --query 'GroupId' --output text --region $AWS_REGION)
+SG_AURORA=$(aws ec2 create-security-group --group-name jdbc-cache-test-aurora \
+  --description "Aurora" --vpc-id $VPC_ID --query 'GroupId' --output text --region $AWS_REGION)
+SG_CACHE=$(aws ec2 create-security-group --group-name jdbc-cache-test-cache \
+  --description "ElastiCache" --vpc-id $VPC_ID --query 'GroupId' --output text --region $AWS_REGION)
+
+aws ec2 authorize-security-group-ingress --group-id $SG_EC2 --protocol tcp --port 22 --cidr $MY_IP
+aws ec2 authorize-security-group-ingress --group-id $SG_AURORA --protocol tcp --port 5432 --source-group $SG_EC2
+aws ec2 authorize-security-group-ingress --group-id $SG_CACHE --protocol tcp --port 6379 --source-group $SG_EC2
+```
+
+### Aurora PostgreSQL Serverless v2
+
+```bash title="Terminal"
+aws rds create-db-subnet-group --db-subnet-group-name jdbc-cache-test \
+  --db-subnet-group-description "JDBC cache test" \
+  --subnet-ids "$SUBNET_A" "$SUBNET_C" "$SUBNET_D" --region $AWS_REGION
+
+aws rds create-db-cluster --db-cluster-identifier jdbc-cache-test \
+  --engine aurora-postgresql --engine-version 16.6 \
+  --master-username postgres --master-user-password '<password>' \
+  --db-subnet-group-name jdbc-cache-test \
+  --vpc-security-group-ids $SG_AURORA \
+  --serverless-v2-scaling-configuration MinCapacity=0.5,MaxCapacity=2 \
+  --storage-encrypted --no-deletion-protection --region $AWS_REGION
+
+aws rds create-db-instance --db-instance-identifier jdbc-cache-test-writer \
+  --db-cluster-identifier jdbc-cache-test \
+  --db-instance-class db.serverless --engine aurora-postgresql --region $AWS_REGION
+
+aws rds wait db-instance-available --db-instance-identifier jdbc-cache-test-writer --region $AWS_REGION
+```
+
+### ElastiCache for Valkey ノードベース（TLS 有効）
+
+```bash title="Terminal"
+aws elasticache create-cache-subnet-group \
+  --cache-subnet-group-name jdbc-cache-test \
+  --cache-subnet-group-description "JDBC cache test" \
+  --subnet-ids "$SUBNET_A" "$SUBNET_C" "$SUBNET_D" --region $AWS_REGION
+
+aws elasticache create-replication-group \
+  --replication-group-id jdbc-cache-test-tls \
+  --replication-group-description "JDBC cache test node-based TLS" \
+  --engine valkey \
+  --cache-node-type cache.t3.micro \
+  --num-cache-clusters 1 \
+  --cache-subnet-group-name jdbc-cache-test \
+  --security-group-ids $SG_CACHE \
+  --transit-encryption-enabled \
+  --region $AWS_REGION
+
+aws elasticache wait replication-group-available \
+  --replication-group-id jdbc-cache-test-tls --region $AWS_REGION
+```
+
+`--transit-encryption-enabled` を付けるだけで TLS が有効になる。ノードベースでは `transit-encryption-mode` のデフォルトが `required` なので、暗号化接続のみ許可される。
+
+### ElastiCache for Valkey Serverless
+
+```bash title="Terminal"
+aws elasticache create-serverless-cache \
+  --serverless-cache-name jdbc-cache-test \
+  --engine valkey \
+  --subnet-ids "$SUBNET_A" "$SUBNET_C" "$SUBNET_D" \
+  --security-group-ids $SG_CACHE --region $AWS_REGION
+```
+
+### EC2 インスタンス
+
+```bash title="Terminal"
+AMI_ID=$(aws ec2 describe-images --owners amazon \
+  --filters "Name=name,Values=al2023-ami-2023.*-x86_64" "Name=state,Values=available" \
+  --query 'sort_by(Images, &CreationDate)[-1].ImageId' --output text --region $AWS_REGION)
+
+aws ec2 create-key-pair --key-name jdbc-cache-test --key-type ed25519 \
+  --query 'KeyMaterial' --output text > jdbc-cache-test.pem
+chmod 600 jdbc-cache-test.pem
+
+aws ec2 run-instances --image-id $AMI_ID --instance-type t3.small \
+  --key-name jdbc-cache-test --security-group-ids $SG_EC2 \
+  --subnet-id $SUBNET_A \
+  --tag-specifications 'ResourceType=instance,Tags=[{Key=Name,Value=jdbc-cache-test}]' \
+  --region $AWS_REGION
+
+ssh ec2-user@<public-ip> 'sudo dnf install -y java-21-amazon-corretto-devel maven postgresql16'
+```
+
+### テストデータ（100万行）
+
+```bash title="Terminal"
+PGPASSWORD='<password>' psql -h <aurora-endpoint> -U postgres -d postgres -c "
+CREATE TABLE products (
+  id SERIAL PRIMARY KEY,
+  name VARCHAR(100) NOT NULL,
+  category VARCHAR(50) NOT NULL,
+  price NUMERIC(10,2) NOT NULL,
+  stock INT NOT NULL DEFAULT 0
+);
+INSERT INTO products (name, category, price, stock)
+SELECT
+  'Product-' || i,
+  (ARRAY['laptop','phone','tablet','audio','camera','monitor','keyboard','mouse'])[1 + (i % 8)],
+  (random() * 500000 + 1000)::numeric(10,2),
+  (random() * 1000)::int
+FROM generate_series(1, 1000000) AS i;
+ANALYZE products;
+"
+```
+
+</details>
+
+## テストアプリケーション
+
+前回までのテストアプリに2つの機能を追加した。
+
+1. **TLS の有効/無効を引数で切り替え** — ノードベース TLS 有効と Serverless を同じコードで検証
+2. **ウォームアップモード** — 本番クエリの前にダミークエリを発行し、指定秒数待機してから本番クエリを実行
+
+```java title="Java（ウォームアップ処理の核心部分）"
+// ウォームアップ: ダミークエリで初回タイムアウトを吸収
+if (warmupWaitSec > 0) {
+    try (Statement s = conn.createStatement();
+         ResultSet r = s.executeQuery("/* CACHE_PARAM(ttl=1s) */ SELECT 1")) {
+        r.next();
+    }
+    // CacheMonitor が SUSPECT → HEALTHY に回復するのを待つ
+    Thread.sleep(warmupWaitSec * 1000L);
+}
+```
+
+ダミークエリに `CACHE_PARAM(ttl=1s)` を付けることで、キャッシュプラグインの初期化（TLS 接続確立、CacheMonitor 起動）を強制的にトリガーする。TTL は 1秒で十分だ。
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">pom.xml（前回と同一）</summary>
+
+```xml title="pom.xml"
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0
+           http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+    <groupId>cachetest</groupId>
+    <artifactId>jdbc-cache-test</artifactId>
+    <version>1.0</version>
+    <properties>
+        <maven.compiler.source>21</maven.compiler.source>
+        <maven.compiler.target>21</maven.compiler.target>
+    </properties>
+    <dependencies>
+        <dependency>
+            <groupId>software.amazon.jdbc</groupId>
+            <artifactId>aws-advanced-jdbc-wrapper</artifactId>
+            <version>3.3.0</version>
+        </dependency>
+        <dependency>
+            <groupId>org.postgresql</groupId>
+            <artifactId>postgresql</artifactId>
+            <version>42.7.8</version>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.commons</groupId>
+            <artifactId>commons-pool2</artifactId>
+            <version>2.12.0</version>
+        </dependency>
+        <dependency>
+            <groupId>io.valkey</groupId>
+            <artifactId>valkey-glide</artifactId>
+            <version>2.3.0</version>
+        </dependency>
+        <dependency>
+            <groupId>org.slf4j</groupId>
+            <artifactId>slf4j-simple</artifactId>
+            <version>2.0.16</version>
+        </dependency>
+    </dependencies>
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-jar-plugin</artifactId>
+                <version>3.4.2</version>
+                <configuration>
+                    <archive><manifest>
+                        <mainClass>cachetest.QueryCacheTest</mainClass>
+                    </manifest></archive>
+                </configuration>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-dependency-plugin</artifactId>
+                <version>3.8.1</version>
+                <executions>
+                    <execution>
+                        <id>copy-deps</id><phase>package</phase>
+                        <goals><goal>copy-dependencies</goal></goals>
+                        <configuration>
+                            <outputDirectory>
+                                ${project.build.directory}/lib
+                            </outputDirectory>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+        </plugins>
+    </build>
+</project>
+```
+
+</details>
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">QueryCacheTest.java（テストアプリ全体）</summary>
+
+```java title="QueryCacheTest.java"
+package cachetest;
+
+import java.sql.*;
+import java.time.Duration;
+import java.time.Instant;
+import java.util.Properties;
+
+public class QueryCacheTest {
+    public static void main(String[] args) throws Exception {
+        if (args.length < 4) {
+            System.out.println("Usage: QueryCacheTest <db-endpoint> <password> "
+                + "<cache-endpoint> <tls:true|false> [warmup-wait-sec]");
+            return;
+        }
+        String dbEndpoint = args[0], dbPassword = args[1], cacheEndpoint = args[2];
+        boolean useTls = Boolean.parseBoolean(args[3]);
+        int warmupWaitSec = args.length >= 5 ? Integer.parseInt(args[4]) : 0;
+
+        Properties props = new Properties();
+        props.setProperty("user", "postgres");
+        props.setProperty("password", dbPassword);
+        props.setProperty("wrapperPlugins", "remoteQueryCache");
+        props.setProperty("cacheEndpointAddrRw", cacheEndpoint + ":6379");
+        if (!useTls) props.setProperty("cacheUseSSL", "false");
+
+        String url = "jdbc:aws-wrapper:postgresql://" + dbEndpoint + ":5432/postgres";
+        String query = "/* CACHE_PARAM(ttl=60s) */ "
+            + "SELECT category, COUNT(*), AVG(price)::numeric(10,2) "
+            + "FROM products GROUP BY category ORDER BY COUNT(*) DESC";
+
+        System.out.printf("=== TLS=%s, warmup=%ds ===%n", useTls, warmupWaitSec);
+
+        try (Connection conn = DriverManager.getConnection(url, props)) {
+            if (warmupWaitSec > 0) {
+                System.out.println("[Warmup] Sending dummy query...");
+                Instant ws = Instant.now();
+                try (Statement s = conn.createStatement();
+                     ResultSet r = s.executeQuery(
+                         "/* CACHE_PARAM(ttl=1s) */ SELECT 1")) {
+                    r.next();
+                }
+                long wms = Duration.between(ws, Instant.now()).toMillis();
+                System.out.printf("[Warmup] Dummy query: %d ms%n", wms);
+                System.out.printf("[Warmup] Waiting %d seconds for CacheMonitor recovery...%n",
+                    warmupWaitSec);
+                Thread.sleep(warmupWaitSec * 1000L);
+                System.out.println("[Warmup] Done. Starting main queries.");
+            }
+
+            for (int i = 1; i <= 8; i++) {
+                Instant start = Instant.now();
+                try (Statement s = conn.createStatement();
+                     ResultSet r = s.executeQuery(query)) {
+                    int count = 0;
+                    while (r.next()) count++;
+                    long ms = Duration.between(start, Instant.now()).toMillis();
+                    System.out.printf("  Query %d: %d rows, %d ms%n",
+                        i, count, ms);
+                }
+                if (i <= 2) Thread.sleep(1000);
+            }
+        }
+    }
+}
+```
+
+</details>
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">ビルドと実行</summary>
+
+```bash title="Terminal"
+# ディレクトリ構造を作成
+mkdir -p jdbc-cache-test/src/main/java/cachetest
+# pom.xml を jdbc-cache-test/ に、
+# QueryCacheTest.java を jdbc-cache-test/src/main/java/cachetest/ に配置
+
+export JAVA_HOME=/usr/lib/jvm/java-21-amazon-corretto
+cd jdbc-cache-test && mvn package -q
+
+CP="target/jdbc-cache-test-1.0.jar"
+for jar in target/lib/*.jar; do CP="$CP:$jar"; done
+
+# 例: ノードベース TLS 有効（ウォームアップなし）
+java -cp "$CP" cachetest.QueryCacheTest \
+  <aurora-endpoint> <password> <cache-endpoint> true
+
+# 例: Serverless + ウォームアップ 5秒
+java -cp "$CP" cachetest.QueryCacheTest \
+  <aurora-endpoint> <password> <cache-endpoint> true 5
+```
+
+</details>
+
+## 検証1: ノードベース + TLS — 原因の切り分け
+
+前回の記事で発見した初回タイムアウトが「TLS ハンドシェイク自体」の問題なのか「Serverless 固有」の問題なのかを切り分ける。ノードベース ElastiCache に TLS を有効にして、前回と同じテスト（同一コネクションで8回クエリ実行）を行った。再現性を確認するため、同じテストを2回連続で実行している。
+
+```bash title="Terminal"
+java -cp "$CP" cachetest.QueryCacheTest \
+  <aurora-endpoint> <password> \
+  master.jdbc-cache-test-tls.xxx.apne1.cache.amazonaws.com \
+  true
+```
+
+```text title="Output（1回目）"
+=== TLS=true, warmup=0s ===
+  Query 1: 8 rows, 910 ms
+  Query 2: 8 rows, 8 ms
+  Query 3: 8 rows, 3 ms
+  Query 4: 8 rows, 3 ms
+  Query 5: 8 rows, 3 ms
+  Query 6: 8 rows, 2 ms
+  Query 7: 8 rows, 2 ms
+  Query 8: 8 rows, 3 ms
+```
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">Output（2回目 — 再現性確認）</summary>
+
+```text title="Output（2回目）"
+=== TLS=true, warmup=0s ===
+  Query 1: 8 rows, 517 ms
+  Query 2: 8 rows, 3 ms
+  Query 3: 8 rows, 2 ms
+  Query 4: 8 rows, 4 ms
+  Query 5: 8 rows, 2 ms
+  Query 6: 8 rows, 2 ms
+  Query 7: 8 rows, 3 ms
+  Query 8: 8 rows, 2 ms
+```
+
+2回目も初回タイムアウトは発生していない。Query 1 の 517ms は DB 実行の時間であり、キャッシュヒット（2-8ms）ではない。1回目と2回目の間に TTL 60秒を超えた可能性がある。
+
+</details>
+
+**初回タイムアウトは発生しなかった。** CacheMonitor は `HEALTHY` のまま維持され、`SUSPECT` への遷移は一度も起きていない。2回目の実行でも同様だった（折りたたみ参照）。
+
+Query 1 の 910ms はキャッシュが空の状態での初回実行だ。キャッシュミス → DB で100万行の集計を実行 → 結果をキャッシュに書き込み、という流れで、タイムアウトエラーは発生していない。Serverless で見られた `TimeoutException` や `HEALTHY→SUSPECT` 遷移とは根本的に異なる。Query 2 以降は 2-8ms で安定しており、TLS のオーバーヘッドは [1本目の記事](/ja/blog/2026/03/27/jdbc-query-cache-valkey-node-based)の TLS なし（1-4ms）と比べて数ms の増加に留まる。
+
+**結論: 初回タイムアウトの原因は TLS ハンドシェイク自体ではなく、Serverless 固有のレイテンシだ。** Serverless エンドポイントへの初回接続時に、内部のルーティングやリソース割り当てに時間がかかり、プラグイン内部の接続タイムアウト（デフォルト2秒）を超えていると考えられる。
+
+## 検証2: ウォームアップ接続 — Serverless での回避策
+
+原因が Serverless 固有と分かったので、アプリ側のワークアラウンドを試す。アプリ起動時にダミークエリを発行して初回タイムアウトを吸収し、CacheMonitor が `HEALTHY` に回復するまで待機してから本番クエリを実行する。
+
+まず、ウォームアップなしのベースラインを取得した。
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">ベースライン — ウォームアップなし（前回記事と同じ挙動の再確認）</summary>
+
+```bash title="Terminal"
+java -cp "$CP" cachetest.QueryCacheTest \
+  <aurora-endpoint> <password> \
+  jdbc-cache-test-xxx.serverless.apne1.cache.amazonaws.com \
+  true
+```
+
+```text title="Output"
+=== TLS=true, warmup=0s ===
+[HEALTHY→SUSPECT] READ failed: TimeoutException: Request timed out
+  Query 1: 8 rows, 2961 ms
+  Query 2: 8 rows, 173 ms
+  Query 3: 8 rows, 7 ms
+  Query 4: 8 rows, 3 ms
+  Query 5: 8 rows, 2 ms
+  Query 6: 8 rows, 2 ms
+  Query 7: 8 rows, 1 ms
+  Query 8: 8 rows, 1 ms
+```
+
+前回の記事と同じ挙動だ。初回 `TimeoutException` で `HEALTHY→SUSPECT` に遷移し、Query 1 が約3秒かかっている。Query 2 の 173ms は CacheMonitor が SUSPECT 状態のためキャッシュをバイパスし DB に直接アクセスした結果で、Query 3 以降は CacheMonitor が HEALTHY に回復しキャッシュヒットしている。
+
+</details>
+
+ベースラインでは初回タイムアウト（Query 1: 2961ms）が再現した。ここにウォームアップを適用する。
+
+### ウォームアップ 5秒
+
+```bash title="Terminal"
+java -cp "$CP" cachetest.QueryCacheTest \
+  <aurora-endpoint> <password> \
+  jdbc-cache-test-xxx.serverless.apne1.cache.amazonaws.com \
+  true 5
+```
+
+```text title="Output（ウォームアップ 5秒）"
+=== TLS=true, warmup=5s ===
+[Warmup] Sending dummy query...
+[HEALTHY→SUSPECT] READ failed: TimeoutException: Request timed out
+[Warmup] Dummy query: 2534 ms
+[Warmup] Waiting 5 seconds for CacheMonitor recovery...
+[Warmup] Done. Starting main queries.
+  Query 1: 8 rows, 6 ms
+  Query 2: 8 rows, 2 ms
+  Query 3: 8 rows, 2 ms
+  Query 4: 8 rows, 2 ms
+  Query 5: 8 rows, 2 ms
+  Query 6: 8 rows, 1 ms
+  Query 7: 8 rows, 1 ms
+  Query 8: 8 rows, 2 ms
+```
+
+**Query 1 が 6ms。初回からキャッシュヒットしている。** ダミークエリが初回タイムアウトを引き受け、5秒の待機中に CacheMonitor が `SUSPECT→HEALTHY` に回復した。
+
+ここで重要なのは、ウォームアップの効果は「キャッシュを事前に温める」ことではない点だ。Query 1 がキャッシュヒットしたのは、直前のベースライン実行時にキャッシュに書き込まれた結果が TTL 60秒以内で残っていたためだ。ウォームアップの真の効果は **CacheMonitor を HEALTHY 状態に回復させ、キャッシュの読み取りを可能にする**ことにある。ベースライン実行ではキャッシュに結果が書き込まれていても CacheMonitor が SUSPECT のためキャッシュをバイパスしていた。ウォームアップにより CacheMonitor が回復し、既存のキャッシュを読み取れるようになった。
+
+本番環境では、アプリ起動直後はキャッシュが空のため初回クエリは必ず DB にアクセスする。ウォームアップの意義は、その初回 DB アクセスの結果がキャッシュに正しく書き込まれ、2回目以降のクエリで確実にキャッシュヒットすることを保証する点にある。
+
+回復後は全クエリが 1-6ms で安定している。
+
+### ウォームアップ 10秒
+
+```text title="Output（ウォームアップ 10秒）"
+=== TLS=true, warmup=10s ===
+[Warmup] Dummy query: 2584 ms
+[Warmup] Waiting 10 seconds for CacheMonitor recovery...
+[Warmup] Done. Starting main queries.
+  Query 1: 8 rows, 6 ms
+  Query 2: 8 rows, 2 ms
+  Query 3: 8 rows, 2 ms
+  Query 4: 8 rows, 2 ms
+  Query 5: 8 rows, 1 ms
+  Query 6: 8 rows, 2 ms
+  Query 7: 8 rows, 2 ms
+  Query 8: 8 rows, 2 ms
+```
+
+5秒と同等の結果。
+
+### ウォームアップ 15秒
+
+```text title="Output（ウォームアップ 15秒）"
+=== TLS=true, warmup=15s ===
+[Warmup] Dummy query: 2544 ms
+[Warmup] Waiting 15 seconds for CacheMonitor recovery...
+[Warmup] Done. Starting main queries.
+  Query 1: 8 rows, 217 ms
+  Query 2: 8 rows, 7 ms
+  Query 3: 8 rows, 2 ms
+  Query 4: 8 rows, 2 ms
+  Query 5: 8 rows, 2 ms
+  Query 6: 8 rows, 1 ms
+  Query 7: 8 rows, 3 ms
+  Query 8: 8 rows, 2 ms
+```
+
+Query 1 が 217ms に悪化した。前回の記事で報告した CacheMonitor のヘルスチェック常時失敗（borrow タイムアウト 100ms 固定）が影響していると推測される。待機中にヘルスチェックが繰り返し失敗し、一度 `HEALTHY` に回復した CacheMonitor が再び `SUSPECT` に遷移した可能性がある。ただし、今回のテストではログレベルの制約で SUSPECT 再遷移を直接確認できていない。
+
+**待機時間は短すぎても長すぎてもダメで、5-10秒が最適だ。**
+
+### ウォームアップ結果まとめ
+
+| 待機時間 | ダミークエリ | Query 1 | Query 2-8 | 判定 |
+| --- | --- | --- | --- | --- |
+| 0秒（ベースライン） | — | 2961ms | 1-173ms | ❌ |
+| 5秒 | 2534ms | 6ms | 1-2ms | ✅ |
+| 10秒 | 2584ms | 6ms | 1-2ms | ✅ |
+| 15秒 | 2544ms | 217ms | 1-7ms | ⚠️ |
+
+## 構成別比較
+
+シリーズ3本の検証結果を横並びで比較する。
+
+| 構成 | 初回タイムアウト | CacheMonitor | ヒット時レイテンシ | 運用上の考慮事項 |
+| --- | --- | --- | --- | --- |
+| ノードベース TLSなし（[第1回](/ja/blog/2026/03/27/jdbc-query-cache-valkey-node-based)） | なし | HEALTHY 維持 | 1-4ms | ノードサイズ・スケーリング管理が必要 |
+| ノードベース TLS有効（本記事 検証1） | なし | HEALTHY 維持 | 2-8ms | ノード管理 + TLS で若干レイテンシ増 |
+| Serverless（[第2回](/ja/blog/2026/03/27/jdbc-query-cache-valkey-serverless)） | あり（~3秒） | ヘルスチェック常時失敗 | 1-216ms | ウォームアップなしでは不安定 |
+| Serverless + ウォームアップ5秒（本記事 検証2） | ウォームアップで吸収 | 回復後 HEALTHY | 1-6ms | 起動時に ~8秒の初期化が必要 |
+
+**ノードベースは TLS の有無に関わらず安定している。** TLS 有効でもレイテンシ増は数ms で、CacheMonitor の問題は発生しない。
+
+**Serverless はウォームアップで実用レベルになる。** ただし、CacheMonitor のヘルスチェック常時失敗という根本的な課題は残っており、長時間運用での安定性は追加検証が必要だ。
+
+どの構成が適するかはアプリケーションの特性で変わる。
+
+- **Web アプリ（ECS / EC2 など長時間稼働）** — Serverless + ウォームアップが有力。起動時の ~8秒は許容範囲で、スケーリング管理が不要になるメリットが大きい。ただし、デプロイ時のローリングアップデートでコンテナが再起動するたびにウォームアップが走る点は考慮が必要
+- **Lambda（コールドスタートが頻繁）** — ノードベースが安定。Lambda のコールドスタートに ~8秒のウォームアップを加えるとレイテンシが許容範囲を超える可能性がある
+- **バッチ処理（起動回数が少ない）** — どちらでも問題ない。起動時の ~8秒は無視できるため、管理コストの低い Serverless が合理的
+
+## まとめ
+
+- **初回タイムアウトは Serverless 固有の問題** — ノードベース + TLS 有効では初回タイムアウトは発生しない。TLS ハンドシェイク自体ではなく、Serverless エンドポイントの初回接続レイテンシがプラグイン内部の接続タイムアウトを超えることが原因だ
+- **ウォームアップ + 5秒待機で回避可能** — ダミークエリで初回タイムアウトを吸収し、CacheMonitor の回復を待つことで、キャッシュの読み書きが正常に機能する状態を確保できる。ただし待機が長すぎると（15秒）再度不安定になるため、5-10秒が最適だ
+- **構成選択はアプリケーション特性で決まる** — 長時間稼働なら Serverless + ウォームアップ、コールドスタートが頻繁ならノードベースが安定。詳細は[構成別比較](#構成別比較)を参照
+
+## クリーンアップ
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">リソース削除コマンド</summary>
+
+```bash title="Terminal"
+# ElastiCache ノードベース TLS
+aws elasticache delete-replication-group \
+  --replication-group-id jdbc-cache-test-tls \
+  --no-final-snapshot-identifier \
+  --region ap-northeast-1
+
+# ElastiCache Serverless
+aws elasticache delete-serverless-cache \
+  --serverless-cache-name jdbc-cache-test \
+  --region ap-northeast-1
+
+# Aurora
+aws rds delete-db-instance --db-instance-identifier jdbc-cache-test-writer \
+  --skip-final-snapshot --region ap-northeast-1
+aws rds wait db-instance-deleted \
+  --db-instance-identifier jdbc-cache-test-writer --region ap-northeast-1
+aws rds delete-db-cluster --db-cluster-identifier jdbc-cache-test \
+  --skip-final-snapshot --region ap-northeast-1
+
+# EC2
+aws ec2 terminate-instances --instance-ids <instance-id> --region ap-northeast-1
+
+# 削除完了を待ってからネットワークリソースを削除
+aws ec2 delete-key-pair --key-name jdbc-cache-test --region ap-northeast-1
+aws ec2 delete-security-group --group-id <sg-aurora> --region ap-northeast-1
+aws ec2 delete-security-group --group-id <sg-cache> --region ap-northeast-1
+aws ec2 delete-security-group --group-id <sg-ec2> --region ap-northeast-1
+aws elasticache delete-cache-subnet-group \
+  --cache-subnet-group-name jdbc-cache-test --region ap-northeast-1
+aws rds delete-db-subnet-group \
+  --db-subnet-group-name jdbc-cache-test --region ap-northeast-1
+aws ec2 detach-internet-gateway \
+  --internet-gateway-id <igw-id> --vpc-id <vpc-id> --region ap-northeast-1
+aws ec2 delete-internet-gateway \
+  --internet-gateway-id <igw-id> --region ap-northeast-1
+aws ec2 delete-subnet --subnet-id <subnet-a> --region ap-northeast-1
+aws ec2 delete-subnet --subnet-id <subnet-c> --region ap-northeast-1
+aws ec2 delete-subnet --subnet-id <subnet-d> --region ap-northeast-1
+aws ec2 delete-vpc --vpc-id <vpc-id> --region ap-northeast-1
+```
+
+</details>
