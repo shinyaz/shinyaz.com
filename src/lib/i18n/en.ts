@@ -110,5 +110,6 @@ export const en = {
   footer: {
     copyright: "All rights reserved.",
     privacy: "Privacy Policy",
+    colophon: "Colophon",
   },
 } as const;

@@ -93,10 +93,24 @@ export function Footer({ locale }: FooterProps) {
         </a>
         <span className="mx-1">&middot;</span>
         <a
+          href={`/${locale}/projects`}
+          className="hover:text-foreground transition-colors"
+        >
+          {t.nav.projects}
+        </a>
+        <span className="mx-1">&middot;</span>
+        <a
+          href={`/${locale}/uses`}
+          className="hover:text-foreground transition-colors"
+        >
+          {t.nav.uses}
+        </a>
+        <span className="mx-1">&middot;</span>
+        <a
           href={`/${locale}/colophon`}
           className="hover:text-foreground transition-colors"
         >
-          Colophon
+          {t.footer.colophon}
         </a>
         <span className="mx-1">&middot;</span>
         <a
