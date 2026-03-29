@@ -581,6 +581,8 @@ Query 1 が 217ms に悪化した。前回の記事で報告した CacheMonitor 
 - **ウォームアップ + 5秒待機で回避可能** — ダミークエリで初回タイムアウトを吸収し、CacheMonitor の回復を待つことで、キャッシュの読み書きが正常に機能する状態を確保できる。ただし待機が長すぎると（15秒）再度不安定になるため、5-10秒が最適だ
 - **構成選択はアプリケーション特性で決まる** — 長時間稼働なら Serverless + ウォームアップ、コールドスタートが頻繁ならノードベースが安定。詳細は[構成別比較](#構成別比較)を参照
 
+[次回の記事](/ja/blog/2026/03/30/jdbc-query-cache-valkey-serverless-long-running)では、Serverless + ウォームアップ構成の長時間安定性を1時間の連続負荷とアイドル後の再接続で検証する。
+
 ## クリーンアップ
 
 <details className="my-4 rounded-lg border border-border bg-muted/30 p-4">

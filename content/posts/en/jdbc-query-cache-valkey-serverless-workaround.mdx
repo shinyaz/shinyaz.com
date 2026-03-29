@@ -581,6 +581,8 @@ The best configuration depends on your application's characteristics:
 - **Warmup + 5-second wait is an effective workaround** — A dummy query absorbs the initial timeout, and after CacheMonitor recovers, cache reads and writes function correctly. Waiting too long (15s) can cause instability, so 5-10 seconds is optimal
 - **Configuration choice depends on application characteristics** — For long-running services, Serverless + warmup works well. For frequent cold starts, node-based is more stable. See [Configuration Comparison](#configuration-comparison) for details
 
+In the [next article](/en/blog/2026/03/30/jdbc-query-cache-valkey-serverless-long-running), we test the long-running stability of Serverless + warmup with 1 hour of continuous load and idle recovery.
+
 ## Cleanup
 
 <details className="my-4 rounded-lg border border-border bg-muted/30 p-4">

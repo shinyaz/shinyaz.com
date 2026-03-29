@@ -1,0 +1,570 @@
+---
+title: "JDBC Wrapper Valkey キャッシュ検証 — Serverless + ウォームアップの長時間安定性とアイドル耐性"
+description: "1時間の連続負荷でヒット率98.9%を確認。10分アイドル後もタイムアウト再発なし。公式ドキュメントの接続再利用推奨と合わせ、Serverless + ウォームアップが本番で使える条件を整理した。"
+date: 2026-03-30
+published: true
+featured: false
+categories:
+  - infrastructure
+tags: ["aws", "aurora", "postgresql", "elasticache", "valkey", "java", "jdbc", "database"]
+series: "jdbc-query-cache-valkey"
+seriesOrder: 4
+---
+
+## はじめに
+
+[前回の記事](/ja/blog/2026/03/30/jdbc-query-cache-valkey-serverless-workaround)では、ElastiCache for Valkey Serverless の初回タイムアウト問題に対して、ウォームアップ接続 + 5秒待機というワークアラウンドが有効であることを確認した。しかし、検証は数十秒〜数分の短時間実行であり、**長時間運用での安定性は未検証**のまま残っていた。
+
+特に懸念されるのは以下の2点だ。
+
+1. **CacheMonitor のヘルスチェック常時失敗の影響** — [第2回記事](/ja/blog/2026/03/27/jdbc-query-cache-valkey-serverless)で報告した通り、borrow タイムアウト 100ms 固定の問題は解消されていない。長時間運用でキャッシュヒット率が低下する時間帯が周期的に発生する可能性がある
+2. **アイドル後の接続維持** — トラフィックが途切れた後、Serverless 側が接続を切断し、再度初回タイムアウトが発生する可能性がある
+
+本記事ではこの2点を「1時間の連続負荷」と「10分アイドル後の再接続」で定量評価する。
+
+なお、AWS 公式ドキュメントの [ElastiCache Serverless トラブルシューティング](https://docs.aws.amazon.com/AmazonElastiCache/latest/dg/wwe-troubleshooting.html)には、Serverless の初回接続レイテンシについて以下の記述がある。
+
+> Reuse connections: ElastiCache Serverless requests are made via a TLS enabled TCP connection using the RESP protocol. Initiating the connection (including authenticating the connection, if configured) takes time so the latency of the first request is higher than typical. Requests over an already initialized connection deliver ElastiCache's consistent low latency. For this reason, you should consider using connection pooling or reusing existing Valkey or Redis OSS connections.
+
+AWS 自身が「初回リクエストは通常より高レイテンシになる」と認めており、「接続プーリングまたは既存接続の再利用」を推奨している。前回のウォームアップはまさにこの推奨に沿ったワークアラウンドだ。
+
+また、[サーバー側アイドルタイムアウトの設定](https://docs.aws.amazon.com/AmazonElastiCache/latest/dg/BestPractices.Clients.Redis.ServerTimeout.html)については「This setting is not available on serverless caches」と明記されており、Serverless がアイドル接続をいつ切断するかは非公開だ。検証2ではこの点を実機で確認する。
+
+検証1は約1時間かかる。結果だけ知りたい場合は[まとめ](#まとめ)にスキップできる。
+
+## 検証環境
+
+| 項目 | 値 |
+| --- | --- |
+| リージョン | ap-northeast-1（東京） |
+| DB | Aurora PostgreSQL Serverless v2（16.6、0.5-2 ACU） |
+| キャッシュ | ElastiCache for Valkey Serverless（Valkey 8） |
+| 実行環境 | EC2 t3.small（Amazon Linux 2023、同一 VPC 内） |
+| Java | Amazon Corretto 21 |
+| AWS JDBC Wrapper | 3.3.0 |
+| PostgreSQL JDBC | 42.7.8 |
+| Valkey Glide | 2.3.0 |
+| テストデータ | products テーブル 100万行 |
+
+前提条件:
+
+- AWS CLI セットアップ済み（`rds:*`、`elasticache:*`、`ec2:*` の操作権限）
+- Java 21 + Maven
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">インフラ構築手順（VPC / Aurora / ElastiCache / EC2）</summary>
+
+### VPC・サブネット・セキュリティグループ
+
+```bash title="Terminal"
+export AWS_REGION=ap-northeast-1
+MY_IP="$(curl -s https://checkip.amazonaws.com)/32"
+
+# VPC
+VPC_ID=$(aws ec2 create-vpc --cidr-block 10.0.0.0/16 \
+  --tag-specifications 'ResourceType=vpc,Tags=[{Key=Name,Value=jdbc-cache-test}]' \
+  --query 'Vpc.VpcId' --output text --region $AWS_REGION)
+aws ec2 modify-vpc-attribute --enable-dns-hostnames '{"Value":true}' --vpc-id $VPC_ID
+
+# サブネット（3 AZ）
+SUBNET_A=$(aws ec2 create-subnet --vpc-id $VPC_ID --cidr-block 10.0.1.0/24 \
+  --availability-zone ${AWS_REGION}a --query 'Subnet.SubnetId' --output text --region $AWS_REGION)
+SUBNET_C=$(aws ec2 create-subnet --vpc-id $VPC_ID --cidr-block 10.0.2.0/24 \
+  --availability-zone ${AWS_REGION}c --query 'Subnet.SubnetId' --output text --region $AWS_REGION)
+SUBNET_D=$(aws ec2 create-subnet --vpc-id $VPC_ID --cidr-block 10.0.3.0/24 \
+  --availability-zone ${AWS_REGION}d --query 'Subnet.SubnetId' --output text --region $AWS_REGION)
+
+# IGW（EC2 への SSH 用）
+IGW_ID=$(aws ec2 create-internet-gateway --query 'InternetGateway.InternetGatewayId' \
+  --output text --region $AWS_REGION)
+aws ec2 attach-internet-gateway --internet-gateway-id $IGW_ID --vpc-id $VPC_ID
+RTB_ID=$(aws ec2 describe-route-tables --filters "Name=vpc-id,Values=$VPC_ID" \
+  --query 'RouteTables[0].RouteTableId' --output text --region $AWS_REGION)
+aws ec2 create-route --route-table-id $RTB_ID --destination-cidr-block 0.0.0.0/0 --gateway-id $IGW_ID
+aws ec2 modify-subnet-attribute --subnet-id $SUBNET_A --map-public-ip-on-launch
+
+# セキュリティグループ
+SG_EC2=$(aws ec2 create-security-group --group-name jdbc-cache-test-ec2 \
+  --description "EC2" --vpc-id $VPC_ID --query 'GroupId' --output text --region $AWS_REGION)
+SG_AURORA=$(aws ec2 create-security-group --group-name jdbc-cache-test-aurora \
+  --description "Aurora" --vpc-id $VPC_ID --query 'GroupId' --output text --region $AWS_REGION)
+SG_CACHE=$(aws ec2 create-security-group --group-name jdbc-cache-test-cache \
+  --description "ElastiCache" --vpc-id $VPC_ID --query 'GroupId' --output text --region $AWS_REGION)
+
+aws ec2 authorize-security-group-ingress --group-id $SG_EC2 --protocol tcp --port 22 --cidr $MY_IP
+aws ec2 authorize-security-group-ingress --group-id $SG_AURORA --protocol tcp --port 5432 --source-group $SG_EC2
+aws ec2 authorize-security-group-ingress --group-id $SG_CACHE --protocol tcp --port 6379 --source-group $SG_EC2
+```
+
+### Aurora PostgreSQL Serverless v2
+
+```bash title="Terminal"
+aws rds create-db-subnet-group --db-subnet-group-name jdbc-cache-test \
+  --db-subnet-group-description "JDBC cache test" \
+  --subnet-ids "$SUBNET_A" "$SUBNET_C" "$SUBNET_D" --region $AWS_REGION
+
+aws rds create-db-cluster --db-cluster-identifier jdbc-cache-test \
+  --engine aurora-postgresql --engine-version 16.6 \
+  --master-username postgres --master-user-password '<password>' \
+  --db-subnet-group-name jdbc-cache-test \
+  --vpc-security-group-ids $SG_AURORA \
+  --serverless-v2-scaling-configuration MinCapacity=0.5,MaxCapacity=2 \
+  --storage-encrypted --no-deletion-protection --region $AWS_REGION
+
+aws rds create-db-instance --db-instance-identifier jdbc-cache-test-writer \
+  --db-cluster-identifier jdbc-cache-test \
+  --db-instance-class db.serverless --engine aurora-postgresql --region $AWS_REGION
+
+aws rds wait db-instance-available --db-instance-identifier jdbc-cache-test-writer --region $AWS_REGION
+```
+
+### ElastiCache for Valkey Serverless
+
+```bash title="Terminal"
+aws elasticache create-serverless-cache \
+  --serverless-cache-name jdbc-cache-test \
+  --engine valkey \
+  --subnet-ids "$SUBNET_A" "$SUBNET_C" "$SUBNET_D" \
+  --security-group-ids $SG_CACHE --region $AWS_REGION
+```
+
+### EC2 インスタンス
+
+```bash title="Terminal"
+AMI_ID=$(aws ec2 describe-images --owners amazon \
+  --filters "Name=name,Values=al2023-ami-2023.*-x86_64" "Name=state,Values=available" \
+  --query 'sort_by(Images, &CreationDate)[-1].ImageId' --output text --region $AWS_REGION)
+
+aws ec2 create-key-pair --key-name jdbc-cache-test --key-type ed25519 \
+  --query 'KeyMaterial' --output text > jdbc-cache-test.pem
+chmod 600 jdbc-cache-test.pem
+
+aws ec2 run-instances --image-id $AMI_ID --instance-type t3.small \
+  --key-name jdbc-cache-test --security-group-ids $SG_EC2 \
+  --subnet-id $SUBNET_A \
+  --tag-specifications 'ResourceType=instance,Tags=[{Key=Name,Value=jdbc-cache-test}]' \
+  --region $AWS_REGION
+
+ssh ec2-user@<public-ip> 'sudo dnf install -y java-21-amazon-corretto-devel maven postgresql16'
+```
+
+### テストデータ（100万行）
+
+```bash title="Terminal"
+PGPASSWORD='<password>' psql -h <aurora-endpoint> -U postgres -d postgres -c "
+CREATE TABLE products (
+  id SERIAL PRIMARY KEY,
+  name VARCHAR(100) NOT NULL,
+  category VARCHAR(50) NOT NULL,
+  price NUMERIC(10,2) NOT NULL,
+  stock INT NOT NULL DEFAULT 0
+);
+INSERT INTO products (name, category, price, stock)
+SELECT
+  'Product-' || i,
+  (ARRAY['laptop','phone','tablet','audio','camera','monitor','keyboard','mouse'])[1 + (i % 8)],
+  (random() * 500000 + 1000)::numeric(10,2),
+  (random() * 1000)::int
+FROM generate_series(1, 1000000) AS i;
+ANALYZE products;
+"
+```
+
+</details>
+
+## テストアプリケーション
+
+前回までのテストアプリを長時間実行に対応させた。主な変更点は以下の3つ。
+
+1. **10分ごとのサマリ出力** — ヒット数・ミス数・平均レイテンシ・最大レイテンシを10分バケットで集計
+2. **ヒット/ミスの自動判定** — 50ms を閾値とし、以下をヒット、超過をミスとカウント。第3回の検証結果からキャッシュヒットは 1-6ms、DB 直接アクセスは 100ms 以上であり、50ms は十分な余裕を持った閾値だ
+3. **アイドルテストモード** — 指定分数の実行 → アイドル → 再実行を1コマンドで実行
+
+```java title="Java（サマリ出力の核心部分）"
+// 10分ごとのバケットサマリを出力
+if (System.currentTimeMillis() >= bucketEnd) {
+    System.out.printf("[%s] %4d-%2dm %6d %6d %6d %8.1f %8d%n",
+        label, (bucketNum-1)*10, bucketNum*10,
+        bucketTotal, bucketHits, bucketMisses,
+        (double)bucketSum/bucketTotal, bucketMax);
+}
+```
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">pom.xml（前回と同一）</summary>
+
+```xml title="pom.xml"
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0
+           http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+    <groupId>cachetest</groupId>
+    <artifactId>jdbc-cache-test</artifactId>
+    <version>1.0</version>
+    <properties>
+        <maven.compiler.source>21</maven.compiler.source>
+        <maven.compiler.target>21</maven.compiler.target>
+    </properties>
+    <dependencies>
+        <dependency>
+            <groupId>software.amazon.jdbc</groupId>
+            <artifactId>aws-advanced-jdbc-wrapper</artifactId>
+            <version>3.3.0</version>
+        </dependency>
+        <dependency>
+            <groupId>org.postgresql</groupId>
+            <artifactId>postgresql</artifactId>
+            <version>42.7.8</version>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.commons</groupId>
+            <artifactId>commons-pool2</artifactId>
+            <version>2.12.0</version>
+        </dependency>
+        <dependency>
+            <groupId>io.valkey</groupId>
+            <artifactId>valkey-glide</artifactId>
+            <version>2.3.0</version>
+        </dependency>
+        <dependency>
+            <groupId>org.slf4j</groupId>
+            <artifactId>slf4j-simple</artifactId>
+            <version>2.0.16</version>
+        </dependency>
+    </dependencies>
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-jar-plugin</artifactId>
+                <version>3.4.2</version>
+                <configuration>
+                    <archive><manifest>
+                        <mainClass>cachetest.LongRunTest</mainClass>
+                    </manifest></archive>
+                </configuration>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-dependency-plugin</artifactId>
+                <version>3.8.1</version>
+                <executions>
+                    <execution>
+                        <id>copy-deps</id><phase>package</phase>
+                        <goals><goal>copy-dependencies</goal></goals>
+                        <configuration>
+                            <outputDirectory>
+                                ${project.build.directory}/lib
+                            </outputDirectory>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+        </plugins>
+    </build>
+</project>
+```
+
+</details>
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">LongRunTest.java（テストアプリ全体）</summary>
+
+```java title="LongRunTest.java"
+package cachetest;
+
+import java.sql.*;
+import java.time.Duration;
+import java.time.Instant;
+import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
+import java.util.Properties;
+
+public class LongRunTest {
+    static final int HIT_THRESHOLD_MS = 50;
+    static final DateTimeFormatter FMT =
+        DateTimeFormatter.ofPattern("HH:mm:ss");
+
+    public static void main(String[] args) throws Exception {
+        if (args.length < 5) {
+            System.out.println("Usage: LongRunTest <db-endpoint> <password>"
+                + " <cache-endpoint> <interval-sec> <duration-min>"
+                + " [idle-min]");
+            return;
+        }
+        String dbEndpoint = args[0], dbPassword = args[1],
+               cacheEndpoint = args[2];
+        int intervalSec = Integer.parseInt(args[3]);
+        int durationMin = Integer.parseInt(args[4]);
+        int idleMin = args.length >= 6 ? Integer.parseInt(args[5]) : 0;
+
+        Properties props = new Properties();
+        props.setProperty("user", "postgres");
+        props.setProperty("password", dbPassword);
+        props.setProperty("wrapperPlugins", "remoteQueryCache");
+        props.setProperty("cacheEndpointAddrRw",
+            cacheEndpoint + ":6379");
+
+        String url = "jdbc:aws-wrapper:postgresql://"
+            + dbEndpoint + ":5432/postgres";
+        String query = "/* CACHE_PARAM(ttl=3600s) */ "
+            + "SELECT category, COUNT(*), AVG(price)::numeric(10,2) "
+            + "FROM products GROUP BY category ORDER BY COUNT(*) DESC";
+
+        try (Connection conn =
+                 DriverManager.getConnection(url, props)) {
+            // Warmup
+            System.out.println("[Warmup] Sending dummy query...");
+            Instant ws = Instant.now();
+            try (Statement s = conn.createStatement();
+                 ResultSet r = s.executeQuery(
+                     "/* CACHE_PARAM(ttl=1s) */ SELECT 1")) {
+                r.next();
+            }
+            System.out.printf("[Warmup] Dummy query: %d ms%n",
+                Duration.between(ws, Instant.now()).toMillis());
+            System.out.println("[Warmup] Waiting 5 seconds...");
+            Thread.sleep(5000);
+            System.out.println("[Warmup] Done.\n");
+
+            if (idleMin > 0) {
+                System.out.printf("=== Idle Test: 5min run -> "
+                    + "%dmin idle -> 5min run ===%n", idleMin);
+                runPhase(conn, query, intervalSec, 5, "Pre-idle");
+                System.out.printf("%n[Idle] Sleeping %d minutes...%n",
+                    idleMin);
+                Thread.sleep(idleMin * 60_000L);
+                System.out.printf("[Idle] Resumed at %s%n%n",
+                    LocalDateTime.now().format(FMT));
+                runPhase(conn, query, intervalSec, 5, "Post-idle");
+            } else {
+                System.out.printf("=== Continuous: %d min, "
+                    + "%ds interval, TTL=3600s ===%n",
+                    durationMin, intervalSec);
+                runPhase(conn, query, intervalSec,
+                    durationMin, "Continuous");
+            }
+        }
+    }
+
+    static void runPhase(Connection conn, String query,
+            int intervalSec, int durationMin, String label)
+            throws Exception {
+        long endTime =
+            System.currentTimeMillis() + durationMin * 60_000L;
+        int total = 0, hits = 0, misses = 0;
+        long sumMs = 0, maxMs = 0;
+        int bucketMin = 10;
+        int bTotal = 0, bHits = 0, bMisses = 0;
+        long bSum = 0, bMax = 0;
+        int bNum = 0;
+        long bEnd =
+            System.currentTimeMillis() + bucketMin * 60_000L;
+
+        System.out.printf("[%s] %-8s %6s %6s %6s %8s %8s%n",
+            label, "Bucket", "Total", "Hits", "Misses",
+            "Avg(ms)", "Max(ms)");
+        System.out.println("-".repeat(70));
+
+        while (System.currentTimeMillis() < endTime) {
+            Instant start = Instant.now();
+            try (Statement s = conn.createStatement();
+                 ResultSet r = s.executeQuery(query)) {
+                while (r.next()) {}
+            }
+            long ms =
+                Duration.between(start, Instant.now()).toMillis();
+
+            total++; sumMs += ms;
+            maxMs = Math.max(maxMs, ms);
+            bTotal++; bSum += ms;
+            bMax = Math.max(bMax, ms);
+            if (ms <= HIT_THRESHOLD_MS) { hits++; bHits++; }
+            else { misses++; bMisses++; }
+
+            if (System.currentTimeMillis() >= bEnd
+                    || System.currentTimeMillis() >= endTime) {
+                bNum++;
+                System.out.printf(
+                    "[%s] %4d-%2dm %6d %6d %6d %8.1f %8d%n",
+                    label, (bNum-1)*bucketMin, bNum*bucketMin,
+                    bTotal, bHits, bMisses,
+                    bTotal > 0 ? (double)bSum/bTotal : 0, bMax);
+                bTotal = 0; bHits = 0; bMisses = 0;
+                bSum = 0; bMax = 0;
+                bEnd = System.currentTimeMillis()
+                    + bucketMin * 60_000L;
+            }
+
+            long sleepMs = intervalSec * 1000L - ms;
+            if (sleepMs > 0) Thread.sleep(sleepMs);
+        }
+
+        System.out.println("-".repeat(70));
+        System.out.printf("[%s] TOTAL   %6d %6d %6d %8.1f %8d%n",
+            label, total, hits, misses,
+            total > 0 ? (double)sumMs/total : 0, maxMs);
+        System.out.printf("[%s] Hit rate: %.1f%%%n%n", label,
+            total > 0 ? 100.0*hits/total : 0);
+    }
+}
+```
+
+</details>
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">ビルドと実行</summary>
+
+```bash title="Terminal"
+mkdir -p jdbc-cache-test/src/main/java/cachetest
+# pom.xml を jdbc-cache-test/ に、
+# LongRunTest.java を jdbc-cache-test/src/main/java/cachetest/ に配置
+
+export JAVA_HOME=/usr/lib/jvm/java-21-amazon-corretto
+cd jdbc-cache-test && mvn package -q
+
+CP="target/jdbc-cache-test-1.0.jar"
+for jar in target/lib/*.jar; do CP="$CP:$jar"; done
+
+# 検証1: 1時間連続負荷（10秒間隔）
+java -cp "$CP" cachetest.LongRunTest \
+  <aurora-endpoint> <password> <cache-endpoint> 10 60
+
+# 検証2: 5分実行 → 10分アイドル → 5分実行
+java -cp "$CP" cachetest.LongRunTest \
+  <aurora-endpoint> <password> <cache-endpoint> 10 5 10
+```
+
+</details>
+
+## 検証1: 1時間連続負荷 — キャッシュの安定性
+
+ウォームアップ（ダミークエリ + 5秒待機）後、10秒間隔で集計クエリを1時間実行した。10秒間隔は Web アプリで同一の集計クエリが繰り返される現実的な頻度を想定している。TTL は 3600秒（1時間）に設定し、TTL 切れによるキャッシュミスを排除している。これにより、レイテンシが 50ms を超えた場合は CacheMonitor の状態遷移が原因と判断できる。
+
+```bash title="Terminal"
+java -cp "$CP" cachetest.LongRunTest \
+  <aurora-endpoint> <password> \
+  jdbc-cache-test-xxx.serverless.apne1.cache.amazonaws.com \
+  10 60
+```
+
+```text title="Output"
+[Warmup] Dummy query: 2541 ms
+[Warmup] Waiting 5 seconds...
+[Warmup] Done.
+
+=== Continuous: 60 min, 10s interval, TTL=3600s ===
+[Continuous] Bucket    Total   Hits Misses  Avg(ms)  Max(ms)
+----------------------------------------------------------------------
+[Continuous]    0-10m     61     59      2      6.8      206
+[Continuous]   10-20m     60     59      1      3.7       75
+[Continuous]   20-30m     60     60      0      2.1       32
+[Continuous]   30-40m     60     60      0      1.4        7
+[Continuous]   40-50m     60     59      1      2.6       64
+----------------------------------------------------------------------
+[Continuous] TOTAL      360    356      4      3.1      206
+[Continuous] Hit rate: 98.9%
+```
+
+**1時間で360クエリ中356ヒット、ヒット率98.9%。** 結果を区間ごとに分析する。
+
+- **0-10分（2ミス、最大206ms）** — ウォームアップ直後の安定化期間。CacheMonitor が HEALTHY に回復した直後は、ヘルスチェックの状態が安定するまで散発的にキャッシュがバイパスされる。最初の1-2クエリがミスになった
+- **10-20分（1ミス、最大75ms）** — ほぼ安定。1回だけ 75ms のミスが発生したが、50ms の閾値をわずかに超えた程度
+- **20-40分（0ミス、最大32ms/7ms）** — 完全に安定。全クエリがキャッシュヒットし、平均レイテンシも 1.4-2.1ms まで低下
+- **40-50分（1ミス、最大64ms）** — 再び1回のミス。CacheMonitor のヘルスチェック失敗による周期的な SUSPECT 再遷移の影響と推測される
+
+50-60分のバケットはテストアプリのバケット出力タイミングの都合で個別出力されていないが、TOTAL 行には含まれている。TOTAL から逆算すると 50-60分は59クエリ全ヒット（ミス0）だ。
+
+**CacheMonitor のヘルスチェック常時失敗は、データパスのキャッシュ読み書きにはほとんど影響しない。** ヘルスチェックとデータパスが別の接続プールを使うという[第2回記事](/ja/blog/2026/03/27/jdbc-query-cache-valkey-serverless)の分析通り、連続的なトラフィックがある限りキャッシュは安定して動作する。ただし、散発的なミス（1時間で4回）は発生するため、ヒット率100%を前提とした設計は避けるべきだ。
+
+## 検証2: 10分アイドル後の再接続
+
+トラフィックが途切れた後、Serverless 側が接続を切断して再度初回タイムアウトが発生するかを確認する。ウォームアップ後、5分間クエリを実行し安定動作を確認した後、10分間クエリを停止。アイドル後に再度5分間クエリを実行した。
+
+TTL は 3600秒なので、10分アイドル後もキャッシュエントリは有効だ。レイテンシが跳ねた場合は接続切断が原因と判断できる。
+
+```bash title="Terminal"
+java -cp "$CP" cachetest.LongRunTest \
+  <aurora-endpoint> <password> \
+  jdbc-cache-test-xxx.serverless.apne1.cache.amazonaws.com \
+  10 5 10
+```
+
+```text title="Output"
+[Warmup] Dummy query: 2582 ms
+[Warmup] Waiting 5 seconds...
+[Warmup] Done.
+
+=== Idle Test: 5min run -> 10min idle -> 5min run ===
+[Pre-idle] Bucket    Total   Hits Misses  Avg(ms)  Max(ms)
+----------------------------------------------------------------------
+----------------------------------------------------------------------
+[Pre-idle] TOTAL       30     29      1     13.8      315
+[Pre-idle] Hit rate: 96.7%
+
+[Idle] Sleeping 10 minutes...
+[Idle] Resumed at 15:01:42
+
+[Post-idle] Bucket    Total   Hits Misses  Avg(ms)  Max(ms)
+----------------------------------------------------------------------
+----------------------------------------------------------------------
+[Post-idle] TOTAL       30     30      0      3.1       21
+[Post-idle] Hit rate: 100.0%
+```
+
+**10分アイドル後もタイムアウトは再発しなかった。** Post-idle フェーズは30クエリ全てがヒットし、最大レイテンシも 21ms に留まっている。
+
+Pre-idle の1ミス（最大315ms）はウォームアップ直後の安定化期間によるもので、検証1の 0-10分バケットと同じ傾向だ。
+
+この結果から、**Serverless の接続は少なくとも10分のアイドルでは切断されない**ことが確認できた。公式ドキュメントではサーバー側アイドルタイムアウトが「serverless caches では利用不可」とされており、具体的な切断タイミングは非公開だが、10分程度のアイドルは許容されることが実機で確認できた。
+
+## まとめ
+
+- **連続負荷では1時間安定動作** — ヒット率98.9%（360クエリ中356ヒット）。CacheMonitor のヘルスチェック常時失敗はデータパスにほとんど影響しない。ただし散発的なミス（1時間で4回）は発生するため、キャッシュミス時の DB フォールバックを前提とした設計が必要
+- **10分アイドル後もタイムアウト再発なし** — Serverless の接続は10分のアイドルでは切断されない。定期的なキープアライブは少なくとも10分間隔では不要。より長いアイドル（30分、1時間）での挙動は今後の検証課題として残る
+- **本番導入の判断** — 連続的なトラフィックがある Web アプリであれば、Serverless + ウォームアップは本番で使える。AWS 公式ドキュメントの「接続再利用」推奨にも合致する。トラフィックが長時間途切れる環境（深夜帯に数時間アクセスなし等）では、ノードベースの方が確実
+
+## クリーンアップ
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">リソース削除コマンド</summary>
+
+```bash title="Terminal"
+# ElastiCache Serverless
+aws elasticache delete-serverless-cache \
+  --serverless-cache-name jdbc-cache-test \
+  --region ap-northeast-1
+
+# Aurora
+aws rds delete-db-instance --db-instance-identifier jdbc-cache-test-writer \
+  --skip-final-snapshot --region ap-northeast-1
+aws rds wait db-instance-deleted \
+  --db-instance-identifier jdbc-cache-test-writer --region ap-northeast-1
+aws rds delete-db-cluster --db-cluster-identifier jdbc-cache-test \
+  --skip-final-snapshot --region ap-northeast-1
+
+# EC2
+aws ec2 terminate-instances --instance-ids <instance-id> --region ap-northeast-1
+
+# 削除完了を待ってからネットワークリソースを削除
+aws ec2 delete-key-pair --key-name jdbc-cache-test --region ap-northeast-1
+aws ec2 delete-security-group --group-id <sg-aurora> --region ap-northeast-1
+aws ec2 delete-security-group --group-id <sg-cache> --region ap-northeast-1
+aws ec2 delete-security-group --group-id <sg-ec2> --region ap-northeast-1
+aws elasticache delete-cache-subnet-group \
+  --cache-subnet-group-name jdbc-cache-test --region ap-northeast-1
+aws rds delete-db-subnet-group \
+  --db-subnet-group-name jdbc-cache-test --region ap-northeast-1
+aws ec2 detach-internet-gateway \
+  --internet-gateway-id <igw-id> --vpc-id <vpc-id> --region ap-northeast-1
+aws ec2 delete-internet-gateway \
+  --internet-gateway-id <igw-id> --region ap-northeast-1
+aws ec2 delete-subnet --subnet-id <subnet-a> --region ap-northeast-1
+aws ec2 delete-subnet --subnet-id <subnet-c> --region ap-northeast-1
+aws ec2 delete-subnet --subnet-id <subnet-d> --region ap-northeast-1
+aws ec2 delete-vpc --vpc-id <vpc-id> --region ap-northeast-1
+```
+
+</details>
