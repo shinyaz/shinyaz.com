@@ -8,7 +8,7 @@ tags: ["aws", "lambda", "rust", "performance", "tls"]
 
 While writing a [Lambda Rust + DynamoDB benchmark](/en/blog/2026/03/31/lambda-rust-dynamodb-latency), I noticed the first request after a cold start took 912ms. Init Duration itself was only 112ms — fast. Yet the first DynamoDB call was abnormally slow.
 
-[Breaking down the latency](/en/blog/2026/03/31/lambda-rust-tls-latency-breakdown) revealed that TLS handshake averages 745ms, accounting for 99% of the total. DNS resolution is 7ms, TCP connection is under 1ms. At 128MB (roughly 7% of a vCPU), TLS cryptographic processing is extremely expensive.
+[Breaking down the latency](/en/blog/2026/03/31/lambda-rust-tls-latency-breakdown) revealed that TLS handshake averages 745ms, accounting for 99% of the total. DNS resolution is 7.3ms, TCP connection is under 1ms. At 128MB (roughly 7% of a vCPU), TLS cryptographic processing is extremely expensive.
 
 ```text title="Output"
 DNS:  7.3ms   (1%)
