@@ -346,7 +346,7 @@ done
 
 **初回 Duration が912ms → 21ms に激減した。** Init Duration は54ms 増加するが、合計の Billed Duration は1,025ms → 188ms と82%削減された。
 
-Init 内での ListTables 呼び出し自体は平均75ms。この中に DNS 解決 + TCP 接続 + TLS ハンドシェイク + API 呼び出しが含まれている。ウォーミング後は SDK の接続プールに TLS 接続が確立されているため、ハンドラ内の GetItem は接続を再利用して21ms で完了する。
+Init 内での ListTables 呼び出し自体は平均75ms。この中に DNS 解決 + TCP 接続 + TLS ハンドシェイク + API 呼び出しが含まれている。ウォーミングにより SDK の接続プールに TLS 接続が確立されたと考えられ、ハンドラ内の GetItem は接続を再利用して21ms で完了している。
 
 ## 考察
 
@@ -366,7 +366,7 @@ Init 内での ListTables 呼び出し自体は平均75ms。この中に DNS 解
 
 ## まとめ
 
-- **TLS ハンドシェイクが900ms の99%を占めていた** — DNS（7ms）と TCP（1ms）はボトルネックではない。128MB の低 CPU 環境での暗号処理コストが支配的だ
+- **TLS ハンドシェイクが900ms の99%を占めていた** — DNS（7ms）と TCP（1ms）はボトルネックではない。128MB の低 CPU 環境での暗号処理コストが主因と考えられる
 - **接続ウォーミングで Billed Duration を82%削減できる** — Init で `list_tables().limit(1)` を1回呼ぶだけで、初回 Duration が912ms → 21ms に改善する
 - **ウォーミングのコストは Init Duration +54ms** — 合計の Billed Duration は1,025ms → 188ms。トレードオフとして十分に見合う
 - **メモリ増加で TLS は高速化する可能性がある** — 128MB の CPU 制約が TLS の主因であり、メモリサイズ別の検証は今後の課題だ

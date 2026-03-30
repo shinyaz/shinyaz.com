@@ -344,7 +344,7 @@ Results from 4 cold starts.
 
 **First Duration dropped from 912ms to 21ms.** Init Duration increases by 54ms, but total Billed Duration drops from 1,025ms to 188ms — an 82% reduction.
 
-The ListTables call during Init takes about 75ms on average, which includes DNS + TCP + TLS + API call. After warming, the SDK's connection pool has an established TLS connection, so the handler's GetItem reuses it and completes in 21ms.
+The ListTables call during Init takes about 75ms on average, which includes DNS + TCP + TLS + API call. After warming, the SDK's connection pool likely has an established TLS connection, and the handler's GetItem reuses it to complete in 21ms.
 
 ## Discussion
 
@@ -364,7 +364,7 @@ The 745ms TLS handshake is likely driven by cryptographic processing costs under
 
 ## Summary
 
-- **TLS handshake accounts for 99% of the 900ms** — DNS (7ms) and TCP (1ms) are not bottlenecks. Cryptographic processing under 128MB's limited CPU is the dominant factor
+- **TLS handshake accounts for 99% of the 900ms** — DNS (7ms) and TCP (1ms) are not bottlenecks. Cryptographic processing under 128MB's limited CPU is likely the dominant factor
 - **Connection warming reduces Billed Duration by 82%** — A single `list_tables().limit(1)` call during Init drops first Duration from 912ms to 21ms
 - **Warming cost is +54ms on Init Duration** — Total Billed Duration goes from 1,025ms to 188ms. The trade-off is well worth it
 - **Increasing memory may speed up TLS** — The 128MB CPU constraint is the root cause; memory-size-specific benchmarks are a future topic
