@@ -210,7 +210,7 @@ Results from 4 forced cold starts.
 
 At 128MB, Lambda has very limited CPU resources (roughly 7% of a vCPU). TLS handshakes require cryptographic operations like key exchange and certificate verification, which take 700ms+ under this CPU constraint. The 662-820ms variance in TLS timing may also reflect fluctuations in Lambda's CPU allocation.
 
-The SDK's first GetItem took 88ms. Since the manual measurement already established a TLS connection, the SDK creates a separate connection, but benefits from OS-level DNS caching, resulting in faster connection establishment.
+The SDK's first GetItem took 88ms. The TLS connection established by the manual measurement is independent of the SDK's connection pool, so the SDK creates its own new connection. Why 88ms is much faster than the manual TLS measurement (745ms) is not entirely clear — possible factors include OS-level DNS caching, TLS session resumption, or the cost of building the `webpki-roots` root certificate store included in the manual TLS measurement.
 
 ### Correspondence with Previous 900ms
 
