@@ -1,0 +1,323 @@
+---
+title: "Lambda Rust 初回リクエスト900ms の正体 — TLS ハンドシェイクが99%を占めていた"
+description: "AWS SDK for Rust の初回リクエスト900ms を DNS・TCP・TLS・API に分離計測。TLS ハンドシェイクが745ms で99%を占めた。接続ウォーミングで合計 Billed Duration を82%削減できる。"
+date: "2026-03-31"
+published: true
+featured: false
+categories: [infrastructure]
+tags: ["aws", "lambda", "rust", "dynamodb", "serverless", "performance", "tls"]
+series: "lambda-rust"
+seriesOrder: 4
+---
+
+## はじめに
+
+[前回の記事](/ja/blog/2026/03/31/lambda-rust-dynamodb-latency)で、Rust Lambda + DynamoDB の初回リクエストが約900ms かかることを発見した。Init Duration（112ms）は速いのに、最初の DynamoDB 呼び出しだけが異常に遅い。原因として DNS 解決・TCP 接続・TLS ハンドシェイクが初回リクエストに集中して発生すると推測したが、内訳は分離計測していなかった。
+
+本記事では各フェーズの所要時間を個別に計測してボトルネックを特定し、接続ウォーミングによる対策の効果を定量的に示す。
+
+## 検証環境
+
+[前回](/ja/blog/2026/03/31/lambda-rust-dynamodb-latency)と同一の環境を使用する。
+
+| 項目 | 値 |
+| --- | --- |
+| リージョン | ap-northeast-1（東京） |
+| アーキテクチャ | arm64（Graviton） |
+| メモリ | 128 MB |
+| Rust バージョン | 1.94.1 |
+| DynamoDB エンドポイント | dynamodb.ap-northeast-1.amazonaws.com |
+
+## 実装
+
+SDK は内部の接続処理を公開していないため、各ネットワークフェーズの所要時間を個別に計測する手法を取った。具体的には、Init 直後のハンドラ内で DNS 解決 → TCP 接続 → TLS ハンドシェイクを手動で実行し、各フェーズの前後で `Instant` を使って計測する。その後、SDK 経由の GetItem を実行して SDK の初回リクエスト時間も記録する。
+
+この計測は SDK の内部実装を直接観測したものではない。SDK が実際に行う処理順序やオーバーヘッドとは差異がある可能性がある点に留意してほしい。
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">分離計測用 Rust 関数コード（Cargo.toml + src/main.rs）</summary>
+
+```toml title="Cargo.toml"
+[package]
+name = "rust-latency-breakdown"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+aws-config = { version = "1", features = ["behavior-version-latest"] }
+aws-sdk-dynamodb = "1"
+lambda_http = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["macros", "net"] }
+tokio-rustls = "0.26"
+rustls = "0.23"
+webpki-roots = "0.26"
+```
+
+```rust title="src/main.rs"
+use aws_sdk_dynamodb::types::AttributeValue;
+use aws_sdk_dynamodb::Client;
+use lambda_http::{Body, Error, Request, RequestExt, Response, run, service_fn};
+use serde::Serialize;
+use std::sync::Arc;
+use std::time::Instant;
+use tokio::net::TcpStream;
+
+const DDB_HOST: &str = "dynamodb.ap-northeast-1.amazonaws.com";
+const DDB_ADDR: &str = "dynamodb.ap-northeast-1.amazonaws.com:443";
+
+#[derive(Serialize)]
+struct BreakdownResult {
+    mode: String,
+    dns_ms: f64,
+    tcp_ms: f64,
+    tls_ms: f64,
+    sdk_first_call_ms: f64,
+    total_breakdown_ms: f64,
+}
+
+async fn measure_dns() -> Result<(f64, std::net::SocketAddr), Error> {
+    let start = Instant::now();
+    let addr = tokio::net::lookup_host(DDB_ADDR)
+        .await?
+        .next()
+        .ok_or("DNS resolution failed")?;
+    Ok((start.elapsed().as_secs_f64() * 1000.0, addr))
+}
+
+async fn measure_tcp(addr: std::net::SocketAddr) -> Result<(f64, TcpStream), Error> {
+    let start = Instant::now();
+    let stream = TcpStream::connect(addr).await?;
+    Ok((start.elapsed().as_secs_f64() * 1000.0, stream))
+}
+
+async fn measure_tls(stream: TcpStream) -> Result<f64, Error> {
+    let mut root_store = rustls::RootCertStore::empty();
+    root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    let config = rustls::ClientConfig::builder()
+        .with_root_certificates(root_store)
+        .with_no_client_auth();
+    let connector = tokio_rustls::TlsConnector::from(Arc::new(config));
+    let server_name = DDB_HOST.try_into()?;
+    let start = Instant::now();
+    let _tls_stream = connector.connect(server_name, stream).await?;
+    Ok(start.elapsed().as_secs_f64() * 1000.0)
+}
+
+async fn function_handler(
+    client: &Client, event: Request,
+) -> Result<Response<Body>, Error> {
+    let (dns_ms, addr) = measure_dns().await?;
+    let (tcp_ms, stream) = measure_tcp(addr).await?;
+    let tls_ms = measure_tls(stream).await?;
+
+    let sdk_start = Instant::now();
+    client.get_item()
+        .table_name("lambda-rust-bench")
+        .key("pk", AttributeValue::S("bench".into()))
+        .key("sk", AttributeValue::S("item-0".into()))
+        .send().await?;
+    let sdk_first_call_ms = sdk_start.elapsed().as_secs_f64() * 1000.0;
+
+    let result = BreakdownResult {
+        mode: "breakdown".into(),
+        dns_ms, tcp_ms, tls_ms, sdk_first_call_ms,
+        total_breakdown_ms: dns_ms + tcp_ms + tls_ms,
+    };
+    let body = serde_json::to_string(&result)?;
+    let resp = Response::builder()
+        .status(200)
+        .header("content-type", "application/json")
+        .body(body.into())
+        .map_err(Box::new)?;
+    Ok(resp)
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Error> {
+    let config = aws_config::load_defaults(
+        aws_config::BehaviorVersion::latest(),
+    ).await;
+    let client = Client::new(&config);
+    run(service_fn(|event: Request| {
+        let client = client.clone();
+        async move { function_handler(&client, event).await }
+    })).await
+}
+```
+
+</details>
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">デプロイ手順</summary>
+
+```bash title="Terminal"
+# 前回の IAM ロール・DynamoDB テーブルをそのまま使用
+cargo lambda build --release --arm64
+cargo lambda deploy rust-latency-breakdown \
+  --iam-role arn:aws:iam::${ACCOUNT_ID}:role/lambda-rust-dynamodb-role \
+  --region ap-northeast-1 --memory 128 --timeout 30 \
+  --env-vars TABLE_NAME=lambda-rust-bench
+```
+
+</details>
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">ベンチマーク実行手順（コールドスタート4回計測）</summary>
+
+```bash title="Terminal"
+REGION="ap-northeast-1"
+FN="rust-latency-breakdown"
+PAYLOAD='{"requestContext":{"http":{"method":"GET"}},"queryStringParameters":{"mode":"breakdown"},"rawPath":"/","headers":{}}'
+
+for i in 1 2 3 4; do
+  # コールドスタート強制
+  aws lambda update-function-configuration \
+    --function-name "$FN" \
+    --environment "Variables={TABLE_NAME=lambda-rust-bench,RUN=$i$(date +%s)}" \
+    --region "$REGION" --output text --query 'FunctionName' > /dev/null
+  aws lambda wait function-updated --function-name "$FN" --region "$REGION"
+  sleep 2
+
+  # 計測
+  aws lambda invoke --function-name "$FN" --cli-binary-format raw-in-base64-out \
+    --payload "$PAYLOAD" --region "$REGION" --log-type Tail \
+    --query 'LogResult' --output text \
+    /tmp/breakdown_${i}.json | base64 -d | grep REPORT
+  cat /tmp/breakdown_${i}.json
+done
+```
+
+</details>
+
+## 初回900ms の内訳
+
+コールドスタートを4回強制して計測した結果。
+
+| フェーズ | #1 | #2 | #3 | #4 | 平均 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| DNS 解決 | 11.1 ms | 4.3 ms | 11.7 ms | 2.2 ms | **7.3 ms** |
+| TCP 接続 | 0.6 ms | 0.6 ms | 1.0 ms | 0.5 ms | **0.7 ms** |
+| TLS ハンドシェイク | 679 ms | 820 ms | 662 ms | 819 ms | **745 ms** |
+| 手動計測合計 | 691 ms | 825 ms | 675 ms | 822 ms | **753 ms** |
+
+| 参考指標 | #1 | #2 | #3 | #4 | 平均 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| SDK 初回 GetItem | 84 ms | 90 ms | 99 ms | 80 ms | **88 ms** |
+| Init Duration | 91 ms | 118 ms | 89 ms | 118 ms | **104 ms** |
+| Lambda Duration | 812 ms | 945 ms | 793 ms | 922 ms | **868 ms** |
+
+**TLS ハンドシェイクが745ms で、手動計測合計の99%を占めた。** DNS 解決は7ms、TCP 接続は1ms 未満で、ボトルネックではない。
+
+128MB の Lambda は CPU リソースが非常に限られている（vCPU の約8%相当）。TLS ハンドシェイクでは鍵交換や証明書検証などの暗号処理が必要であり、この CPU 制約下では700ms 超かかる。TLS の所要時間に662〜820ms のばらつきがあるのも、Lambda の CPU 割り当てのゆらぎが影響している可能性がある。
+
+SDK の初回 GetItem は88ms だった。手動計測で先に TLS 接続を確立しているため、SDK は別の接続を新規作成しているが、DNS キャッシュ（OS レベル）の恩恵で SDK 側の接続確立は高速化されていると考えられる。
+
+### 前回の900ms との対応
+
+前回の記事では SDK 経由の初回リクエストが約912ms だった。今回の手動計測合計（753ms）+ SDK 初回 GetItem（88ms）= 841ms で、前回の912ms とおおよそ対応する。差分の約70ms は、手動計測と SDK の処理が完全に同一ではないこと、および計測ごとのばらつきで説明できる範囲だ。
+
+## 接続ウォーミングの効果
+
+ボトルネックが TLS ハンドシェイクだとわかったので、Init フェーズで SDK の接続を温める対策を検証する。Init の末尾で `client.list_tables().limit(1).send().await` を実行し、SDK の接続プールに TLS 接続を確立した状態でハンドラに入る。
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">ウォーミング版 Rust 関数コード</summary>
+
+```rust title="src/main.rs（Init 部分のみ抜粋）"
+#[tokio::main]
+async fn main() -> Result<(), Error> {
+    let config = aws_config::load_defaults(
+        aws_config::BehaviorVersion::latest(),
+    ).await;
+    let client = Client::new(&config);
+
+    // Init フェーズで接続を温める
+    let _ = client.list_tables().limit(1).send().await;
+
+    run(service_fn(move |_event: Request| {
+        let client = client.clone();
+        async move { /* GetItem 実行 */ }
+    })).await
+}
+```
+
+</details>
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">ベンチマーク実行手順（ウォーミング版）</summary>
+
+```bash title="Terminal"
+REGION="ap-northeast-1"
+FN="rust-latency-warmup"
+
+for i in 1 2 3 4; do
+  aws lambda update-function-configuration \
+    --function-name "$FN" \
+    --environment "Variables={TABLE_NAME=lambda-rust-bench,RUN=$i$(date +%s)}" \
+    --region "$REGION" --output text --query 'FunctionName' > /dev/null
+  aws lambda wait function-updated --function-name "$FN" --region "$REGION"
+  sleep 2
+
+  aws lambda invoke --function-name "$FN" --cli-binary-format raw-in-base64-out \
+    --payload '{"requestContext":{"http":{"method":"GET"}},"queryStringParameters":{},"rawPath":"/","headers":{}}' \
+    --region "$REGION" --log-type Tail \
+    --query 'LogResult' --output text \
+    /tmp/warmup_${i}.json | base64 -d | grep REPORT
+  cat /tmp/warmup_${i}.json
+done
+```
+
+</details>
+
+コールドスタート4回の計測結果。
+
+| 指標 | ウォーミングなし（前回） | ウォーミングあり | 変化 |
+| --- | ---: | ---: | --- |
+| Init Duration | 112 ms | 166 ms | +54 ms |
+| 初回 Duration | 912 ms | 21 ms | **-891 ms** |
+| Billed Duration 合計 | 1,025 ms | 188 ms | **-837 ms（82%削減）** |
+
+**初回 Duration が912ms → 21ms に激減した。** Init Duration は54ms 増加するが、合計の Billed Duration は1,025ms → 188ms と82%削減された。
+
+Init 内での ListTables 呼び出し自体は平均75ms。この中に DNS 解決 + TCP 接続 + TLS ハンドシェイク + API 呼び出しが含まれている。ウォーミング後は SDK の接続プールに TLS 接続が確立されているため、ハンドラ内の GetItem は接続を再利用して21ms で完了する。
+
+## 考察
+
+### 対策すべきか
+
+接続ウォーミングは効果が大きい（82%削減）が、以下のトレードオフがある。
+
+**Init フェーズの10秒タイムアウト:** Lambda の Init フェーズには10秒の制限がある。ウォーミングの75ms は問題にならないが、ネットワーク障害時にタイムアウトする可能性がある。ウォーミングの失敗を無視する（`let _ = ...`）設計にしておけば、Init 自体は成功する。
+
+**Init 失敗時のリトライ:** ウォーミングで panic すると Init が失敗し、Lambda はリトライする。`let _ =` で結果を無視すれば panic は発生しない。
+
+**コールドスタートの頻度:** コールドスタートが稀な環境（Provisioned Concurrency 使用時など）では、ウォーミングの恩恵は限定的だ。逆に、頻繁にスケールアウトする環境では効果が大きい。
+
+### メモリサイズとの関係
+
+今回の計測で TLS ハンドシェイクが745ms かかったのは、128MB の低 CPU 環境での暗号処理コストが主因と考えられる。メモリを増やせば CPU も比例して増加するため、TLS ハンドシェイクは高速化するはずだ。メモリサイズ別の計測は今後の検証テーマとしたい。
+
+## まとめ
+
+- **TLS ハンドシェイクが900ms の99%を占めていた** — DNS（7ms）と TCP（1ms）はボトルネックではない。128MB の低 CPU 環境での暗号処理コストが支配的だ
+- **接続ウォーミングで Billed Duration を82%削減できる** — Init で `list_tables().limit(1)` を1回呼ぶだけで、初回 Duration が912ms → 21ms に改善する
+- **ウォーミングのコストは Init Duration +54ms** — 合計の Billed Duration は1,025ms → 188ms。トレードオフとして十分に見合う
+- **メモリ増加で TLS は高速化する可能性がある** — 128MB の CPU 制約が TLS の主因であり、メモリサイズ別の検証は今後の課題だ
+
+## クリーンアップ
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">リソース削除コマンド</summary>
+
+```bash title="Terminal"
+REGION="ap-northeast-1"
+aws lambda delete-function --function-name rust-latency-breakdown --region $REGION
+aws lambda delete-function --function-name rust-latency-warmup --region $REGION
+
+# DynamoDB テーブル・IAM ロールは前回の記事で作成したもの
+# 不要であれば前回のクリーンアップ手順を参照
+```
+
+</details>

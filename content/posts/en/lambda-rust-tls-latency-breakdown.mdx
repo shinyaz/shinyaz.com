@@ -1,0 +1,321 @@
+---
+title: "Lambda Rust First-Request 900ms Explained — TLS Handshake Accounts for 99%"
+description: "Broke down the AWS SDK for Rust's 900ms first-request latency into DNS, TCP, TLS, and API phases. TLS handshake at 745ms accounts for 99%. Connection warming reduces total Billed Duration by 82%."
+date: "2026-03-31"
+published: true
+featured: false
+categories: [infrastructure]
+tags: ["aws", "lambda", "rust", "dynamodb", "serverless", "performance", "tls"]
+series: "lambda-rust"
+seriesOrder: 4
+---
+
+## Introduction
+
+In the [previous post](/en/blog/2026/03/31/lambda-rust-dynamodb-latency), I discovered that the first request from a Rust Lambda + DynamoDB function takes roughly 900ms. Init Duration (112ms) was fast, yet the first DynamoDB call was abnormally slow. I hypothesized that DNS resolution, TCP connection, and TLS handshake all happen on the first request, but didn't measure the breakdown.
+
+This article measures each phase individually to identify the bottleneck, then quantifies the effect of connection warming as a mitigation.
+
+## Test Environment
+
+Same environment as the [previous post](/en/blog/2026/03/31/lambda-rust-dynamodb-latency).
+
+| Item | Value |
+| --- | --- |
+| Region | ap-northeast-1 (Tokyo) |
+| Architecture | arm64 (Graviton) |
+| Memory | 128 MB |
+| Rust version | 1.94.1 |
+| DynamoDB endpoint | dynamodb.ap-northeast-1.amazonaws.com |
+
+## Implementation
+
+Since the SDK doesn't expose its internal connection handling, I measured each network phase individually. Specifically, the handler executes DNS resolution → TCP connection → TLS handshake manually right after Init, measuring each with `Instant`. Then it executes a GetItem via the SDK to record the SDK's first-request time.
+
+This measurement does not directly observe the SDK's internal implementation. The actual processing order and overhead within the SDK may differ.
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">Breakdown measurement Rust function code (Cargo.toml + src/main.rs)</summary>
+
+```toml title="Cargo.toml"
+[package]
+name = "rust-latency-breakdown"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+aws-config = { version = "1", features = ["behavior-version-latest"] }
+aws-sdk-dynamodb = "1"
+lambda_http = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["macros", "net"] }
+tokio-rustls = "0.26"
+rustls = "0.23"
+webpki-roots = "0.26"
+```
+
+```rust title="src/main.rs"
+use aws_sdk_dynamodb::types::AttributeValue;
+use aws_sdk_dynamodb::Client;
+use lambda_http::{Body, Error, Request, RequestExt, Response, run, service_fn};
+use serde::Serialize;
+use std::sync::Arc;
+use std::time::Instant;
+use tokio::net::TcpStream;
+
+const DDB_HOST: &str = "dynamodb.ap-northeast-1.amazonaws.com";
+const DDB_ADDR: &str = "dynamodb.ap-northeast-1.amazonaws.com:443";
+
+#[derive(Serialize)]
+struct BreakdownResult {
+    mode: String,
+    dns_ms: f64,
+    tcp_ms: f64,
+    tls_ms: f64,
+    sdk_first_call_ms: f64,
+    total_breakdown_ms: f64,
+}
+
+async fn measure_dns() -> Result<(f64, std::net::SocketAddr), Error> {
+    let start = Instant::now();
+    let addr = tokio::net::lookup_host(DDB_ADDR)
+        .await?
+        .next()
+        .ok_or("DNS resolution failed")?;
+    Ok((start.elapsed().as_secs_f64() * 1000.0, addr))
+}
+
+async fn measure_tcp(addr: std::net::SocketAddr) -> Result<(f64, TcpStream), Error> {
+    let start = Instant::now();
+    let stream = TcpStream::connect(addr).await?;
+    Ok((start.elapsed().as_secs_f64() * 1000.0, stream))
+}
+
+async fn measure_tls(stream: TcpStream) -> Result<f64, Error> {
+    let mut root_store = rustls::RootCertStore::empty();
+    root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    let config = rustls::ClientConfig::builder()
+        .with_root_certificates(root_store)
+        .with_no_client_auth();
+    let connector = tokio_rustls::TlsConnector::from(Arc::new(config));
+    let server_name = DDB_HOST.try_into()?;
+    let start = Instant::now();
+    let _tls_stream = connector.connect(server_name, stream).await?;
+    Ok(start.elapsed().as_secs_f64() * 1000.0)
+}
+
+async fn function_handler(
+    client: &Client, event: Request,
+) -> Result<Response<Body>, Error> {
+    let (dns_ms, addr) = measure_dns().await?;
+    let (tcp_ms, stream) = measure_tcp(addr).await?;
+    let tls_ms = measure_tls(stream).await?;
+
+    let sdk_start = Instant::now();
+    client.get_item()
+        .table_name("lambda-rust-bench")
+        .key("pk", AttributeValue::S("bench".into()))
+        .key("sk", AttributeValue::S("item-0".into()))
+        .send().await?;
+    let sdk_first_call_ms = sdk_start.elapsed().as_secs_f64() * 1000.0;
+
+    let result = BreakdownResult {
+        mode: "breakdown".into(),
+        dns_ms, tcp_ms, tls_ms, sdk_first_call_ms,
+        total_breakdown_ms: dns_ms + tcp_ms + tls_ms,
+    };
+    let body = serde_json::to_string(&result)?;
+    let resp = Response::builder()
+        .status(200)
+        .header("content-type", "application/json")
+        .body(body.into())
+        .map_err(Box::new)?;
+    Ok(resp)
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Error> {
+    let config = aws_config::load_defaults(
+        aws_config::BehaviorVersion::latest(),
+    ).await;
+    let client = Client::new(&config);
+    run(service_fn(|event: Request| {
+        let client = client.clone();
+        async move { function_handler(&client, event).await }
+    })).await
+}
+```
+
+</details>
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">Deploy steps</summary>
+
+```bash title="Terminal"
+# Reuse IAM role and DynamoDB table from previous post
+cargo lambda build --release --arm64
+cargo lambda deploy rust-latency-breakdown \
+  --iam-role arn:aws:iam::${ACCOUNT_ID}:role/lambda-rust-dynamodb-role \
+  --region ap-northeast-1 --memory 128 --timeout 30 \
+  --env-vars TABLE_NAME=lambda-rust-bench
+```
+
+</details>
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">Benchmark execution steps (4 cold starts)</summary>
+
+```bash title="Terminal"
+REGION="ap-northeast-1"
+FN="rust-latency-breakdown"
+PAYLOAD='{"requestContext":{"http":{"method":"GET"}},"queryStringParameters":{"mode":"breakdown"},"rawPath":"/","headers":{}}'
+
+for i in 1 2 3 4; do
+  aws lambda update-function-configuration \
+    --function-name "$FN" \
+    --environment "Variables={TABLE_NAME=lambda-rust-bench,RUN=$i$(date +%s)}" \
+    --region "$REGION" --output text --query 'FunctionName' > /dev/null
+  aws lambda wait function-updated --function-name "$FN" --region "$REGION"
+  sleep 2
+
+  aws lambda invoke --function-name "$FN" --cli-binary-format raw-in-base64-out \
+    --payload "$PAYLOAD" --region "$REGION" --log-type Tail \
+    --query 'LogResult' --output text \
+    /tmp/breakdown_${i}.json | base64 -d | grep REPORT
+  cat /tmp/breakdown_${i}.json
+done
+```
+
+</details>
+
+## Breaking Down the First 900ms
+
+Results from 4 forced cold starts.
+
+| Phase | #1 | #2 | #3 | #4 | Average |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| DNS resolution | 11.1 ms | 4.3 ms | 11.7 ms | 2.2 ms | **7.3 ms** |
+| TCP connection | 0.6 ms | 0.6 ms | 1.0 ms | 0.5 ms | **0.7 ms** |
+| TLS handshake | 679 ms | 820 ms | 662 ms | 819 ms | **745 ms** |
+| Manual total | 691 ms | 825 ms | 675 ms | 822 ms | **753 ms** |
+
+| Reference metric | #1 | #2 | #3 | #4 | Average |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| SDK first GetItem | 84 ms | 90 ms | 99 ms | 80 ms | **88 ms** |
+| Init Duration | 91 ms | 118 ms | 89 ms | 118 ms | **104 ms** |
+| Lambda Duration | 812 ms | 945 ms | 793 ms | 922 ms | **868 ms** |
+
+**TLS handshake at 745ms accounts for 99% of the manual measurement total.** DNS resolution is 7ms, TCP connection is under 1ms — neither is the bottleneck.
+
+At 128MB, Lambda has very limited CPU resources (roughly 8% of a vCPU). TLS handshakes require cryptographic operations like key exchange and certificate verification, which take 700ms+ under this CPU constraint. The 662-820ms variance in TLS timing may also reflect fluctuations in Lambda's CPU allocation.
+
+The SDK's first GetItem took 88ms. Since the manual measurement already established a TLS connection, the SDK creates a separate connection, but benefits from OS-level DNS caching, resulting in faster connection establishment.
+
+### Correspondence with Previous 900ms
+
+In the previous post, the SDK's first request took roughly 912ms. This article's manual total (753ms) + SDK first GetItem (88ms) = 841ms, which roughly corresponds to the previous 912ms. The ~70ms gap can be explained by the manual measurement not being identical to the SDK's internal processing, plus per-measurement variance.
+
+## Connection Warming Effect
+
+Now that TLS handshake is identified as the bottleneck, let's test warming the SDK's connection during Init. Adding `client.list_tables().limit(1).send().await` at the end of Init establishes a TLS connection in the SDK's connection pool before the handler runs.
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">Warmup Rust function code</summary>
+
+```rust title="src/main.rs (Init section only)"
+#[tokio::main]
+async fn main() -> Result<(), Error> {
+    let config = aws_config::load_defaults(
+        aws_config::BehaviorVersion::latest(),
+    ).await;
+    let client = Client::new(&config);
+
+    // Warm the connection during Init
+    let _ = client.list_tables().limit(1).send().await;
+
+    run(service_fn(move |_event: Request| {
+        let client = client.clone();
+        async move { /* GetItem execution */ }
+    })).await
+}
+```
+
+</details>
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">Benchmark execution steps (warmup version)</summary>
+
+```bash title="Terminal"
+REGION="ap-northeast-1"
+FN="rust-latency-warmup"
+
+for i in 1 2 3 4; do
+  aws lambda update-function-configuration \
+    --function-name "$FN" \
+    --environment "Variables={TABLE_NAME=lambda-rust-bench,RUN=$i$(date +%s)}" \
+    --region "$REGION" --output text --query 'FunctionName' > /dev/null
+  aws lambda wait function-updated --function-name "$FN" --region "$REGION"
+  sleep 2
+
+  aws lambda invoke --function-name "$FN" --cli-binary-format raw-in-base64-out \
+    --payload '{"requestContext":{"http":{"method":"GET"}},"queryStringParameters":{},"rawPath":"/","headers":{}}' \
+    --region "$REGION" --log-type Tail \
+    --query 'LogResult' --output text \
+    /tmp/warmup_${i}.json | base64 -d | grep REPORT
+  cat /tmp/warmup_${i}.json
+done
+```
+
+</details>
+
+Results from 4 cold starts.
+
+| Metric | Without warming (previous) | With warming | Change |
+| --- | ---: | ---: | --- |
+| Init Duration | 112 ms | 166 ms | +54 ms |
+| First Duration | 912 ms | 21 ms | **-891 ms** |
+| Billed Duration total | 1,025 ms | 188 ms | **-837 ms (82% reduction)** |
+
+**First Duration dropped from 912ms to 21ms.** Init Duration increases by 54ms, but total Billed Duration drops from 1,025ms to 188ms — an 82% reduction.
+
+The ListTables call during Init takes about 75ms on average, which includes DNS + TCP + TLS + API call. After warming, the SDK's connection pool has an established TLS connection, so the handler's GetItem reuses it and completes in 21ms.
+
+## Discussion
+
+### Should You Add Warming?
+
+Connection warming delivers significant results (82% reduction), but consider these trade-offs.
+
+**Init phase 10-second timeout:** Lambda's Init phase has a 10-second limit. The 75ms warming call is well within this, but network failures could cause delays. Using `let _ = ...` to ignore the result ensures Init succeeds even if warming fails.
+
+**Init failure retry behavior:** If warming causes a panic, Init fails and Lambda retries. Using `let _ =` prevents panics from propagating.
+
+**Cold start frequency:** In environments with rare cold starts (e.g., Provisioned Concurrency), warming benefits are limited. In environments with frequent scale-outs, the benefit is substantial.
+
+### Relationship with Memory Size
+
+The 745ms TLS handshake is likely driven by cryptographic processing costs under 128MB's limited CPU. Increasing memory proportionally increases CPU, which should speed up TLS handshakes. Memory-size-specific measurements are a topic for future investigation.
+
+## Summary
+
+- **TLS handshake accounts for 99% of the 900ms** — DNS (7ms) and TCP (1ms) are not bottlenecks. Cryptographic processing under 128MB's limited CPU is the dominant factor
+- **Connection warming reduces Billed Duration by 82%** — A single `list_tables().limit(1)` call during Init drops first Duration from 912ms to 21ms
+- **Warming cost is +54ms on Init Duration** — Total Billed Duration goes from 1,025ms to 188ms. The trade-off is well worth it
+- **Increasing memory may speed up TLS** — The 128MB CPU constraint is the root cause; memory-size-specific benchmarks are a future topic
+
+## Cleanup
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">Resource deletion commands</summary>
+
+```bash title="Terminal"
+REGION="ap-northeast-1"
+aws lambda delete-function --function-name rust-latency-breakdown --region $REGION
+aws lambda delete-function --function-name rust-latency-warmup --region $REGION
+
+# DynamoDB table and IAM role were created in the previous post
+# See previous post's cleanup section if no longer needed
+```
+
+</details>
