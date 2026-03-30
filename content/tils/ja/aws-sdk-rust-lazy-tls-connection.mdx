@@ -1,0 +1,21 @@
+---
+title: "AWS SDK for Rust は初回リクエストに約900msかかる — Init では接続を確立しない"
+description: "Lambda で AWS SDK for Rust のクライアントを Init で初期化しても、初回の API 呼び出しに約900msかかる。DNS 解決・TCP 接続・TLS ハンドシェイクが初回リクエストに集中するためと考えられる。"
+date: "2026-03-31"
+published: true
+tags: ["aws", "lambda", "rust", "performance"]
+---
+
+Lambda Rust + DynamoDB の[ベンチマーク記事](/ja/blog/2026/03/31/lambda-rust-dynamodb-latency)を書いていて、コールドスタートの初回リクエストが 912ms もかかることに気づいた。Init Duration 自体は 112ms で速いのに、初回の DynamoDB 呼び出しだけ異常に遅い。
+
+AWS SDK for Rust は内部で hyper を HTTP クライアントとして使っており、hyper はコネクションプールに再利用可能な接続がない場合にリクエスト時に新規接続を作成する。`Client::new(&config)` は Init でクライアントオブジェクトを生成するだけで、DNS 解決・TCP 接続・TLS ハンドシェイクは初回の API 呼び出しに集中して発生すると考えられる。
+
+```text title="Output"
+#1  Init: 112ms  1st: 912ms  2nd: 3.3ms
+#2  Init: 112ms  1st: 920ms  2nd: 2.0ms
+#3  Init: 115ms  1st: 905ms  2nd: 1.9ms
+```
+
+2回目以降は接続プールが再利用されて即座に 2〜3ms に落ちる。900ms は「1回限りのペナルティ」だ。
+
+起動直後のレイテンシが気になる場合は、Init 直後にダミーの API 呼び出しを1回実行して接続を温めておくのが有効だろう。

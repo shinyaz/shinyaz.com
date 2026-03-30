@@ -1,7 +1,7 @@
 ---
 title: "Lambda Rust × DynamoDB — How Much Does the 90x Speed Gap Shrink in Real Workloads?"
 description: "Benchmarked Lambda Rust with AWS SDK for DynamoDB against Python. The 90x Hello World gap shrinks to 3-6x but doesn't disappear. Operation-pattern-based decision framework included."
-date: "2026-03-30"
+date: "2026-03-31"
 published: true
 featured: false
 categories: [infrastructure]
@@ -316,6 +316,44 @@ aws lambda invoke --function-name rust-dynamodb-bench \
 
 First, let's check how adding the SDK affects cold starts. Cold starts were forced by updating an environment variable, then measured with a GetItem operation.
 
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">Benchmark execution steps (cold start measurement)</summary>
+
+```bash title="Terminal (cold start measurement)"
+REGION="ap-northeast-1"
+
+# Force cold start (updating env var recreates the execution environment)
+aws lambda update-function-configuration \
+  --function-name rust-dynamodb-bench \
+  --environment "Variables={TABLE_NAME=lambda-rust-bench,BENCH_RUN=$(date +%s)}" \
+  --region $REGION --output text --query 'FunctionName'
+aws lambda wait function-updated \
+  --function-name rust-dynamodb-bench --region $REGION
+
+# 1st call (cold start) — get Init Duration / Duration from REPORT line
+aws lambda invoke \
+  --function-name rust-dynamodb-bench \
+  --cli-binary-format raw-in-base64-out \
+  --payload '{"requestContext":{"http":{"method":"GET"}},"queryStringParameters":{"op":"get"},"rawPath":"/","headers":{}}' \
+  --region $REGION --log-type Tail \
+  --query 'LogResult' --output text \
+  /tmp/cold_1.json | base64 -d | grep REPORT
+cat /tmp/cold_1.json
+
+# 2nd call (connection reuse check)
+aws lambda invoke \
+  --function-name rust-dynamodb-bench \
+  --cli-binary-format raw-in-base64-out \
+  --payload '{"requestContext":{"http":{"method":"GET"}},"queryStringParameters":{"op":"get"},"rawPath":"/","headers":{}}' \
+  --region $REGION --log-type Tail \
+  --query 'LogResult' --output text \
+  /tmp/cold_2.json | base64 -d | grep REPORT
+```
+
+For Python, use the same steps with `--function-name python-dynamodb-bench` and payload `'{"queryStringParameters":{"op":"get"}}'`.
+
+</details>
+
 | Metric | Rust | Python |
 | --- | ---: | ---: |
 | Init Duration | 112 ms | 357 ms |
@@ -325,16 +363,18 @@ First, let's check how adding the SDK affects cold starts. Cold starts were forc
 
 **A surprising result.** Init Duration is 3.2x faster for Rust (112ms vs 357ms), but the first DynamoDB call (Duration) is 3.1x slower for Rust (912ms vs 291ms). In total Billed Duration, **Python is actually faster**.
 
-The cause is HTTP/TLS connection establishment in the AWS SDK for Rust. The Rust SDK creates the client object during Init, but the actual TCP connection and TLS handshake are **lazily executed on the first request**. Python's boto3, on the other hand, pre-establishes the connection pool during Init, resulting in a shorter first-request Duration.
+The cause is first-request initialization cost in the AWS SDK for Rust. The Rust SDK creates the client object during Init, but the underlying hyper HTTP client **creates TCP connections on demand when a request is made**. On the first request, DNS resolution, TCP connection establishment, and TLS handshake all happen at once, adding roughly 900ms of overhead.
 
-This behavior was confirmed across 4 measurements.
+Python's boto3 spends its Init phase on dynamic API construction (parsing JSON service definitions into Python classes), which is why its Init Duration is 357ms — much longer than Rust's 112ms. The 291ms first-request Duration also includes HTTP connection costs, but the impact is smaller than what we see with Rust.
+
+This behavior was confirmed across 4 measurements (3 additional cold starts after the initial one).
 
 | Run | Init Duration | 1st Duration | 2nd Duration |
 | --- | ---: | ---: | ---: |
-| #1 | 112 ms | 912 ms | 3.3 ms |
-| #2 | 112 ms | 920 ms | 2.0 ms |
-| #3 | 115 ms | 905 ms | 1.9 ms |
-| #4 | 110 ms | 916 ms | 1.8 ms |
+| #1 | 112 ms | 912 ms | — |
+| #2 | 112 ms | 920 ms | 3.3 ms |
+| #3 | 115 ms | 905 ms | 3.1 ms |
+| #4 | 110 ms | 916 ms | 2.9 ms |
 
 The key observation is that **the second invocation immediately drops to 2-3ms**. Once the HTTP connection pool is established, subsequent calls reuse the connection. Rust's cold start penalty is a "one-time cost" and should be evaluated separately from steady-state performance.
 
@@ -358,11 +398,43 @@ The dominant component varies by operation pattern.
 | DynamoDB latency-dominant | GetItem, PutItem | Single-item read/write. Client processing is light; DynamoDB round-trip dominates. Language gap should be small |
 | Client processing-dominant | Query (25 items), BatchWriteItem (25 items) | Multiple items require serialization/deserialization. Client-side ratio increases; language gap should be larger |
 
+The 25 items for Query come from the test data seeded beforehand. The 25 items for BatchWriteItem is the API's maximum limit, chosen to maximize serialization volume and measure the most pronounced language gap. In practice, the gap is expected to narrow with fewer items.
+
 Let's test this hypothesis.
 
 ### Results
 
 Measured `sdk_call_ms` (application-level timing) across 5 warm-start invocations per operation.
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">Benchmark execution steps (warm start measurement)</summary>
+
+```bash title="Terminal (warm start measurement)"
+REGION="ap-northeast-1"
+
+# Warm up (discard first call)
+aws lambda invoke \
+  --function-name rust-dynamodb-bench \
+  --cli-binary-format raw-in-base64-out \
+  --payload '{"requestContext":{"http":{"method":"GET"}},"queryStringParameters":{"op":"get"},"rawPath":"/","headers":{}}' \
+  --region $REGION /tmp/warmup.json > /dev/null 2>&1
+
+# 5 measurement runs (change op to get / put / query / batch_write)
+for i in $(seq 1 5); do
+  aws lambda invoke \
+    --function-name rust-dynamodb-bench \
+    --cli-binary-format raw-in-base64-out \
+    --payload '{"requestContext":{"http":{"method":"GET"}},"queryStringParameters":{"op":"get"},"rawPath":"/","headers":{}}' \
+    --region $REGION --log-type Tail \
+    --query 'LogResult' --output text \
+    /tmp/warm_${i}.json | base64 -d | grep REPORT
+  cat /tmp/warm_${i}.json
+done
+```
+
+For Python, use the same steps with `--function-name python-dynamodb-bench` and payload `'{"queryStringParameters":{"op":"get"}}'`.
+
+</details>
 
 | Operation | Rust sdk_call_ms | Python sdk_call_ms | Ratio |
 | --- | ---: | ---: | ---: |
@@ -371,7 +443,7 @@ Measured `sdk_call_ms` (application-level timing) across 5 warm-start invocation
 | **Query (25 items)** | 2.6 ms | 16.2 ms | **6.3x** |
 | **BatchWriteItem (25 items)** | 6.0 ms | 20.3 ms | **3.4x** |
 
-Lambda Duration (including runtime overhead) shows the same trend.
+`sdk_call_ms` is the pure SDK call time measured within the application code. Lambda's Duration, on the other hand, includes runtime overhead such as the event loop and response serialization. Use `sdk_call_ms` to compare SDK performance between languages; use Duration for the value that affects actual billing.
 
 | Operation | Rust Duration | Python Duration | Ratio |
 | --- | ---: | ---: | ---: |
@@ -390,19 +462,19 @@ Comparing against our hypothesis:
 
 The hypothesis predicted "small language gap (1.5-2x)," but actual measurements showed 3.6-4.7x. **The gap was larger than expected.**
 
-The reason is that boto3's overhead was higher than anticipated. boto3 performs type checking and validation when converting DynamoDB responses to Python dicts. Even for a single GetItem, this overhead adds ~10ms. Rust's serde resolves type information at compile time, making deserialization cost nearly zero.
+One likely reason is that boto3's overhead was larger than anticipated. boto3 performs type checking, validation, and other processing when converting DynamoDB responses to Python dicts. Rust's serde resolves type information at compile time, making deserialization significantly faster. The sdk_call_ms gap (roughly 11ms for GetItem) is likely attributable to this difference in client-side processing efficiency.
 
 **Client processing-dominant (Query / BatchWriteItem):**
 
-Query at 6.3x, BatchWriteItem at 3.4x. Query shows a larger gap because deserializing 25 response items amplifies the difference between serde and Python dict conversion.
+Query at 6.3x, BatchWriteItem at 3.4x. Query shows a larger gap likely because deserializing 25 response items increases client-side processing volume, amplifying the efficiency difference between languages.
 
-BatchWriteItem's primary processing is serializing 25 items (request construction), but DynamoDB's write processing time is also significant, reducing the relative language gap.
+BatchWriteItem's primary processing is serializing 25 items (request construction), but DynamoDB's write processing is also part of the total time. This likely reduces the proportion of client-side processing relative to Query, resulting in a smaller ratio.
 
 ### 90x → 3-6x: Where Did the Gap Go?
 
 The [Part 1](/en/blog/2026/03/13/lambda-rust-official-support-benchmark) benchmark used CPU workload (Fibonacci calculation) and memory workload (100K-element vector allocation). These are **pure client-side processing** where Rust's zero-cost abstractions and native code execution have maximum advantage.
 
-With DynamoDB operations, most of the processing time is spent on **network round-trips** (Lambda → DynamoDB endpoint). This portion is language-independent. Rust can only speed up serialization/deserialization and HTTP handling, which represent a smaller fraction of total time — hence the inevitable ratio compression.
+With DynamoDB operations, a significant portion of processing time is likely spent on **network round-trips** (Lambda → DynamoDB endpoint). This portion is language-independent. Rust can only speed up serialization/deserialization and HTTP handling, which represent a smaller fraction of total time — so the ratio naturally compresses.
 
 That said, 3-6x is far from negligible. For 1 million monthly invocations, the Billed Duration difference translates directly to cost savings.
 
@@ -419,7 +491,7 @@ That said, 3-6x is far from negligible. For 1 million monthly invocations, the B
 
 The following factors can't be derived from benchmark data alone but affect adoption decisions.
 
-**Invocation frequency and cost:** With 128MB / arm64 Tokyo region pricing and 1 million monthly invocations, the Billed Duration difference (Rust avg 9ms vs Python avg 34ms) translates directly to compute cost. The higher the frequency, the greater Rust's economic advantage.
+**Invocation frequency and cost:** With 128MB / arm64 Tokyo region pricing and 1 million monthly invocations, the Billed Duration difference (Rust avg 10ms vs Python avg 35ms) translates directly to compute cost. The higher the frequency, the greater Rust's economic advantage.
 
 **Team Rust proficiency:** Lambda functions are relatively small codebases, making them a reasonable scope for Rust adoption. However, the learning curve for ownership and lifetimes is real. Without existing Rust experience on the team, expect initial development velocity to be several times slower than Python.
 

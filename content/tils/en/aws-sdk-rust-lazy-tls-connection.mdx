@@ -1,0 +1,21 @@
+---
+title: "AWS SDK for Rust takes ~900ms on first request — connections aren't established during Init"
+description: "Even when initializing the AWS SDK for Rust client during Lambda Init, the first API call takes ~900ms. DNS resolution, TCP connection, and TLS handshake likely all happen on the first request."
+date: "2026-03-31"
+published: true
+tags: ["aws", "lambda", "rust", "performance"]
+---
+
+While writing a [Lambda Rust + DynamoDB benchmark](/en/blog/2026/03/31/lambda-rust-dynamodb-latency), I noticed the first request after a cold start took 912ms. Init Duration itself was only 112ms — fast. Yet the first DynamoDB call was abnormally slow.
+
+The AWS SDK for Rust uses hyper as its HTTP client internally, and hyper creates new connections on demand when the connection pool has no reusable connection. `Client::new(&config)` only creates the client object during Init — DNS resolution, TCP connection, and TLS handshake likely all happen on the first API call.
+
+```text title="Output"
+#1  Init: 112ms  1st: 912ms  2nd: 3.3ms
+#2  Init: 112ms  1st: 920ms  2nd: 2.0ms
+#3  Init: 115ms  1st: 905ms  2nd: 1.9ms
+```
+
+The second invocation immediately drops to 2-3ms as the connection pool is reused. The 900ms hit is a one-time penalty.
+
+If first-request latency matters, warm the connection with a dummy API call right after initialization.
