@@ -218,7 +218,7 @@ In the previous post, the SDK's first request took roughly 912ms. This article's
 
 ## Connection Warming Effect
 
-Now that TLS handshake is identified as the bottleneck, let's test warming the SDK's connection during Init. Adding `client.list_tables().limit(1).send().await` at the end of Init establishes a TLS connection in the SDK's connection pool before the handler runs.
+Now that TLS handshake is identified as the bottleneck, let's test warming the SDK's connection during Init. Adding `client.list_tables().limit(1).send().await` at the end of Init establishes a TLS connection in the SDK's connection pool before the handler runs. ListTables is used because it doesn't depend on any specific table and works in any environment.
 
 <details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
 <summary className="cursor-pointer font-medium">Warmup Rust function code (Cargo.toml + src/main.rs)</summary>

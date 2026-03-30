@@ -220,7 +220,7 @@ SDK の初回 GetItem は88ms だった。手動計測で確立した TLS 接続
 
 ## 接続ウォーミングの効果
 
-ボトルネックが TLS ハンドシェイクだとわかったので、Init フェーズで SDK の接続を温める対策を検証する。Init の末尾で `client.list_tables().limit(1).send().await` を実行し、SDK の接続プールに TLS 接続を確立した状態でハンドラに入る。
+ボトルネックが TLS ハンドシェイクだとわかったので、Init フェーズで SDK の接続を温める対策を検証する。Init の末尾で `client.list_tables().limit(1).send().await` を実行し、SDK の接続プールに TLS 接続を確立した状態でハンドラに入る。ListTables を使うのは、特定のテーブルに依存せずどの環境でも動作するためだ。
 
 <details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
 <summary className="cursor-pointer font-medium">ウォーミング版 Rust 関数コード（Cargo.toml + src/main.rs）</summary>
