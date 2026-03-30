@@ -312,8 +312,6 @@ aws lambda invoke --function-name rust-dynamodb-bench \
 
 </details>
 
-If you're only interested in the results, skip to [Cold Start](#cold-start-impact-of-adding-the-sdk).
-
 ## Cold Start: Impact of Adding the SDK
 
 First, let's check how adding the SDK affects cold starts. Cold starts were forced by updating an environment variable, then measured with a GetItem operation.
