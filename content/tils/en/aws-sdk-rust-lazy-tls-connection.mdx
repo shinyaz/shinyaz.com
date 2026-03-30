@@ -1,21 +1,19 @@
 ---
-title: "AWS SDK for Rust takes ~900ms on first request — connections aren't established during Init"
-description: "Even when initializing the AWS SDK for Rust client during Lambda Init, the first API call takes ~900ms. DNS resolution, TCP connection, and TLS handshake likely all happen on the first request."
+title: "AWS SDK for Rust takes ~900ms on first request — TLS handshake is 99%"
+description: "Even when initializing the AWS SDK for Rust client during Lambda Init, the first API call takes ~900ms. Breakdown measurement revealed TLS handshake at 745ms accounts for 99%."
 date: "2026-03-31"
 published: true
-tags: ["aws", "lambda", "rust", "performance"]
+tags: ["aws", "lambda", "rust", "performance", "tls"]
 ---
 
 While writing a [Lambda Rust + DynamoDB benchmark](/en/blog/2026/03/31/lambda-rust-dynamodb-latency), I noticed the first request after a cold start took 912ms. Init Duration itself was only 112ms — fast. Yet the first DynamoDB call was abnormally slow.
 
-The AWS SDK for Rust uses hyper as its HTTP client internally, and hyper creates new connections on demand when the connection pool has no reusable connection. `Client::new(&config)` only creates the client object during Init — DNS resolution, TCP connection, and TLS handshake likely all happen on the first API call.
+[Breaking down the latency](/en/blog/2026/03/31/lambda-rust-tls-latency-breakdown) revealed that TLS handshake averages 745ms, accounting for 99% of the total. DNS resolution is 7ms, TCP connection is under 1ms. At 128MB (roughly 7% of a vCPU), TLS cryptographic processing is extremely expensive.
 
 ```text title="Output"
-#1  Init: 112ms  1st: 912ms  2nd: 3.3ms
-#2  Init: 112ms  1st: 920ms  2nd: 2.0ms
-#3  Init: 115ms  1st: 905ms  2nd: 1.9ms
+DNS:  7.3ms   (1%)
+TCP:  0.7ms   (0%)
+TLS: 745ms   (99%)
 ```
 
-The second invocation immediately drops to 2-3ms as the connection pool is reused. The 900ms hit is a one-time penalty.
-
-If first-request latency matters, warm the connection with a dummy API call right after initialization.
+The fix: run `client.list_tables().limit(1).send().await` once during Init to warm the connection. This drops first Duration from 912ms to 21ms (82% reduction in total Billed Duration). Use `let _ =` to ignore the result so Init succeeds even if warming fails.
