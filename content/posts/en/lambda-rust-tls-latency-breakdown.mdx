@@ -221,9 +221,37 @@ In the previous post, the SDK's first request took roughly 912ms. This article's
 Now that TLS handshake is identified as the bottleneck, let's test warming the SDK's connection during Init. Adding `client.list_tables().limit(1).send().await` at the end of Init establishes a TLS connection in the SDK's connection pool before the handler runs.
 
 <details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
-<summary className="cursor-pointer font-medium">Warmup Rust function code</summary>
+<summary className="cursor-pointer font-medium">Warmup Rust function code (Cargo.toml + src/main.rs)</summary>
 
-```rust title="src/main.rs (Init section only)"
+```toml title="Cargo.toml"
+[package]
+name = "rust-latency-warmup"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+aws-config = { version = "1", features = ["behavior-version-latest"] }
+aws-sdk-dynamodb = "1"
+lambda_http = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["macros"] }
+```
+
+```rust title="src/main.rs"
+use aws_sdk_dynamodb::types::AttributeValue;
+use aws_sdk_dynamodb::Client;
+use lambda_http::{Body, Error, Request, Response, run, service_fn};
+use serde::Serialize;
+use std::time::Instant;
+
+#[derive(Serialize)]
+struct WarmupResult {
+    mode: String,
+    warmup_ms: f64,
+    sdk_first_call_ms: f64,
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Error> {
     let config = aws_config::load_defaults(
@@ -232,13 +260,50 @@ async fn main() -> Result<(), Error> {
     let client = Client::new(&config);
 
     // Warm the connection during Init
+    let warmup_start = Instant::now();
     let _ = client.list_tables().limit(1).send().await;
+    let warmup_ms = warmup_start.elapsed().as_secs_f64() * 1000.0;
 
     run(service_fn(move |_event: Request| {
         let client = client.clone();
-        async move { /* GetItem execution */ }
+        let warmup_ms = warmup_ms;
+        async move {
+            let sdk_start = Instant::now();
+            client.get_item()
+                .table_name("lambda-rust-bench")
+                .key("pk", AttributeValue::S("bench".into()))
+                .key("sk", AttributeValue::S("item-0".into()))
+                .send().await
+                .map_err(|e| -> Error { e.into() })?;
+            let sdk_first_call_ms = sdk_start.elapsed().as_secs_f64() * 1000.0;
+
+            let result = WarmupResult {
+                mode: "warmup".into(),
+                warmup_ms, sdk_first_call_ms,
+            };
+            let body = serde_json::to_string(&result)?;
+            let resp = Response::builder()
+                .status(200)
+                .header("content-type", "application/json")
+                .body(Body::from(body))
+                .map_err(Box::new)?;
+            Ok::<_, Error>(resp)
+        }
     })).await
 }
+```
+
+</details>
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">Deploy steps (warmup version)</summary>
+
+```bash title="Terminal"
+cargo lambda build --release --arm64
+cargo lambda deploy rust-latency-warmup \
+  --iam-role arn:aws:iam::${ACCOUNT_ID}:role/lambda-rust-dynamodb-role \
+  --region ap-northeast-1 --memory 128 --timeout 30 \
+  --env-vars TABLE_NAME=lambda-rust-bench
 ```
 
 </details>
