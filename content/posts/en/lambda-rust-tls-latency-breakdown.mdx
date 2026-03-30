@@ -208,7 +208,7 @@ Results from 4 forced cold starts.
 
 **TLS handshake at 745ms accounts for 99% of the manual measurement total.** DNS resolution is 7ms, TCP connection is under 1ms — neither is the bottleneck.
 
-At 128MB, Lambda has very limited CPU resources (roughly 8% of a vCPU). TLS handshakes require cryptographic operations like key exchange and certificate verification, which take 700ms+ under this CPU constraint. The 662-820ms variance in TLS timing may also reflect fluctuations in Lambda's CPU allocation.
+At 128MB, Lambda has very limited CPU resources (roughly 7% of a vCPU). TLS handshakes require cryptographic operations like key exchange and certificate verification, which take 700ms+ under this CPU constraint. The 662-820ms variance in TLS timing may also reflect fluctuations in Lambda's CPU allocation.
 
 The SDK's first GetItem took 88ms. Since the manual measurement already established a TLS connection, the SDK creates a separate connection, but benefits from OS-level DNS caching, resulting in faster connection establishment.
 
