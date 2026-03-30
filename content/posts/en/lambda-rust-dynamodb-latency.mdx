@@ -1,0 +1,458 @@
+---
+title: "Lambda Rust × DynamoDB — How Much Does the 90x Speed Gap Shrink in Real Workloads?"
+description: "Benchmarked Lambda Rust with AWS SDK for DynamoDB against Python. The 90x Hello World gap shrinks to 3-6x but doesn't disappear. Operation-pattern-based decision framework included."
+date: "2026-03-30"
+published: true
+featured: false
+categories: [infrastructure]
+tags: ["aws", "lambda", "rust", "dynamodb", "serverless", "performance"]
+series: "lambda-rust"
+seriesOrder: 3
+---
+
+## Introduction
+
+Lambda Rust is 90x faster than Python — but only in a Hello World benchmark without any SDK.
+
+In the [previous post](/en/blog/2026/03/13/lambda-rust-official-support-benchmark), a synthetic benchmark with CPU and memory workloads showed Rust achieving 90x the execution speed of Python. But real applications talk to DynamoDB, S3, and other services. What happens to that 90x gap when network I/O enters the picture?
+
+This article uses AWS SDK for Rust (aws-sdk-dynamodb) to execute various DynamoDB operations and compares latency against an equivalent Python (boto3) function. Operations are classified into "DynamoDB latency-dominant" and "client processing-dominant" patterns to quantify where Rust's advantage persists.
+
+## Test Environment
+
+| Item | Value |
+| --- | --- |
+| Region | ap-northeast-1 (Tokyo) |
+| Architecture | arm64 (Graviton) |
+| Memory | 128 MB |
+| Rust version | 1.94.1 |
+| cargo-lambda | 1.9.1 |
+| aws-sdk-dynamodb | 1.110.0 |
+| Python runtime | python3.13 |
+| DynamoDB | On-demand capacity |
+
+The DynamoDB table uses a composite key with partition key `pk` (String) and sort key `sk` (String). Each item contains a `data` field (1KB string) and `timestamp`.
+
+The Rust deployment package is 11MB — roughly 9x larger than the [Part 1](/en/blog/2026/03/13/lambda-rust-official-support-benchmark) SDK-free build (1.2MB). The AWS SDK's HTTP client (hyper + rustls) and DynamoDB client account for most of the increase.
+
+Prerequisites:
+
+- Rust toolchain + [cargo-lambda](https://www.cargo-lambda.info/)
+- AWS CLI configured (`lambda:*`, `iam:*`, `dynamodb:*` permissions)
+
+## Implementation
+
+Both Rust and Python functions switch operations via a query parameter `op`. The SDK client is initialized **in the Init phase (outside the handler)**, following Lambda best practices. This allows HTTP connection pool reuse from the second invocation onward.
+
+Each operation's timing is measured within the application as `sdk_call_ms` (total SDK call time), recorded alongside Lambda's Duration (which includes runtime overhead).
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">Rust function code (Cargo.toml + src/main.rs)</summary>
+
+```toml title="Cargo.toml"
+[package]
+name = "rust-dynamodb-bench"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+aws-config = { version = "1", features = ["behavior-version-latest"] }
+aws-sdk-dynamodb = "1"
+lambda_http = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["macros"] }
+```
+
+```rust title="src/main.rs"
+use aws_sdk_dynamodb::types::AttributeValue;
+use aws_sdk_dynamodb::Client;
+use lambda_http::{Body, Error, Request, RequestExt, Response, run, service_fn};
+use serde::Serialize;
+use std::time::Instant;
+
+#[derive(Serialize)]
+struct BenchResult {
+    operation: String,
+    runtime: String,
+    duration_ms: f64,
+    sdk_call_ms: f64,
+    items_count: usize,
+}
+
+async fn function_handler(
+    client: &Client,
+    event: Request,
+) -> Result<Response<Body>, Error> {
+    let params = event.query_string_parameters();
+    let op = params.first("op").unwrap_or("get");
+
+    let total_start = Instant::now();
+    let mut items_count: usize = 0;
+
+    let sdk_start = Instant::now();
+    match op {
+        "put" => {
+            client.put_item()
+                .table_name("lambda-rust-bench")
+                .item("pk", AttributeValue::S("bench".into()))
+                .item("sk", AttributeValue::S("item-0".into()))
+                .item("data", AttributeValue::S("x".repeat(1000)))
+                .item("timestamp", AttributeValue::N(chrono_now().to_string()))
+                .send().await?;
+            items_count = 1;
+        }
+        "get" => {
+            let resp = client.get_item()
+                .table_name("lambda-rust-bench")
+                .key("pk", AttributeValue::S("bench".into()))
+                .key("sk", AttributeValue::S("item-0".into()))
+                .send().await?;
+            items_count = if resp.item().is_some() { 1 } else { 0 };
+        }
+        "query" => {
+            let resp = client.query()
+                .table_name("lambda-rust-bench")
+                .key_condition_expression("pk = :pk")
+                .expression_attribute_values(":pk", AttributeValue::S("bench".into()))
+                .send().await?;
+            items_count = resp.count() as usize;
+        }
+        "batch_write" => {
+            use aws_sdk_dynamodb::types::{WriteRequest, PutRequest};
+            let requests: Vec<WriteRequest> = (0..25).map(|i| {
+                let mut item = std::collections::HashMap::new();
+                item.insert("pk".into(), AttributeValue::S("bench".into()));
+                item.insert("sk".into(), AttributeValue::S(format!("item-{}", i)));
+                item.insert("data".into(), AttributeValue::S("x".repeat(1000)));
+                item.insert("timestamp".into(), AttributeValue::N(chrono_now().to_string()));
+                WriteRequest::builder()
+                    .put_request(PutRequest::builder().set_item(Some(item)).build().unwrap())
+                    .build()
+            }).collect();
+            client.batch_write_item()
+                .request_items("lambda-rust-bench", requests)
+                .send().await?;
+            items_count = 25;
+        }
+        _ => {}
+    }
+    let sdk_call_ms = sdk_start.elapsed().as_secs_f64() * 1000.0;
+    let duration_ms = total_start.elapsed().as_secs_f64() * 1000.0;
+
+    let result = BenchResult {
+        operation: op.to_string(),
+        runtime: "rust".to_string(),
+        duration_ms, sdk_call_ms, items_count,
+    };
+    let body = serde_json::to_string(&result)?;
+    let resp = Response::builder()
+        .status(200)
+        .header("content-type", "application/json")
+        .body(body.into())
+        .map_err(Box::new)?;
+    Ok(resp)
+}
+
+fn chrono_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Error> {
+    let config = aws_config::load_defaults(
+        aws_config::BehaviorVersion::latest(),
+    ).await;
+    let client = Client::new(&config);
+
+    run(service_fn(|event: Request| {
+        let client = client.clone();
+        async move { function_handler(&client, event).await }
+    })).await
+}
+```
+
+</details>
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">Python function code (lambda_function.py)</summary>
+
+```python title="lambda_function.py"
+import json
+import time
+import boto3
+import os
+
+client = boto3.client("dynamodb", region_name="ap-northeast-1")
+TABLE_NAME = os.environ.get("TABLE_NAME", "lambda-rust-bench")
+
+
+def lambda_handler(event, context):
+    params = event.get("queryStringParameters") or {}
+    op = params.get("op", "get")
+
+    total_start = time.perf_counter()
+    items_count = 0
+
+    sdk_start = time.perf_counter()
+    if op == "put":
+        client.put_item(
+            TableName=TABLE_NAME,
+            Item={
+                "pk": {"S": "bench"},
+                "sk": {"S": "item-0"},
+                "data": {"S": "x" * 1000},
+                "timestamp": {"N": str(int(time.time()))},
+            },
+        )
+        items_count = 1
+    elif op == "get":
+        resp = client.get_item(
+            TableName=TABLE_NAME,
+            Key={"pk": {"S": "bench"}, "sk": {"S": "item-0"}},
+        )
+        items_count = 1 if "Item" in resp else 0
+    elif op == "query":
+        resp = client.query(
+            TableName=TABLE_NAME,
+            KeyConditionExpression="pk = :pk",
+            ExpressionAttributeValues={":pk": {"S": "bench"}},
+        )
+        items_count = resp.get("Count", 0)
+    elif op == "batch_write":
+        requests = []
+        for i in range(25):
+            requests.append({
+                "PutRequest": {
+                    "Item": {
+                        "pk": {"S": "bench"},
+                        "sk": {"S": f"item-{i}"},
+                        "data": {"S": "x" * 1000},
+                        "timestamp": {"N": str(int(time.time()))},
+                    }
+                }
+            })
+        client.batch_write_item(RequestItems={TABLE_NAME: requests})
+        items_count = 25
+
+    sdk_call_ms = (time.perf_counter() - sdk_start) * 1000
+    duration_ms = (time.perf_counter() - total_start) * 1000
+
+    return {
+        "statusCode": 200,
+        "headers": {"content-type": "application/json"},
+        "body": json.dumps({
+            "operation": op,
+            "runtime": "python",
+            "duration_ms": round(duration_ms, 4),
+            "sdk_call_ms": round(sdk_call_ms, 4),
+            "items_count": items_count,
+        }),
+    }
+```
+
+</details>
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">Deploy steps (IAM + DynamoDB + Lambda)</summary>
+
+```bash title="Terminal (setup)"
+ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+REGION="ap-northeast-1"
+
+# Create DynamoDB table
+aws dynamodb create-table \
+  --table-name lambda-rust-bench \
+  --attribute-definitions \
+    AttributeName=pk,AttributeType=S \
+    AttributeName=sk,AttributeType=S \
+  --key-schema \
+    AttributeName=pk,KeyType=HASH \
+    AttributeName=sk,KeyType=RANGE \
+  --billing-mode PAY_PER_REQUEST \
+  --region $REGION
+
+# Create IAM role
+aws iam create-role --role-name lambda-rust-dynamodb-role \
+  --assume-role-policy-document '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"lambda.amazonaws.com"},"Action":"sts:AssumeRole"}]}'
+aws iam attach-role-policy --role-name lambda-rust-dynamodb-role \
+  --policy-arn arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+aws iam put-role-policy --role-name lambda-rust-dynamodb-role \
+  --policy-name dynamodb-bench-access \
+  --policy-document "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Action\":[\"dynamodb:PutItem\",\"dynamodb:GetItem\",\"dynamodb:Query\",\"dynamodb:BatchWriteItem\",\"dynamodb:DeleteItem\"],\"Resource\":\"arn:aws:dynamodb:${REGION}:${ACCOUNT_ID}:table/lambda-rust-bench\"}]}"
+
+# Rust: build and deploy
+cargo lambda build --release --arm64
+cargo lambda deploy rust-dynamodb-bench \
+  --iam-role arn:aws:iam::${ACCOUNT_ID}:role/lambda-rust-dynamodb-role \
+  --region $REGION --memory 128 --timeout 30 \
+  --env-vars TABLE_NAME=lambda-rust-bench
+
+# Python: zip and deploy
+zip -j function.zip lambda_function.py
+aws lambda create-function \
+  --function-name python-dynamodb-bench \
+  --runtime python3.13 \
+  --handler lambda_function.lambda_handler \
+  --role arn:aws:iam::${ACCOUNT_ID}:role/lambda-rust-dynamodb-role \
+  --zip-file fileb://function.zip \
+  --memory-size 128 --architectures arm64 --timeout 30 \
+  --environment "Variables={TABLE_NAME=lambda-rust-bench}" \
+  --region $REGION
+
+# Seed test data (25 items via BatchWriteItem)
+aws lambda invoke --function-name rust-dynamodb-bench \
+  --cli-binary-format raw-in-base64-out \
+  --payload '{"requestContext":{"http":{"method":"GET"}},"queryStringParameters":{"op":"batch_write"},"rawPath":"/","headers":{}}' \
+  --region $REGION /tmp/seed.json
+```
+
+</details>
+
+If you're only interested in the results, skip to [Cold Start](#cold-start-impact-of-adding-the-sdk).
+
+## Cold Start: Impact of Adding the SDK
+
+First, let's check how adding the SDK affects cold starts. Cold starts were forced by updating an environment variable, then measured with a GetItem operation.
+
+| Metric | Rust | Python |
+| --- | ---: | ---: |
+| Init Duration | 112 ms | 357 ms |
+| First Duration | 912 ms | 291 ms |
+| Billed Duration (total) | 1,025 ms | 648 ms |
+| Max Memory Used | 30 MB | 90 MB |
+
+**A surprising result.** Init Duration is 3.2x faster for Rust (112ms vs 357ms), but the first DynamoDB call (Duration) is 3.1x slower for Rust (912ms vs 291ms). In total Billed Duration, **Python is actually faster**.
+
+The cause is HTTP/TLS connection establishment in the AWS SDK for Rust. The Rust SDK creates the client object during Init, but the actual TCP connection and TLS handshake are **lazily executed on the first request**. Python's boto3, on the other hand, pre-establishes the connection pool during Init, resulting in a shorter first-request Duration.
+
+This behavior was confirmed across 4 measurements.
+
+| Run | Init Duration | 1st Duration | 2nd Duration |
+| --- | ---: | ---: | ---: |
+| #1 | 112 ms | 912 ms | 3.3 ms |
+| #2 | 112 ms | 920 ms | 2.0 ms |
+| #3 | 115 ms | 905 ms | 1.9 ms |
+| #4 | 110 ms | 916 ms | 1.8 ms |
+
+The key observation is that **the second invocation immediately drops to 2-3ms**. Once the HTTP connection pool is established, subsequent calls reuse the connection. Rust's cold start penalty is a "one-time cost" and should be evaluated separately from steady-state performance.
+
+In [Part 1](/en/blog/2026/03/13/lambda-rust-official-support-benchmark), the SDK-free configuration had an Init Duration of 29ms. Adding the SDK increases this by ~80ms, attributable to aws-sdk-dynamodb + aws-config + hyper + rustls initialization. In practice, a ~1 second cold start is well within API Gateway's 29-second timeout.
+
+## Operation-Level Latency: How Much Does the 90x Gap Shrink?
+
+Now for the main event. We execute four DynamoDB operations in warm-start state and compare Rust vs Python latency.
+
+### Framework: Two Operation Categories
+
+DynamoDB operation latency consists of two components:
+
+1. **DynamoDB-side processing** — Network round-trip + DynamoDB engine processing. Language-independent
+2. **Client-side processing** — Request serialization, response deserialization, HTTP handling. This is where language performance differences show
+
+The dominant component varies by operation pattern.
+
+| Category | Operations | Hypothesis |
+| --- | --- | --- |
+| DynamoDB latency-dominant | GetItem, PutItem | Single-item read/write. Client processing is light; DynamoDB round-trip dominates. Language gap should be small |
+| Client processing-dominant | Query (25 items), BatchWriteItem (25 items) | Multiple items require serialization/deserialization. Client-side ratio increases; language gap should be larger |
+
+Let's test this hypothesis.
+
+### Results
+
+Measured `sdk_call_ms` (application-level timing) across 5 warm-start invocations per operation.
+
+| Operation | Rust sdk_call_ms | Python sdk_call_ms | Ratio |
+| --- | ---: | ---: | ---: |
+| **GetItem** | 2.9 ms | 13.8 ms | **4.7x** |
+| **PutItem** | 3.6 ms | 13.3 ms | **3.6x** |
+| **Query (25 items)** | 2.6 ms | 16.2 ms | **6.3x** |
+| **BatchWriteItem (25 items)** | 6.0 ms | 20.3 ms | **3.4x** |
+
+Lambda Duration (including runtime overhead) shows the same trend.
+
+| Operation | Rust Duration | Python Duration | Ratio |
+| --- | ---: | ---: | ---: |
+| **GetItem** | 6.7 ms | 34.5 ms | **5.1x** |
+| **PutItem** | 7.0 ms | 26.4 ms | **3.8x** |
+| **Query (25 items)** | 9.7 ms | 35.9 ms | **3.7x** |
+| **BatchWriteItem (25 items)** | 13.0 ms | 40.1 ms | **3.1x** |
+
+Memory usage was consistently Rust 30MB / Python 90MB across all operations.
+
+### Breakdown Analysis
+
+Comparing against our hypothesis:
+
+**DynamoDB latency-dominant (GetItem / PutItem):**
+
+The hypothesis predicted "small language gap (1.5-2x)," but actual measurements showed 3.6-4.7x. **The gap was larger than expected.**
+
+The reason is that boto3's overhead was higher than anticipated. boto3 performs type checking and validation when converting DynamoDB responses to Python dicts. Even for a single GetItem, this overhead adds ~10ms. Rust's serde resolves type information at compile time, making deserialization cost nearly zero.
+
+**Client processing-dominant (Query / BatchWriteItem):**
+
+Query at 6.3x, BatchWriteItem at 3.4x. Query shows a larger gap because deserializing 25 response items amplifies the difference between serde and Python dict conversion.
+
+BatchWriteItem's primary processing is serializing 25 items (request construction), but DynamoDB's write processing time is also significant, reducing the relative language gap.
+
+### 90x → 3-6x: Where Did the Gap Go?
+
+The [Part 1](/en/blog/2026/03/13/lambda-rust-official-support-benchmark) benchmark used CPU workload (Fibonacci calculation) and memory workload (100K-element vector allocation). These are **pure client-side processing** where Rust's zero-cost abstractions and native code execution have maximum advantage.
+
+With DynamoDB operations, most of the processing time is spent on **network round-trips** (Lambda → DynamoDB endpoint). This portion is language-independent. Rust can only speed up serialization/deserialization and HTTP handling, which represent a smaller fraction of total time — hence the inevitable ratio compression.
+
+That said, 3-6x is far from negligible. For 1 million monthly invocations, the Billed Duration difference translates directly to cost savings.
+
+## Discussion: When to Choose Rust Lambda + DynamoDB
+
+### What the Data Shows
+
+- **Rust is 3-6x faster across all operation patterns**. "The gap doesn't disappear even in DynamoDB latency-dominant operations" is this article's key finding
+- **Query (multi-item retrieval) shows the largest gap (6.3x)**. The gap scales with deserialization volume
+- **Cold start is slower for Rust (total 1,025ms vs 648ms)**. However, the second invocation immediately stabilizes at 2-3ms
+- **Memory usage is consistently 3x more efficient for Rust** (30MB vs 90MB)
+
+### Considerations Beyond the Data
+
+The following factors can't be derived from benchmark data alone but affect adoption decisions.
+
+**Invocation frequency and cost:** With 128MB / arm64 Tokyo region pricing and 1 million monthly invocations, the Billed Duration difference (Rust avg 9ms vs Python avg 34ms) translates directly to compute cost. The higher the frequency, the greater Rust's economic advantage.
+
+**Team Rust proficiency:** Lambda functions are relatively small codebases, making them a reasonable scope for Rust adoption. However, the learning curve for ownership and lifetimes is real. Without existing Rust experience on the team, expect initial development velocity to be several times slower than Python.
+
+## Summary
+
+- **The 90x gap shrinks to 3-6x but doesn't disappear** — Even with DynamoDB network round-trips dominating, Rust's advantage in SDK serialization/deserialization persists
+- **The gap varies by operation pattern** — Query (multi-item retrieval) at 6.3x, single operations at 3.6-4.7x. The gap scales with deserialization volume
+- **Cold start should be evaluated as a "one-time penalty"** — Rust's first request takes 912ms for TLS connection establishment, but the second invocation immediately stabilizes at 2-3ms
+- **Memory efficiency is consistently 3x better for Rust** — 30MB vs 90MB. Rust runs comfortably even at the minimum 128MB memory setting
+
+## Cleanup
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">Resource deletion commands</summary>
+
+```bash title="Terminal"
+REGION="ap-northeast-1"
+
+# Delete Lambda functions
+aws lambda delete-function --function-name rust-dynamodb-bench --region $REGION
+aws lambda delete-function --function-name python-dynamodb-bench --region $REGION
+
+# Delete DynamoDB table
+aws dynamodb delete-table --table-name lambda-rust-bench --region $REGION
+
+# Delete IAM role
+aws iam delete-role-policy --role-name lambda-rust-dynamodb-role \
+  --policy-name dynamodb-bench-access
+aws iam detach-role-policy --role-name lambda-rust-dynamodb-role \
+  --policy-arn arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+aws iam delete-role --role-name lambda-rust-dynamodb-role
+```
+
+</details>
