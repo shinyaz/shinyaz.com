@@ -2,19 +2,19 @@
 title: "Verifying Lambda Managed Instances — Provisioning Time, Multi-Concurrency, and Scaling Behavior"
 description: "Deployed AWS Lambda Managed Instances and measured 67s provisioning, auto-distribution across 10 execution environments with multi-concurrency, and throttling under CPU load. Includes an LMI migration checklist."
 date: "2026-03-31"
-published: true
-featured: true
+published: false
+featured: false
 categories: [infrastructure]
 tags: ["aws", "lambda", "ec2", "serverless", "performance"]
 ---
 
 ## Introduction
 
-On March 30, 2026, AWS announced [Lambda Managed Instances (LMI)](https://aws.amazon.com/blogs/compute/build-high-performance-apps-with-aws-lambda-managed-instances/). This new compute option lets you run Lambda functions on EC2 instances while preserving the Lambda programming model.
+On November 30, 2025, AWS announced [Lambda Managed Instances (LMI)](https://aws.amazon.com/about-aws/whats-new/2025/11/aws-lambda-managed-instances/). This new compute option lets you run Lambda functions on EC2 instances while preserving the Lambda programming model.
 
 LMI is less like "Lambda that scales instantly" and more like "Fargate with a Lambda developer experience." It eliminates cold starts but introduces provisioning wait times at deploy, and scaling is asynchronous based on CPU utilization. This mental model shift is the starting point for using LMI effectively.
 
-This article deploys LMI and measures three core behaviors, then provides a checklist for deciding whether to migrate your workload. See the official docs at [Lambda Managed Instances](https://docs.aws.amazon.com/lambda/latest/dg/lambda-managed-instances.html).
+This article deploys LMI and measures three core behaviors, then provides a checklist for deciding whether to migrate your workload. See the official docs at [Lambda Managed Instances](https://docs.aws.amazon.com/lambda/latest/dg/lambda-managed-instances.html) and the [AWS Compute Blog post](https://aws.amazon.com/blogs/compute/build-high-performance-apps-with-aws-lambda-managed-instances/) for configuration details.
 
 ### Key Differences from Standard Lambda
 
@@ -141,6 +141,73 @@ aws lambda create-capacity-provider \
   --region $REGION
 ```
 
+The verification function supports three modes via the `mode` parameter: info (basic info), io_bound (I/O simulation), and cpu_bound (CPU load).
+
+```python title="lambda_function.py"
+import json
+import os
+import time
+import threading
+import math
+
+def lambda_handler(event, context):
+    mode = event.get("mode", "info")
+    result = {
+        "request_id": context.aws_request_id,
+        "function_version": context.function_version,
+        "pid": os.getpid(),
+        "thread_id": threading.current_thread().ident,
+        "timestamp": time.time(),
+    }
+
+    if mode == "io_bound":
+        sleep_sec = event.get("sleep_sec", 2)
+        time.sleep(sleep_sec)
+        result["mode"] = "io_bound"
+        result["sleep_sec"] = sleep_sec
+    elif mode == "cpu_bound":
+        iterations = event.get("iterations", 5_000_000)
+        start = time.time()
+        total = 0.0
+        for i in range(iterations):
+            total += math.sqrt(i) * math.sin(i)
+        result["mode"] = "cpu_bound"
+        result["compute_time_sec"] = round(time.time() - start, 3)
+    else:
+        result["mode"] = "info"
+
+    return {"statusCode": 200, "body": json.dumps(result)}
+```
+
+```bash title="Terminal (Lambda function + publish-version)"
+mkdir -p /tmp/lmi-func && cp lambda_function.py /tmp/lmi-func/
+cd /tmp/lmi-func && zip -j /tmp/lmi-function.zip lambda_function.py
+
+CP_ARN="arn:aws:lambda:${REGION}:${ACCOUNT_ID}:capacity-provider:lmi-verification-cp"
+
+aws lambda create-function \
+  --function-name lmi-verification-func \
+  --runtime python3.13 \
+  --role "arn:aws:iam::${ACCOUNT_ID}:role/LMI-Verification-ExecutionRole" \
+  --handler lambda_function.lambda_handler \
+  --zip-file fileb:///tmp/lmi-function.zip \
+  --memory-size 4096 \
+  --timeout 60 \
+  --capacity-provider-config "{
+    \"LambdaManagedInstancesCapacityProviderConfig\": {
+      \"CapacityProviderArn\": \"$CP_ARN\",
+      \"ExecutionEnvironmentMemoryGiBPerVCpu\": 4.0,
+      \"PerExecutionEnvironmentMaxConcurrency\": 10
+    }
+  }" \
+  --region $REGION
+
+aws lambda wait function-active-v2 --function-name lmi-verification-func --region $REGION
+
+# Publish version (triggers EC2 provisioning)
+aws lambda publish-version --function-name lmi-verification-func --region $REGION
+```
+
 </details>
 
 Configuration used for this verification:
@@ -152,7 +219,7 @@ Configuration used for this verification:
 | MaxVCpuCount | 30 |
 | Memory | 4096 MB |
 | Memory/vCPU ratio | 4:1 (general purpose) |
-| PerExecutionEnvironmentMaxConcurrency | 10 |
+| PerExecutionEnvironmentMaxConcurrency | 10 (Python default is 16/vCPU; set lower to observe limit behavior) |
 | Instance type | Lambda-selected (result: m7i.xlarge) |
 
 ## Verification 1: How Long Does Capacity Provider Startup Take?
@@ -170,6 +237,13 @@ Standard Lambda functions are invocable immediately after deploy. LMI provisions
 
 After `publish-version`, Lambda launched one m7i.xlarge instance in each of 3 AZs.
 
+```bash title="Terminal"
+aws ec2 describe-instances \
+  --filters "Name=tag:aws:lambda:capacity-provider,Values=*" \
+  --query 'Reservations[*].Instances[*].[InstanceType,Placement.AvailabilityZone]' \
+  --output table --region us-east-1
+```
+
 ```text title="Output"
 |  m7i.xlarge |  us-east-1c |
 |  m7i.xlarge |  us-east-1b |
@@ -180,7 +254,7 @@ Without specifying instance types, Lambda auto-selected m7i.xlarge (4 vCPU / 16 
 
 ### First Invoke Confirmation
 
-After the version became Active, invokes showed no cold starts. Five sequential invokes were stable at ~1.2s (including network round-trip).
+After the version became Active, invokes showed no cold starts. Five sequential invokes were stable at ~1.2s (including network round-trip). Since the info mode function body executes in near-zero time, most of this latency is the network round-trip from the local environment (Tokyo) to us-east-1.
 
 ```text title="Output"
 invoke #1: 1248ms | pid=18
@@ -190,7 +264,7 @@ invoke #4: 1178ms | pid=20
 invoke #5: 1204ms | pid=15
 ```
 
-Note the different PIDs — five sequential invokes were routed to five different execution environments. Despite MinExecutionEnvironments=3, more environments were actually running (more on this below).
+Note the different PIDs — five sequential invokes were routed to five different execution environments. With three m7i.xlarge instances (4 vCPU / 16 GB each) and a function configured at 4 GB memory / 1 vCPU, each instance can host multiple execution environments. In practice, more execution environments were running than the MinExecutionEnvironments=3 floor (more on this below).
 
 ### Takeaway
 
@@ -200,7 +274,40 @@ Note the different PIDs — five sequential invokes were routed to five differen
 
 LMI's key differentiator is multi-concurrency. Standard Lambda uses one execution environment per request; LMI can process multiple requests simultaneously in one environment. I tested with I/O-bound workloads (simulated with 3-second sleep).
 
+Note that the Python runtime implements multi-concurrency using separate processes, not threads (Node.js uses an event loop; Java/.NET use threads). This means you should focus on inter-process coordination and file locking for `/tmp` access rather than thread safety. Because each execution environment runs as a separate process, it has a unique PID. The following tests use PID distribution to identify which execution environment handled each request.
+
 ### 10 Concurrent Requests
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">Concurrent invoke commands</summary>
+
+```bash title="Terminal"
+# Run N concurrent invokes and aggregate PID distribution
+N=10
+for i in $(seq 1 $N); do
+  aws lambda invoke \
+    --function-name lmi-verification-func --qualifier 1 \
+    --payload '{"mode":"io_bound","sleep_sec":3}' \
+    --cli-binary-format raw-in-base64-out \
+    --cli-read-timeout 30 \
+    /tmp/lmi-result-${i}.json \
+    --region us-east-1 > /dev/null 2>&1 &
+done
+wait
+
+# Check PID distribution
+for i in $(seq 1 $N); do
+  python3 -c "
+import json
+d=json.load(open('/tmp/lmi-result-${i}.json'))
+b=json.loads(d['body'])
+print(b['pid'])" 2>/dev/null
+done | sort | uniq -c | sort -rn
+```
+
+Change N to 10, 30, or 40 for each test. For CPU-bound tests, change the payload to `'{"mode":"cpu_bound","iterations":10000000}'`.
+
+</details>
 
 ```text title="Output"
 All requests completed: 4551ms (3s sleep + network round-trip)
@@ -215,7 +322,7 @@ PID 17 handled 3 requests simultaneously. Multi-concurrency is working. Total co
 
 ### 30 Concurrent Requests (Near Theoretical Limit)
 
-With MinExecutionEnvironments=3 and PerExecutionEnvironmentMaxConcurrency=10, the theoretical limit should be 3 × 10 = 30.
+With MinExecutionEnvironments=3 and PerExecutionEnvironmentMaxConcurrency=10, the minimum concurrent capacity is 3 × 10 = 30.
 
 ```text title="Output"
 Completed: 5899ms | Success: 30/30 | Throttled: 0
@@ -224,7 +331,7 @@ PID distribution:
   3 requests each → PID 15-24 (10 unique PIDs)
 ```
 
-**All 30 succeeded with zero throttling.** However, 10 PIDs were observed. Despite MinExecutionEnvironments=3, Lambda had spun up 10 execution environments, distributing 3 requests evenly across each.
+**All 30 succeeded with zero throttling.** 10 unique PIDs were observed. Three m7i.xlarge instances (4 vCPU / 16 GB each) hosted 10 execution environments (4 GB / 1 vCPU each), exceeding the MinExecutionEnvironments=3 floor. Requests were distributed evenly at 3 per environment.
 
 ### 40 Concurrent Requests (Over Limit)
 
@@ -233,17 +340,17 @@ Completed: 9220ms | Success: 34/40 | Throttled: 6
 PID distribution: 10 PIDs (15-24), 3-4 requests each
 ```
 
-At 40 concurrent requests, 6 were throttled. Completion time stretched to 9.2s. Despite a theoretical limit of 10 × 10 = 100, throttling occurred at 40 concurrent requests, likely due to routing and queuing overhead.
+At 40 concurrent requests, 6 were throttled. Completion time stretched to 9.2s. While the environment-level capacity is 10 environments × 10 concurrency = 100, throttling occurred at just 40 concurrent requests. The exact cause is unclear, but routing and queuing overhead may be a contributing factor.
 
 ### Takeaway
 
 **Multi-concurrency works effectively for I/O-bound workloads.** A 3-second sleep operation completes in ~4.5s even with 10 concurrent requests. What would require 10 execution environments in standard Lambda can be handled with fewer resources.
 
-However, Lambda spun up 10 execution environments despite MinExecutionEnvironments=3. Since Lambda auto-scales, minimum cost estimates can't rely on MinExecutionEnvironments alone.
+From a cost perspective, note that 10 execution environments were running despite MinExecutionEnvironments=3. The actual number of execution environments is not determined by MinExecutionEnvironments alone. Cost estimates should be based on the number and type of EC2 instances launched.
 
 ## Verification 3: How Fast Does Scale-Out Respond to CPU Load?
 
-LMI scales asynchronously based on CPU utilization. I tested how this differs from standard Lambda's immediate request-driven scaling using CPU-bound workloads.
+LMI scales asynchronously based on CPU utilization. Scaling operates at two layers: adding execution environments on existing instances, and launching additional EC2 instances when instance resources are exhausted. I tested how this differs from standard Lambda's immediate request-driven scaling using CPU-bound workloads.
 
 ### CPU-Bound Function
 
@@ -251,19 +358,28 @@ A numerical computation function (sqrt + sin × 10 million iterations) taking ~1
 
 ### 50 Concurrent × 3 Batches (15s Intervals)
 
+First, I applied heavy load under the current configuration (MaxExecutionEnvironments not explicitly set) to observe whether execution environments or instances are added automatically.
+
 ```text title="Output"
 Batch 1: 18543ms | Success: 33/50 | Throttled: 17 | Unique PIDs: 10
 Batch 2: 15212ms | Success: 20/50 | Throttled: 30 | Unique PIDs: 10
 Batch 3: 19075ms | Success: 18/50 | Throttled: 32 | Unique PIDs: 10
 ```
 
-**CPU-bound workloads produced heavy throttling, and no scale-out was observed even with 30-second intervals between batches.** PID count remained at 10 throughout.
+**CPU-bound workloads produced heavy throttling, and no increase in execution environments was observed even with 30-second intervals between batches.** PID count remained at 10 throughout. CloudTrail `RunInstances` events confirmed that no additional EC2 instances were launched during the CPU load test either — the initial 3 instances remained throughout.
 
-After explicitly setting MaxExecutionEnvironments=20, PID 25 appeared (11 unique PIDs). Scale-out had begun, but was not immediate.
+After explicitly setting MaxExecutionEnvironments=20 to give Lambda room to add execution environments, PID 25 appeared (11 unique PIDs). Execution environment addition had begun, but was not immediate.
+
+```bash title="Terminal (scaling config update)"
+aws lambda put-function-scaling-config \
+  --function-name lmi-verification-func --qualifier 1 \
+  --function-scaling-config "MinExecutionEnvironments=3,MaxExecutionEnvironments=20" \
+  --region us-east-1
+```
 
 ### 30 Concurrent × 5 Batches (Stability Test)
 
-Reducing to 30 concurrent requests with sustained load:
+Since 50 concurrent requests caused heavy throttling, I reduced to a level the current 10 execution environments could handle stably, and observed behavior under sustained load:
 
 ```text title="Output"
 Batch 1: 18102ms | Success: 29/30 | Throttled: 1
@@ -273,7 +389,7 @@ Batch 4: 15101ms | Success: 30/30 | Throttled: 0
 Batch 5: 12235ms | Success: 30/30 | Throttled: 0
 ```
 
-10 execution environments handled 30 concurrent requests stably, with processing time decreasing per batch (18s → 12s) — likely a warm-up effect.
+10 execution environments handled 30 concurrent requests stably, with processing time decreasing per batch (18s → 12s). The exact cause of the improvement is unclear, but it may be due to amortization of initial costs within each execution environment, such as process initialization and module imports.
 
 ### CloudWatch Metrics
 
@@ -289,7 +405,7 @@ Batch 5: 12235ms | Success: 30/30 | Throttled: 0
 
 **CPU-bound workloads can feel "slow to scale" with LMI.** The docs note that throttling may occur if traffic more than doubles within 5 minutes, and this was clearly observable in practice. The gap from standard Lambda's request-driven scaling is significant.
 
-For CPU-bound work, multi-concurrency benefits are limited since invocations compete for CPU resources. Consider setting PerExecutionEnvironmentMaxConcurrency at or below vCPU count, or increasing vCPUs per function.
+For CPU-bound work, multi-concurrency benefits are limited since invocations share CPU resources within the same environment, which can increase individual request latency. The official blog recommends setting concurrency at or below vCPU count for CPU-intensive workloads.
 
 ## LMI Suitability Analysis
 
@@ -301,35 +417,37 @@ For CPU-bound work, multi-concurrency benefits are limited since invocations com
 | Cold starts | Yes (100ms-seconds) | None |
 | I/O-bound 10 concurrent | 10 execution envs needed | 4.5s completion (multi-concurrency) |
 | CPU-bound 50 concurrent | 50 envs, immediate scale | Throttling (async scaling) |
-| Scale-out speed | Per-request, immediate | CPU-based, minutes |
+| Scale-out speed | Per-request, immediate | CPU-based, async (two layers: execution envs + instances) |
 
 ### Cost Structure
 
 LMI uses EC2 instance pricing + 15% management fee. This verification launched m7i.xlarge ($0.2016/hr × 3 instances).
 
-- LMI minimum cost: 3 × $0.2016 × 1.15 ≈ **$0.70/hour** (3 instances always running even at MinExecutionEnvironments=3)
+- LMI minimum cost: 3 × $0.2016 × 1.15 ≈ **$0.70/hour** (minimum 3 EC2 instances always running)
 - Standard Lambda: $0 with no traffic
 
 LMI incurs costs even when idle. High-utilization workloads may benefit from EC2 Savings Plans / Reserved Instances, but low-utilization workloads are far cheaper on standard Lambda.
 
 ## Summary — LMI Migration Checklist
 
-| Check | LMI Fits | Standard Lambda Fits |
+| Check | Standard Lambda Fits | LMI Fits |
 | --- | --- | --- |
-| Traffic pattern | Steady, predictable | Bursty, spiky |
-| Cold start tolerance | Cannot tolerate | Can tolerate |
-| Execution duration | Long-running, steady-state | Short, event-driven |
-| Workload type | I/O-bound (multi-concurrency shines) | CPU-bound (scaling challenges) |
-| Utilization rate | High (EC2 pricing advantage) | Low (per-request pricing wins) |
-| VPC requirements | Already in VPC | No VPC needed |
-| Deploy frequency | Infrequent (67s wait acceptable) | Frequent (instant deploy needed) |
+| Traffic pattern | Bursty, spiky | Steady, predictable |
+| Cold start tolerance | Can tolerate | Cannot tolerate |
+| Execution duration | Short, event-driven | Long-running, steady-state |
+| Workload type | CPU-bound (scaling challenges) | I/O-bound (multi-concurrency shines) |
+| Utilization rate | Low (per-request pricing wins) | High (EC2 pricing advantage) |
+| VPC requirements | No VPC needed | Already in VPC |
+| Deploy frequency | Frequent (instant deploy needed) | Infrequent (67s wait acceptable) |
 
 - **"Managed EC2 cluster" fit check** — LMI provides EC2 compute flexibility with Lambda's developer experience, but its scaling model is closer to EC2. If you need instant response to traffic spikes, standard Lambda is better suited
 - **Multi-concurrency shines for I/O-bound work** — Processing multiple requests in one execution environment dramatically improves resource efficiency for workloads with API calls or DB query wait times. Benefits are limited for CPU-bound work
 - **Cost optimization requires utilization analysis** — With at least 3 EC2 instances always running, cost efficiency at low traffic is worse than standard Lambda. Consider LMI for high-utilization workloads where Savings Plans apply
 
+## Cleanup
+
 <details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
-<summary className="cursor-pointer font-medium">Cleanup (resource deletion commands)</summary>
+<summary className="cursor-pointer font-medium">Resource deletion commands</summary>
 
 ```bash title="Terminal"
 REGION=us-east-1
