@@ -1,6 +1,6 @@
 ---
-title: "Verifying AWS DevOps Agent — What Proactive Prevention Actually Recommends"
-description: "Fed multiple incident investigation patterns to DevOps Agent's Proactive Prevention and ran a manual evaluation. Examined the generated Recommendation's content, category, and Agent-ready Specification availability to reveal what prevention proposals look like in practice."
+title: "Verifying AWS DevOps Agent — What Prevention Actually Recommends"
+description: "Fed multiple incident investigation patterns to DevOps Agent's Prevention and ran a manual evaluation. Examined the generated Recommendation's content, category, and Agent-ready Specification availability to reveal what prevention proposals look like in practice."
 date: "2026-04-01"
 published: true
 featured: false
@@ -12,23 +12,23 @@ seriesOrder: 3
 
 ## Introduction
 
-[Part 1](/en/blog/2026/04/01/aws-devops-agent-ga-verification) covered DevOps Agent setup and incident investigation. [Part 2](/en/blog/2026/04/01/aws-devops-agent-custom-skills) explored how Custom Skills improve investigation quality. Both focused on post-incident response.
+[Part 1](/en/blog/2026/04/01/aws-devops-agent-ga-verification) covered DevOps Agent setup and incident investigation. [Part 2](/en/blog/2026/04/01/aws-devops-agent-custom-skills) explored how Skills improve investigation quality. Both focused on post-incident response.
 
-DevOps Agent has another pillar. **Proactive Prevention** analyzes past incident investigations to generate improvement recommendations. By default, evaluations run automatically on a weekly schedule, but can also be triggered manually. It's accessible from the "Prevention" page in the Operator Web App.
+DevOps Agent has another pillar. **Prevention** analyzes past incident investigations to generate improvement recommendations. By default, evaluations run automatically on a weekly schedule, but can also be triggered manually. It's accessible from the "Prevention" page in the Operator Access.
 
 This article creates diverse incident investigation history, runs a manual evaluation, and examines the generated Recommendation.
 
 Prerequisites:
 
 - An active Agent Space from [Part 1](/en/blog/2026/04/01/aws-devops-agent-ga-verification)
-- Operator Web App access
+- Operator Access access
 - AWS CLI v2, EC2/CloudWatch permissions
 
 If you only want the results, skip to [Summary](#summary).
 
 ## Setup: Creating Incident Investigation History
 
-Proactive Prevention evaluation requires incident investigation history to analyze. Parts 1 and 2 produced 2 CPU spike investigations (both stress-ng), which are too homogeneous for diverse recommendations.
+Prevention evaluation requires incident investigation history to analyze. Parts 1 and 2 produced 2 CPU spike investigations (both stress-ng), which are too homogeneous for diverse recommendations.
 
 To diversify, I created two additional incident patterns — **CPU spike** and **disk space exhaustion** — on a production-like instance.
 
@@ -195,7 +195,7 @@ At this point, the Agent Space had the following investigation history.
 
 ### Manual Evaluation
 
-I clicked "Run Now" on the "Prevention" page in the Operator Web App.
+I clicked "Run Now" on the "Prevention" page in the Operator Access.
 
 I ran the evaluation 3 times total.
 
@@ -302,7 +302,7 @@ This Recommendation was governance-focused (IAM policy changes, SSM Change Manag
 
 ## Summary
 
-I fed 8 incident investigations (3 patterns: CPU spike, memory exhaustion, disk space exhaustion) to Proactive Prevention and ran 3 manual evaluations.
+I fed 8 incident investigations (3 patterns: CPU spike, memory exhaustion, disk space exhaustion) to Prevention and ran 3 manual evaluations.
 
 **What the verification confirmed:**
 
@@ -316,8 +316,8 @@ I fed 8 incident investigations (3 patterns: CPU spike, memory exhaustion, disk 
 Across 3 articles, I verified DevOps Agent's "investigation → quality improvement → prevention" cycle.
 
 - [Part 1](/en/blog/2026/04/01/aws-devops-agent-ga-verification): Minimal setup and incident investigation — identified stress-ng in 4 minutes 25 seconds
-- [Part 2](/en/blog/2026/04/01/aws-devops-agent-custom-skills): Custom Skills for investigation quality — structured report format and reduced investigation time
-- Part 3 (this article): Proactive Prevention — generated specific improvement recommendations from past investigations
+- [Part 2](/en/blog/2026/04/01/aws-devops-agent-custom-skills): Skills for investigation quality — structured report format and reduced investigation time
+- Part 3 (this article): Prevention — generated specific improvement recommendations from past investigations
 
 DevOps Agent is not just an incident investigation tool but has a cycle that accumulates investigation results and connects them to preventive improvement recommendations. This verification used a minimal CloudWatch + EC2 configuration, but connecting code repositories and CI/CD pipelines could yield code-change Recommendations with Agent-ready Specifications.
 

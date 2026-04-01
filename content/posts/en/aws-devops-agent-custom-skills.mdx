@@ -1,6 +1,6 @@
 ---
-title: "Verifying AWS DevOps Agent — How Custom Skills Change Investigation Quality"
-description: "Created a Custom Skill for DevOps Agent and compared investigation results with and without it on the same incident scenario. Investigation time dropped from 164s to 64s, and the report followed the Skill's structured format."
+title: "Verifying AWS DevOps Agent — How Skills Change Investigation Quality"
+description: "Created a Skill for DevOps Agent and compared investigation results with and without it on the same incident scenario. Investigation time dropped from 164s to 64s, and the report followed the Skill's structured format."
 date: "2026-04-01"
 published: true
 featured: false
@@ -14,21 +14,21 @@ seriesOrder: 2
 
 In the [previous article](/en/blog/2026/04/01/aws-devops-agent-ga-verification), I set up AWS DevOps Agent in a minimal configuration (single account + CloudWatch only) and investigated a stress-ng CPU spike via Chat. The agent identified the root cause (stress-ng command execution) in 4 minutes 25 seconds.
 
-In practice, however, generic investigation isn't always enough. Teams have specific metrics to check first, and organizations have reporting format requirements. **Custom Skills**, added in the GA release, let you teach the agent your organization-specific investigation procedures.
+In practice, however, generic investigation isn't always enough. Teams have specific metrics to check first, and organizations have reporting format requirements. **Skills**, added in the GA release, let you teach the agent your organization-specific investigation procedures.
 
-Custom Skills are based on a subset of the [agentskills.io](https://agentskills.io/) open specification, with instructions written in Markdown in a SKILL.md file. Key features:
+Skills are based on a subset of the [agentskills.io](https://agentskills.io/) open specification, with instructions written in Markdown in a SKILL.md file. Key features:
 
 - **Agent Type targeting**: Choose from Generic (all types) / On-demand / Incident Triage / Incident RCA / Incident Mitigation / Evaluation to control where Skills apply
-- **Two creation methods**: UI creation in the Operator Web App, or zip upload with references/ and assets/ directories
+- **Two creation methods**: UI creation in the Operator Access, or zip upload with references/ and assets/ directories
 - **Active/Inactive toggle**: Temporarily disable without deleting
-- **No CLI support**: Skill management is only available through the Operator Web App (no skill-related APIs exist in CLI or SDK)
+- **No CLI support**: Skill management is only available through the Operator Access (no skill-related APIs exist in CLI or SDK)
 
-This article creates a Custom Skill for EC2 CPU spike incidents and compares investigation results with and without the Skill on the same stress-ng scenario, quantifying how Custom Skills affect the investigation process and output.
+This article creates a Skill for EC2 CPU spike incidents and compares investigation results with and without the Skill on the same stress-ng scenario, quantifying how Skills affect the investigation process and output.
 
 Prerequisites:
 
 - An active Agent Space from the [previous article](/en/blog/2026/04/01/aws-devops-agent-ga-verification)
-- Operator Web App access
+- Operator Access access
 - AWS CLI v2, EC2/CloudWatch permissions
 
 If you only want the results, skip to [Summary](#summary).
@@ -103,9 +103,9 @@ done
 
 </details>
 
-### Creating the Custom Skill
+### Creating the Skill
 
-From the Skills page in the Operator Web App, I created a Skill specialized for EC2 CPU spike incidents. To access the Operator Web App, go to the DevOps Agent page in the AWS Management Console, select your Agent Space, and click "Operator access." Then click "Skills" in the left menu.
+From the Skills page in Operator Access, I created a Skill specialized for EC2 CPU spike incidents. To open Operator Access, go to the DevOps Agent page in the AWS Management Console, select your Agent Space, and click "Operator access." Then click "Skills" in the left menu.
 
 The Skill contains three elements:
 
@@ -114,9 +114,9 @@ The Skill contains three elements:
 3. **Report format**: A 3-part structure — Impact Scope → Root Cause (including intentional/unintentional determination) → Actions (immediate/short-term/long-term)
 
 <details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
-<summary className="cursor-pointer font-medium">Full SKILL.md content (created in Operator Web App)</summary>
+<summary className="cursor-pointer font-medium">Full SKILL.md content (created in Operator Access)</summary>
 
-In the Operator Web App Skills page, select "Add skill" → "Create skill" and enter:
+In the Operator Access Skills page, select "Add skill" → "Create skill" and enter:
 
 - **Name**: `ec2-cpu-investigation`
 - **Description**: `Investigation procedures for EC2 CPU spike incidents. Use when CloudWatch CPU alarms fire. Covers T-series burstable instance CPU credit exhaustion, process-level root cause identification, and SSM command history analysis. Use when CPU utilization is high, CPUUtilization alarms fire, or burst performance issues are suspected.`
@@ -178,9 +178,9 @@ Report findings in this format:
 
 </details>
 
-## Verification: How Custom Skills Change Investigation Quality
+## Verification: How Skills Change Investigation Quality
 
-Using the same stress-ng scenario (EC2 t3.micro, CPU 100%, CloudWatch alarm in ALARM state), I ran investigations via Chat without and with the Skill, then compared results. Open Chat from the "Chat" option in the Operator Web App's left menu.
+Using the same stress-ng scenario (EC2 t3.micro, CPU 100%, CloudWatch alarm in ALARM state), I ran investigations via Chat without and with the Skill, then compared results. Open Chat from the "Chat" option in the Operator Access's left menu.
 
 Note: stress-ng auto-terminates after `--timeout 1800` (30 minutes). If Skill creation takes a while, re-run stress-ng before starting the investigation.
 
@@ -193,7 +193,7 @@ Chat prompt: "CloudWatch alarm devops-agent-skills-high-cpu is firing for instan
 Results:
 - **Investigation time**: 164 seconds (2m 44s)
 - **Tool calls**: 38
-- **skill_read**: 2 (built-in skills; Custom Skill had not been created yet)
+- **skill_read**: 2 (built-in skills; Skill had not been created yet)
 - **Root cause**: Correctly identified stress-ng
 - **Report format**: Free-form (conclusion → root cause → timeline → findings → recommendations)
 - **Action categories**: Short-term / medium-to-long-term (2 tiers)
@@ -236,7 +236,7 @@ With `ec2-cpu-investigation` Skill set to Active, I sent the same prompt from a 
 Results:
 - **Investigation time**: 64 seconds (1m 4s)
 - **Tool calls**: 11
-- **skill_read**: 1 (`ec2-cpu-investigation` — the Custom Skill)
+- **skill_read**: 1 (`ec2-cpu-investigation` — the Skill)
 - **Root cause**: Correctly identified stress-ng
 - **Report format**: Skill-guided structured format (Impact Scope → Root Cause → Determination → Actions)
 - **Action categories**: Immediate / short-term / long-term (3 tiers, as specified in Skill)
@@ -282,7 +282,7 @@ The Skill's "Impact Scope → Root Cause → Actions" structure was reflected, w
 | --- | --- | --- |
 | Investigation time | 164s | 64s |
 | Tool calls | 38 | 11 |
-| Skills loaded | 2 built-in | 1 Custom Skill |
+| Skills loaded | 2 built-in | 1 Skill |
 | Root cause identified | ✅ stress-ng | ✅ stress-ng |
 | CPUCreditBalance mentioned | Yes | Yes (with value: 0) |
 | CPUSurplusCreditBalance mentioned | Yes | Yes (with value: 26.5) |
@@ -299,10 +299,10 @@ Note that this comparison is based on a single execution of each scenario. The t
 
 ### Agent Type Targeting
 
-I changed the Skill's Agent Type to "Incident RCA" only and sent the same prompt from an On-demand Chat. To change it, open the Skill in the Operator Web App Skills page, click "Edit," change Agent Type from "Generic" to "Incident RCA," and click "Save."
+I changed the Skill's Agent Type to "Incident RCA" only and sent the same prompt from an On-demand Chat. To change it, open the Skill in the Operator Access Skills page, click "Edit," change Agent Type from "Generic" to "Incident RCA," and click "Save."
 
 Results:
-- **skill_read**: 0 (Custom Skill was not loaded)
+- **skill_read**: 0 (Skill was not loaded)
 - **Tool calls**: 2 only
 - **Response**: Did not perform a deep investigation; asked "Shall I start the investigation?"
 
@@ -310,12 +310,12 @@ After reverting Agent Type to "Generic," the Skill becomes available again. Agen
 
 ## Summary
 
-Adding a single Custom Skill produced clear changes in DevOps Agent's investigation process.
+Adding a single Skill produced clear changes in DevOps Agent's investigation process.
 
 - **Investigation efficiency** — With the Skill, tool calls dropped from 38 to 11 and investigation time from 164s to 64s. As noted in the comparison analysis, whether the Skill's priority specification or changes in the agent's internal state was the primary factor cannot be determined, but the elimination of broad region scanning was confirmed
 - **Report format control** — All elements specified in the Skill (impact scope, root cause, intentional/unintentional determination, immediate/short-term/long-term actions) were present in the output. However, the agent used a 4-part structure with "Determination" as a separate section rather than the Skill's 3-part structure
 - **Agent Type targeting** — Confirmed that targeting a Skill to "Incident RCA" only prevents it from loading in On-demand Chat. According to the documentation, Agent Types can be used to apply different Skills to different investigation phases, but this operational pattern was not tested in this verification
-- **No CLI support** — Skill management is Operator Web App only; no CLI/SDK APIs exist. IaC management and CI/CD pipeline integration are not possible at this time
+- **No CLI support** — Skill management is Operator Access only; no CLI/SDK APIs exist. IaC management and CI/CD pipeline integration are not possible at this time
 
 Observations on Skill design from this verification (based on a single Skill and scenario; additional testing is needed to generalize):
 
@@ -343,6 +343,6 @@ aws ec2 wait instance-terminated --instance-ids $INSTANCE_ID --region $REGION
 aws ec2 delete-security-group --group-id $SG_ID --region $REGION
 ```
 
-The Custom Skill created in the Operator Web App can be deleted or set to Inactive from the Skills page. The Agent Space and IAM roles are kept for future verification.
+The Skill created in the Operator Access can be deleted or set to Inactive from the Skills page. The Agent Space and IAM roles are kept for future verification.
 
 </details>

@@ -1,0 +1,359 @@
+---
+title: "Verifying AWS DevOps Agent — Auto-notifying Investigation Results via EventBridge"
+description: "Verified DevOps Agent's EventBridge integration. Captured Investigation lifecycle events and built a pipeline to auto-send investigation summaries via SNS. Documents implementation gotchas including IAM action prefix and Lambda boto3 bundling."
+date: 2026-04-01
+published: true
+categories:
+  - ai-agents
+tags:
+  - aws
+  - devops-agent
+  - eventbridge
+  - lambda
+  - sns
+series: "aws-devops-agent"
+seriesOrder: 4
+---
+
+## Introduction
+
+In [Part 1](/en/blog/2026/04/01/aws-devops-agent-ga-verification) we set up an Agent Space and ran incident investigations, in [Part 2](/en/blog/2026/04/01/aws-devops-agent-custom-skills) we tested Skills, and in [Part 3](/en/blog/2026/04/01/aws-devops-agent-proactive-prevention) we verified Prevention. In all previous articles, checking investigation results required the Operator Access or direct API calls.
+
+DevOps Agent automatically sends Investigation and Mitigation lifecycle events to the [Amazon EventBridge](https://docs.aws.amazon.com/devopsagent/latest/userguide/configuring-capabilities-for-aws-devops-agent-integrating-devops-agent-into-event-driven-applications-using-amazon-eventbridge-index.html) default event bus. This article builds an "Investigation Completed → summary retrieval → SNS notification" pipeline using these events and evaluates the practicality of the notification content.
+
+Prerequisites:
+
+- Agent Space from [Part 1](/en/blog/2026/04/01/aws-devops-agent-ga-verification) running
+- AWS CLI v2, permissions for EventBridge / Lambda / SNS / IAM
+- EC2 instance for investigation (this article reuses web-app-prod-01 from Part 3)
+
+Skip to [Summary](#summary) for results only.
+
+## Setup
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">Resource creation steps (EventBridge rules, SNS topic, Lambda function)</summary>
+
+### CloudWatch Logs Group + EventBridge Rule (all events)
+
+First, create a rule to log all DevOps Agent events to CloudWatch Logs.
+
+```bash title="Terminal"
+REGION=ap-northeast-1
+ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+
+# CloudWatch Logs group
+aws logs create-log-group --log-group-name /aws/events/devops-agent --region $REGION
+aws logs put-retention-policy --log-group-name /aws/events/devops-agent \
+  --retention-in-days 7 --region $REGION
+
+# EventBridge rule (all DevOps Agent events)
+aws events put-rule \
+  --name devops-agent-all-events \
+  --event-pattern '{"source":["aws.aidevops"]}' \
+  --state ENABLED --region $REGION
+
+# Resource-based policy for CloudWatch Logs
+aws logs put-resource-policy \
+  --policy-name EventBridgeToDevOpsAgentLogs \
+  --policy-document "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Principal\":{\"Service\":\"events.amazonaws.com\"},\"Action\":[\"logs:CreateLogStream\",\"logs:PutLogEvents\"],\"Resource\":\"arn:aws:logs:${REGION}:${ACCOUNT_ID}:log-group:/aws/events/devops-agent:*\"}]}" \
+  --region $REGION
+
+# Target
+aws events put-targets \
+  --rule devops-agent-all-events \
+  --targets "Id=cwlogs,Arn=arn:aws:logs:${REGION}:${ACCOUNT_ID}:log-group:/aws/events/devops-agent" \
+  --region $REGION
+```
+
+### SNS Topic
+
+```bash title="Terminal"
+aws sns create-topic --name devops-agent-notifications --region $REGION
+
+aws sns subscribe \
+  --topic-arn "arn:aws:sns:${REGION}:${ACCOUNT_ID}:devops-agent-notifications" \
+  --protocol email \
+  --notification-endpoint "your-email@example.com" \
+  --region $REGION
+```
+
+Click the "Confirm subscription" link in the confirmation email.
+
+### Lambda Execution Role
+
+```bash title="Terminal"
+aws iam create-role \
+  --role-name DevOpsAgentEventBridgeLambdaRole \
+  --assume-role-policy-document '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"lambda.amazonaws.com"},"Action":"sts:AssumeRole"}]}'
+
+aws iam attach-role-policy \
+  --role-name DevOpsAgentEventBridgeLambdaRole \
+  --policy-arn arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+```
+
+Add an inline policy for DevOps Agent API and SNS. **The IAM action service prefix is `aidevops`** (not `devops-agent`).
+
+```bash title="Terminal"
+aws iam put-role-policy \
+  --role-name DevOpsAgentEventBridgeLambdaRole \
+  --policy-name DevOpsAgentSNSAccess \
+  --policy-document "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Action\":[\"aidevops:ListJournalRecords\"],\"Resource\":\"*\"},{\"Effect\":\"Allow\",\"Action\":\"sns:Publish\",\"Resource\":\"arn:aws:sns:${REGION}:${ACCOUNT_ID}:devops-agent-notifications\"}]}"
+```
+
+### Lambda Function
+
+The Lambda managed runtime (Python 3.13) boto3 does not include the `devops-agent` service model (as of April 2026). You need to bundle the latest boto3/botocore in the deployment package.
+
+```python title="lambda_function.py"
+import json
+import os
+import boto3
+
+devops_agent = boto3.client("devops-agent")
+sns = boto3.client("sns")
+
+SNS_TOPIC_ARN = os.environ["SNS_TOPIC_ARN"]
+
+
+def lambda_handler(event, context):
+    print(json.dumps(event))
+
+    detail = event.get("detail", {})
+    metadata = detail.get("metadata", {})
+    data = detail.get("data", {})
+
+    agent_space_id = metadata.get("agent_space_id", "")
+    task_id = metadata.get("task_id", "")
+    execution_id = metadata.get("execution_id", "")
+    summary_record_id = data.get("summary_record_id")
+    detail_type = event.get("detail-type", "")
+    priority = data.get("priority", "")
+    status = data.get("status", "")
+
+    # Retrieve summary
+    summary_text = "(no summary available)"
+    if summary_record_id and execution_id:
+        try:
+            records = devops_agent.list_journal_records(
+                agentSpaceId=agent_space_id,
+                executionId=execution_id,
+            )
+            for r in records.get("records", []):
+                if r.get("recordId") == summary_record_id:
+                    summary_text = r.get("content", "(no content)")
+                    break
+        except Exception as e:
+            summary_text = f"(failed to retrieve summary: {e})"
+
+    # SNS notification
+    subject = f"[DevOps Agent] {detail_type} - {priority}"
+    message = (
+        f"Event: {detail_type}\n"
+        f"Status: {status}\n"
+        f"Priority: {priority}\n"
+        f"Task ID: {task_id}\n"
+        f"Agent Space: {agent_space_id}\n"
+        f"\n--- Investigation Summary ---\n\n"
+        f"{summary_text}"
+    )
+
+    # SNS subject limit: 100 chars
+    if len(subject) > 100:
+        subject = subject[:97] + "..."
+
+    # SNS message limit: 256KB
+    max_bytes = 256 * 1024
+    if len(message.encode("utf-8")) > max_bytes:
+        message = message[:max_bytes // 4] + "\n\n(truncated due to SNS size limit)"
+
+    sns.publish(TopicArn=SNS_TOPIC_ARN, Subject=subject, Message=message)
+
+    return {"statusCode": 200, "body": "Notification sent"}
+```
+
+```bash title="Terminal"
+# After creating lambda_function.py, bundle boto3 and deploy
+mkdir lambda-pkg && cd lambda-pkg
+pip install boto3 -t . --quiet
+cp ../lambda_function.py .
+zip -r lambda_function.zip .
+
+aws lambda create-function \
+  --function-name devops-agent-notification \
+  --runtime python3.13 \
+  --handler lambda_function.lambda_handler \
+  --role "arn:aws:iam::${ACCOUNT_ID}:role/DevOpsAgentEventBridgeLambdaRole" \
+  --zip-file fileb://lambda_function.zip \
+  --timeout 30 \
+  --environment "Variables={SNS_TOPIC_ARN=arn:aws:sns:${REGION}:${ACCOUNT_ID}:devops-agent-notifications,PYTHONPATH=/var/task}" \
+  --region $REGION
+```
+
+Setting `PYTHONPATH=/var/task` ensures the bundled boto3 takes priority over the managed runtime version.
+
+### EventBridge Rule (Investigation Completed → Lambda)
+
+```bash title="Terminal"
+aws events put-rule \
+  --name devops-agent-investigation-completed \
+  --event-pattern '{"source":["aws.aidevops"],"detail-type":["Investigation Completed"]}' \
+  --state ENABLED --region $REGION
+
+aws lambda add-permission \
+  --function-name devops-agent-notification \
+  --statement-id EventBridgeInvoke \
+  --action lambda:InvokeFunction \
+  --principal events.amazonaws.com \
+  --source-arn "arn:aws:events:${REGION}:${ACCOUNT_ID}:rule/devops-agent-investigation-completed" \
+  --region $REGION
+
+aws events put-targets \
+  --rule devops-agent-investigation-completed \
+  --targets "Id=lambda,Arn=arn:aws:lambda:${REGION}:${ACCOUNT_ID}:function:devops-agent-notification" \
+  --region $REGION
+```
+
+</details>
+
+## Verification: Auto-notification Pipeline for Investigation Completion
+
+### Investigation Lifecycle Events
+
+After triggering a CPU spike with stress-ng on the EC2 instance (web-app-prod-01) and creating an Investigation via backlog task, the following EventBridge events were recorded in CloudWatch Logs.
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">Investigation creation steps</summary>
+
+```bash title="Terminal"
+REGION=ap-northeast-1
+INSTANCE_ID=<your-instance-id>
+
+# Trigger CPU spike with stress-ng (2 minutes)
+aws ssm send-command \
+  --instance-ids $INSTANCE_ID \
+  --document-name "AWS-RunShellScript" \
+  --parameters '{"commands":["nohup stress-ng --cpu 2 --timeout 120 > /dev/null 2>&1 &"]}' \
+  --region $REGION
+```
+
+```python title="Python (boto3)"
+import boto3
+
+client = boto3.client("devops-agent", region_name="ap-northeast-1")
+
+response = client.create_backlog_task(
+    agentSpaceId="<your-agent-space-id>",
+    taskType="INVESTIGATION",
+    title="CPU spike on web-app-prod-01",
+    description="CPU utilization is high on the instance. Please investigate the cause.",
+    priority="HIGH"
+)
+print(response["task"]["taskId"])
+```
+
+The AWS CLI `devops-agent` subcommand is not available as of April 2026, so boto3 is used.
+
+</details>
+
+The following EventBridge events were recorded in CloudWatch Logs.
+
+| Time (UTC) | detail-type | status | summary_record_id |
+|---|---|---|---|
+| 09:05:30 | Investigation Created | PENDING_START | — |
+| 09:05:30 | AWS API Call via CloudTrail | — | — |
+| 09:05:35 | Investigation In Progress | IN_PROGRESS | — |
+| 09:10:12 | Investigation Completed | COMPLETED | Present |
+
+Events fired in order: Created → In Progress → Completed, matching the Investigation lifecycle. Created to In Progress took about 5 seconds, In Progress to Completed about 4 minutes 37 seconds (varies by investigation).
+
+The documentation defines 9 Investigation event types (Created / Priority Updated / In Progress / Completed / Failed / Timed Out / Cancelled / Pending Triage / Linked) and 5 Mitigation event types. This verification only confirmed the successful completion path.
+
+Two notable observations:
+
+1. **`summary_record_id` is only present in the Completed event** — To retrieve the investigation summary, the pipeline must trigger on the Completed event
+2. **CloudTrail API Call events also fire with `source: aws.aidevops`** — Filtering only by `{"source": ["aws.aidevops"]}` will include `CreateBacklogTask` and other API call events. The notification pipeline must explicitly specify `detail-type`
+
+### Pipeline Test and Notification Content
+
+Another Investigation was created to verify the full EventBridge → Lambda → SNS flow.
+
+From the Investigation Completed event (09:18:52Z) to Lambda execution start (09:18:53Z) was about 1 second. Lambda execution time was about 1.5 seconds on cold start (916ms init + 614ms execution) and tens of milliseconds on warm start.
+
+The Lambda function uses the `summary_record_id` from the Completed event to retrieve the investigation summary via the `list_journal_records` API. The summary is stored in Markdown format in the `content` field of a record with type `investigation_summary_md`.
+
+The email received via SNS (excerpt, PII masked):
+
+> **Subject:** [DevOps Agent] Investigation Completed - HIGH
+>
+> Event: Investigation Completed
+> Status: COMPLETED
+> Priority: HIGH
+> Task ID: c755d97b-...
+>
+> --- Investigation Summary ---
+>
+> **Symptoms:** CPU utilization spiked to ~100% on EC2 instance. CloudWatch alarm transitioned to ALARM state.
+>
+> **Findings:** Two CPU load generation processes were executed via SSM RunCommand, reaching 100% CPU on t3.micro. CPU credit exhaustion triggered surplus credit mode.
+>
+> **Root Cause:** Intentional load testing or experimentation.
+
+The summary was in Markdown format with a **Symptoms → Findings → Root Cause** hierarchy. This investigation summary was about 2,100 characters (~3.6KB in UTF-8), well within the SNS 256KB limit.
+
+The notification contained enough information to understand "what happened" (Symptoms) and "why" (Findings + Root Cause) without opening the Operator Access.
+
+## Summary
+
+We verified DevOps Agent's EventBridge integration and built a pipeline from investigation completion to summary notification.
+
+- **Event structure** — Events fire in Created → In Progress → Completed order following the Investigation lifecycle. `summary_record_id` is only present in the Completed event
+- **CloudTrail event contamination** — `source: aws.aidevops` includes CloudTrail API Call events. Notification pipelines must explicitly filter by `detail-type`
+- **Notification practicality** — Summaries follow a Symptoms → Findings → Root Cause hierarchy, providing enough context for situation assessment and next-action decisions. This summary was ~3.6KB, well within the SNS 256KB limit
+- **Implementation gotchas** — The IAM action service prefix is `aidevops` (not `devops-agent`). Lambda managed runtime boto3 lacks the devops-agent service model, requiring bundled boto3 with `PYTHONPATH=/var/task` to take priority
+
+This series has covered incident investigation ([Part 1](/en/blog/2026/04/01/aws-devops-agent-ga-verification)), Skills ([Part 2](/en/blog/2026/04/01/aws-devops-agent-custom-skills)), Prevention ([Part 3](/en/blog/2026/04/01/aws-devops-agent-proactive-prevention)), and EventBridge integration in this article. Together, they cover the workflow for incorporating DevOps Agent into operations: investigation → quality improvement → prevention → notification.
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">Cleanup</summary>
+
+```bash title="Terminal"
+REGION=ap-northeast-1
+ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+
+# Delete EventBridge rules
+aws events remove-targets --rule devops-agent-investigation-completed \
+  --ids lambda --region $REGION
+aws events delete-rule --name devops-agent-investigation-completed --region $REGION
+
+aws events remove-targets --rule devops-agent-all-events \
+  --ids cwlogs --region $REGION
+aws events delete-rule --name devops-agent-all-events --region $REGION
+
+# Delete Lambda function
+aws lambda delete-function --function-name devops-agent-notification --region $REGION
+
+# Delete IAM role
+aws iam delete-role-policy --role-name DevOpsAgentEventBridgeLambdaRole \
+  --policy-name DevOpsAgentSNSAccess
+aws iam detach-role-policy --role-name DevOpsAgentEventBridgeLambdaRole \
+  --policy-arn arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+aws iam delete-role --role-name DevOpsAgentEventBridgeLambdaRole
+
+# Delete SNS topic
+aws sns delete-topic \
+  --topic-arn "arn:aws:sns:${REGION}:${ACCOUNT_ID}:devops-agent-notifications" \
+  --region $REGION
+
+# Delete CloudWatch Logs
+aws logs delete-log-group --log-group-name /aws/events/devops-agent --region $REGION
+aws logs delete-resource-policy --policy-name EventBridgeToDevOpsAgentLogs --region $REGION
+
+# Delete Lambda logs
+aws logs delete-log-group \
+  --log-group-name /aws/lambda/devops-agent-notification --region $REGION
+```
+
+If all series verification is complete, also delete the Agent Space and IAM roles following the cleanup steps in [Part 1](/en/blog/2026/04/01/aws-devops-agent-ga-verification).
+
+</details>

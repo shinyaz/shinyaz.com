@@ -26,16 +26,16 @@ seriesOrder: 1
 
 結果だけ見たい場合は[まとめ](#まとめ--どのようなチームに向いているか)に進んでほしい。
 
-## 検証 1: Agent Space セットアップとトポロジー構築
+## 検証 1: エージェントスペース セットアップとトポロジー構築
 
-Agent Space は DevOps Agent の論理的なコンテナで、AWS アカウント・外部ツール連携・ユーザー権限を定義する。DevOps Agent はデュアルコンソール構成を採用しており、管理者は AWS マネジメントコンソールで Agent Space の作成や連携設定を行い、オペレーターは専用の Web App（Operator App）で日常のインシデント調査や Chat を利用する。CLI オンボーディングガイドに従い、IAM ロール作成から Web App 有効化までを実行した。
+エージェントスペース は DevOps Agent の論理的なコンテナで、AWS アカウント・外部ツール連携・ユーザー権限を定義する。DevOps Agent はデュアルコンソール構成を採用しており、管理者は AWS マネジメントコンソールで エージェントスペース の作成や連携設定を行い、オペレーターはオペレーターアクセスで日常のインシデント調査や Chat を利用する。CLI オンボーディングガイドに従い、IAM ロール作成から オペレーターアクセス有効化までを実行した。
 
 <details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
-<summary className="cursor-pointer font-medium">IAM ロール・Agent Space 作成手順</summary>
+<summary className="cursor-pointer font-medium">IAM ロール・エージェントスペース 作成手順</summary>
 
-2つの IAM ロールが必要である。Agent Space 用ロール（リソース検出・調査用）と Operator App 用ロール（Web App アクセス用）だ。
+2つの IAM ロールが必要である。エージェントスペース 用ロール（リソース検出・調査用）と オペレーターアクセス用ロールだ。
 
-```bash title="Terminal (Agent Space ロール作成)"
+```bash title="Terminal (エージェントスペース ロール作成)"
 ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
 REGION=ap-northeast-1
 
@@ -84,7 +84,7 @@ aws iam put-role-policy \
   --policy-document file://devops-agentspace-additional-policy.json
 ```
 
-```bash title="Terminal (Operator App ロール作成)"
+```bash title="Terminal (オペレーターアクセス ロール作成)"
 cat > devops-operator-trust-policy.json << EOF
 {
   "Version": "2012-10-17",
@@ -109,7 +109,7 @@ aws iam attach-role-policy \
   --policy-arn arn:aws:iam::aws:policy/AIDevOpsOperatorAppAccessPolicy
 ```
 
-```bash title="Terminal (Agent Space 作成・アカウント関連付け・Operator App 有効化)"
+```bash title="Terminal (エージェントスペース 作成・アカウント関連付け・オペレーターアクセス有効化)"
 AGENT_SPACE_ID=$(aws devops-agent create-agent-space \
   --name "verification-space" \
   --description "Agent Space for verification" \
@@ -143,14 +143,14 @@ aws devops-agent enable-operator-app \
 | ステップ | 所要時間 |
 | --- | --- |
 | IAM ロール 2つ作成 + ポリシーアタッチ | 約26秒 |
-| Agent Space 作成 | 約8秒 |
+| エージェントスペース 作成 | 約8秒 |
 | AWS アカウント関連付け | 約10秒 |
-| Operator App 有効化 | 約6秒 |
+| オペレーターアクセス有効化 | 約6秒 |
 | **合計** | **約50秒** |
 
 `aws sts get-caller-identity` によるアカウント ID 取得を含めると約66秒で全工程が完了した。
 
-Agent Space 作成直後に `SYSTEM_LEARNING` タスクが自動起動し、アカウント内のリソースを学習し始めた。トポロジー構築は約20分で完了した。コンソール操作なしで CLI のみで完結する点は、IaC との親和性が高い。
+エージェントスペース 作成直後に `SYSTEM_LEARNING` タスクが自動起動し、アカウント内のリソースを学習し始めた。トポロジー構築は約20分で完了した。コンソール操作なしで CLI のみで完結する点は、IaC との親和性が高い。
 
 注目すべきは `--locale "ja-JP"` オプションである。これを指定すると、エージェントの応答がすべて日本語になる。調査レポートやチャット応答が日本語で返ってくるのは、日本のチームにとって大きなメリットだ。
 
@@ -230,9 +230,9 @@ done
 
 ### 調査の依頼
 
-アラームが ALARM 状態になったら、AWS マネジメントコンソールの DevOps Agent ページから Agent Space を選択し、「Operator access」ボタンで Web App を開く。Chat 画面で自然言語で質問を入力すればよい。
+アラームが ALARM 状態になったら、AWS マネジメントコンソールの DevOps Agent ページから エージェントスペース を選択し、「オペレーターアクセス」ボタンで Web App を開く。Chat 画面で自然言語で質問を入力すればよい。
 
-「高 CPU 使用率アラームについて、原因を調査して根本原因を特定してください」と依頼すると、DevOps Agent は即座に INVESTIGATION タスクを作成し、以下の4つのサブタスクを並列実行した。
+「高 CPU 使用率アラームについて、原因を調査して根本原因を特定してください」と依頼すると、DevOps Agent は即座に 調査タスクを作成し、以下の4つのサブタスクを並列実行した。
 
 | サブタスク | 内容 |
 | --- | --- |
@@ -288,7 +288,7 @@ CloudTrail から SSM SendCommand イベントを検出し、コマンド ID ま
 
 | 観点 | 計測結果 | 評価 |
 | --- | --- | --- |
-| セットアップ（CLI） | 66秒（IAM ロール〜Operator App 有効化） | ◎ |
+| セットアップ（CLI） | 66秒（IAM ロール〜オペレーターアクセス有効化） | ◎ |
 | トポロジー構築 | 約20分（自動・バックグラウンド） | ○ |
 | インシデント調査 | 4分25秒で根本原因を正確に特定 | ◎ |
 | Chat（事実確認） | 正確、19〜36秒 | ◎ |
@@ -296,13 +296,13 @@ CloudTrail から SSM SendCommand イベントを検出し、コマンド ID ま
 | 日本語対応 | locale 設定で全応答が日本語 | ◎ |
 
 - **最小構成でも実用的** — 単一アカウント + CloudWatch のみの構成でも、インシデント調査は根本原因まで正確に特定できた。外部監視ツールを追加した場合の精度向上は今回未検証だが、まずは CloudWatch だけで始められる
-- **CLI 完結のセットアップが強み** — 66秒で Agent Space が稼働する。IaC（CDK / CloudFormation / Terraform）テンプレートも公式提供されており、組織展開のハードルは低い
+- **CLI 完結のセットアップが強み** — 66秒で エージェントスペース が稼働する。IaC（CDK / CloudFormation / Terraform）テンプレートも公式提供されており、組織展開のハードルは低い
 - **Chat の調査能力は「経験豊富な SRE の初動対応」レベル** — CloudTrail・CloudWatch メトリクス・SSM コマンド履歴を横断的に分析し、タイムラインを構築する能力は高い。アプリケーションレベルのログ分析は今回の検証範囲外だが、ドキュメントによると Datadog / Splunk 等との連携でカバーできる
 - **セキュリティ分析は副次的だが有用** — Security Hub の代替ではないが、「今すぐ対応すべき項目」の優先度付けは実用的だった
 
 ## クリーンアップ
 
-検証用の EC2 インスタンスとアラームを削除する。Agent Space と IAM ロールは続きの検証記事で再利用するため残しておく。
+検証用の EC2 インスタンスとアラームを削除する。エージェントスペース と IAM ロールは続きの検証記事で再利用するため残しておく。
 
 <details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
 <summary className="cursor-pointer font-medium">リソース削除手順</summary>
@@ -318,10 +318,10 @@ aws cloudwatch delete-alarms \
   --alarm-names "devops-agent-verification-high-cpu" --region $REGION
 ```
 
-シリーズの検証がすべて完了した後に Agent Space と IAM ロールを削除する場合:
+シリーズの検証がすべて完了した後に エージェントスペース と IAM ロールを削除する場合:
 
 ```bash title="Terminal"
-# Agent Space 削除
+# エージェントスペース 削除
 ASSOCIATION_ID=$(aws devops-agent list-associations \
   --agent-space-id $AGENT_SPACE_ID \
   --region $REGION \
