@@ -1,0 +1,21 @@
+---
+title: "Security Agent の VPC Config 利用時、CLI のドメイン検証が UNREACHABLE でもペンテストは実行可能"
+description: "verify-target-domain CLI コマンドはパブリック経由で検証するためプライベート DNS は UNREACHABLE になるが、VPC Config 経由のペンテストでは PREFLIGHT 中に別途 VPC 内部検証が行われる。"
+date: "2026-04-02"
+published: true
+tags: ["aws", "security-agent", "vpc"]
+---
+
+Security Agent で VPC 内のプライベートエンドポイント（`*.compute.internal`）をテストしようとして、`verify-target-domain` を実行したら `UNREACHABLE` が返ってきた。HTTP_ROUTE 検証は AWS のパブリックサービスから行われるため、プライベート DNS には到達できない。
+
+テスト不可能かと思ったが、`create-pentest` に `--vpc-config` を指定して `start-pentest-job` を実行したら、PREFLIGHT が正常に通過した。CloudWatch Logs を確認すると:
+
+```text title="Output (CloudWatch Logs)"
+Setting up pentest infrastructure
+Setting up pentest networking infrastructure
+Connecting to pentest test environment container
+Verifying ownership of private network domains
+Completed pentest test environment setup
+```
+
+CLI の `verify-target-domain`（パブリック経由）と、PREFLIGHT 中の VPC 内部検証は**別のメカニズム**だった。VPC Config を使う場合、CLI のドメイン検証ステータスが UNREACHABLE でも Target Domain の登録さえしておけばテストは実行できる。

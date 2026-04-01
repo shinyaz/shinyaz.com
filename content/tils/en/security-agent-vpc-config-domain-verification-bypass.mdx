@@ -1,0 +1,21 @@
+---
+title: "Security Agent pentest works via VPC Config even when CLI domain verification returns UNREACHABLE"
+description: "verify-target-domain uses public access so private DNS returns UNREACHABLE, but VPC Config pentests perform separate internal verification during PREFLIGHT that succeeds."
+date: "2026-04-02"
+published: true
+tags: ["aws", "security-agent", "vpc"]
+---
+
+Tried to pentest a private endpoint (`*.compute.internal`) with Security Agent. Running `verify-target-domain` returned `UNREACHABLE` — HTTP_ROUTE verification is performed from AWS public infrastructure, so it can't reach private DNS.
+
+Thought the test was blocked, but running `start-pentest-job` with `--vpc-config` passed PREFLIGHT successfully. CloudWatch Logs showed:
+
+```text title="Output (CloudWatch Logs)"
+Setting up pentest infrastructure
+Setting up pentest networking infrastructure
+Connecting to pentest test environment container
+Verifying ownership of private network domains
+Completed pentest test environment setup
+```
+
+The CLI's `verify-target-domain` (public access) and PREFLIGHT's VPC-internal verification are **separate mechanisms**. When using VPC Config, the CLI domain verification status being UNREACHABLE doesn't block test execution — as long as the Target Domain is registered.

@@ -1,0 +1,34 @@
+---
+title: "AWS Security Agent service role requires CloudWatch Logs permission (undocumented)"
+description: "Security Agent pentest fails at PREFLIGHT with AccessDeniedException if the service role lacks logs:CreateLogGroup. Not mentioned in official docs."
+date: "2026-04-02"
+published: true
+tags: ["aws", "security-agent", "iam"]
+---
+
+Ran `start-pentest-job` for Security Agent and the PREFLIGHT step immediately failed. Checking `batch-get-pentest-jobs` revealed:
+
+```json title="Output"
+{
+  "code": "CLIENT_ERROR",
+  "message": "Log group creation failed: An error occurred (AccessDeniedException) when calling the CreateLogGroup operation: User: arn:aws:sts::123456789012:assumed-role/SecurityAgentPentestRole/securityagent is not authorized to perform: logs:CreateLogGroup on resource: arn:aws:logs:ap-northeast-1:123456789012:log-group:/aws/securityagent/... because no identity-based policy allows the logs:CreateLogGroup action"
+}
+```
+
+The service role needs CloudWatch Logs permissions. The [official documentation](https://docs.aws.amazon.com/securityagent/latest/userguide/what-is.html) doesn't mention this requirement (as of April 2026).
+
+```bash title="Terminal"
+aws iam put-role-policy \
+  --role-name SecurityAgentPentestRole \
+  --policy-name SecurityAgentLogsAccess \
+  --policy-document '{
+    "Version": "2012-10-17",
+    "Statement": [{
+      "Effect": "Allow",
+      "Action": ["logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents"],
+      "Resource": "arn:aws:logs:ap-northeast-1:123456789012:log-group:/aws/securityagent/*"
+    }]
+  }'
+```
+
+After adding the permission, re-running the pentest passed PREFLIGHT successfully. Easy to remember VPC access policies (for ENI creation) but easy to forget log permissions.
