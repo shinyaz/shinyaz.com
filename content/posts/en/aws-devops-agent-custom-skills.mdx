@@ -188,7 +188,7 @@ Note: stress-ng auto-terminates after `--timeout 1800` (30 minutes). If Skill cr
 
 Before creating the Skill, I ran the investigation without it.
 
-Chat prompt: "CloudWatch alarm devops-agent-skills-high-cpu is firing for instance i-0047085f8f68e7513 in ap-northeast-1. CPU utilization remains high. Investigate and identify the root cause."
+Chat prompt: "CloudWatch alarm devops-agent-skills-high-cpu is firing for instance i-0123456789abcdef0 in ap-northeast-1. CPU utilization remains high. Investigate and identify the root cause."
 
 Results:
 - **Investigation time**: 164 seconds (2m 44s)
@@ -205,10 +205,10 @@ The investigation was accurate, but the report format was determined by the agen
 <details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
 <summary className="cursor-pointer font-medium">Baseline investigation response (excerpt)</summary>
 
-> **Investigation Report: High CPU Utilization on EC2 Instance i-0047085f8f68e7513**
+> **Investigation Report: High CPU Utilization on EC2 Instance i-0123456789abcdef0**
 >
 > **Conclusion**
-> This high CPU utilization is caused by an **intentional stress test**, not a production incident. User "tahshiny" is running the `stress-ng` utility for CPU stress testing.
+> This high CPU utilization is caused by an **intentional stress test**, not a production incident. User "(user-name)" is running the `stress-ng` utility for CPU stress testing.
 >
 > **Root Cause: CPU Stress Test Running**
 > Currently, `stress-ng --cpu 2 --timeout 1800` executed via AWS Systems Manager (SSM) is active.
@@ -247,7 +247,7 @@ Results:
 > **🔍 Investigation Report**
 >
 > **1. Impact Scope**
-> - **Affected Resource**: EC2 instance `i-0047085f8f68e7513` (devops-agent-skills-test)
+> - **Affected Resource**: EC2 instance `i-0123456789abcdef0` (devops-agent-skills-test)
 > - **Instance Type**: t3.micro (vCPU: 2, baseline: 10%)
 > - **Impact Start**: 2026-04-01 03:05:00 UTC approx.
 >

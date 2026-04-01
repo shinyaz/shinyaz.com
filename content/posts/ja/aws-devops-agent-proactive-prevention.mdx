@@ -1,0 +1,351 @@
+---
+title: "AWS DevOps Agent 検証 — Proactive Prevention で予防提案の実態を確認する"
+description: "DevOps Agent の Proactive Prevention に複数パターンのインシデント調査履歴を与え、手動評価を実行した。生成された Recommendation の内容・カテゴリ・Agent-ready Specification の有無を確認し、予防提案の実態を明らかにする。"
+date: "2026-04-01"
+published: true
+featured: false
+categories: [infrastructure]
+tags: ["aws", "devops-agent", "proactive-prevention", "incident-response", "sre"]
+series: "aws-devops-agent"
+seriesOrder: 3
+---
+
+## はじめに
+
+[第1回](/ja/blog/2026/04/01/aws-devops-agent-ga-verification)では DevOps Agent の最小構成セットアップとインシデント調査を、[第2回](/ja/blog/2026/04/01/aws-devops-agent-custom-skills)では Custom Skills による調査品質の向上を検証した。ここまでは「インシデントが起きた後の対応」に焦点を当てていた。
+
+DevOps Agent にはもう一つの柱がある。**Proactive Prevention**（予防的改善提案）は、過去のインシデント調査を分析して改善提案を生成する機能である。デフォルトでは週次で自動評価が実行されるが、手動で即時実行することもできる。Operator Web App の「予防」ページからアクセスできる。
+
+本記事では、複数パターンのインシデント調査履歴を作成した上で手動評価を実行し、生成された Recommendation の内容を確認する。
+
+前提条件:
+
+- [第1回](/ja/blog/2026/04/01/aws-devops-agent-ga-verification)で作成した Agent Space が稼働中であること
+- Operator Web App へのアクセス権限
+- AWS CLI v2、EC2 / CloudWatch の操作権限
+
+結果だけ見たい場合は[まとめ](#まとめ)に進んでほしい。
+
+## 準備: インシデント調査履歴の作成
+
+Proactive Prevention の評価には、分析対象となるインシデント調査履歴が必要である。第1回・第2回の検証で CPU 高負荷（stress-ng）の調査履歴が2件あるが、すべて同一パターンのため多様な Recommendation が出にくい。
+
+そこで、本番環境に近い構成で **CPU 高負荷**と**ディスク容量枯渇**の2パターンを追加で発生させ、調査履歴を多様化する。
+
+なお、本記事の検証ではメモリ枯渇のインシデント（stress-ng --vm）も別インスタンスで発生させて調査した。手順は第1回・第2回と同様（stress-ng のオプションを `--vm 2 --vm-bytes 400M --vm-keep` に変更）のため省略する。
+
+### EC2 環境の構築
+
+本番環境を模擬するため、タグに `Environment=production`、`Service=web-api` を設定したインスタンスを作成した。
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">EC2 + CloudWatch アラームの構築手順</summary>
+
+```bash title="Terminal"
+REGION=ap-northeast-1
+
+AMI_ID=$(aws ssm get-parameters \
+  --names /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64 \
+  --query "Parameters[0].Value" --output text --region $REGION)
+
+SG_ID=$(aws ec2 create-security-group \
+  --group-name prod-web-sg \
+  --description "Security group for production web application" \
+  --region $REGION --query "GroupId" --output text)
+
+INSTANCE_ID=$(aws ec2 run-instances \
+  --image-id $AMI_ID --instance-type t3.micro \
+  --security-group-ids $SG_ID \
+  --tag-specifications 'ResourceType=instance,Tags=[{Key=Name,Value=web-app-prod-01},{Key=Environment,Value=production},{Key=Service,Value=web-api},{Key=Team,Value=platform}]' \
+  --region $REGION --query "Instances[0].InstanceId" --output text)
+
+aws ec2 wait instance-running --instance-ids $INSTANCE_ID --region $REGION
+
+# SSM Agent 起動待ち
+while true; do
+  STATUS=$(aws ssm describe-instance-information \
+    --filters "Key=InstanceIds,Values=${INSTANCE_ID}" \
+    --query "InstanceInformationList[0].PingStatus" \
+    --output text --region $REGION 2>/dev/null)
+  [ "$STATUS" = "Online" ] && break
+  echo "Waiting for SSM Agent..." && sleep 10
+done
+
+# CloudWatch アラーム（CPU 高負荷）
+aws cloudwatch put-metric-alarm \
+  --alarm-name "prod-web-high-cpu" \
+  --metric-name CPUUtilization --namespace AWS/EC2 \
+  --statistic Average --period 60 --threshold 80 \
+  --comparison-operator GreaterThanThreshold --evaluation-periods 2 \
+  --dimensions "Name=InstanceId,Value=${INSTANCE_ID}" \
+  --region $REGION
+```
+
+</details>
+
+### パターン1: CPU 高負荷（Web アプリケーションワーカー）
+
+stress-ng ではなく、Python の Web API ワーカーを模擬したスクリプトで CPU 負荷を発生させた。
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">ワーカーのデプロイと起動手順</summary>
+
+SSM 経由でスクリプトを作成し、2プロセス起動する。
+
+```bash title="Terminal"
+# ワーカースクリプトを作成
+aws ssm send-command \
+  --instance-ids $INSTANCE_ID \
+  --document-name "AWS-RunShellScript" \
+  --parameters '{"commands":["cat > /opt/web-api-worker.py << '\''PYEOF'\''\nimport hashlib, os\n\ndef handle_request():\n    data = os.urandom(4096)\n    for _ in range(500):\n        data = hashlib.sha256(data).digest()\n    return data\n\nif __name__ == \"__main__\":\n    while True:\n        handle_request()\nPYEOF\necho \"File created\""]}' \
+  --region $REGION
+
+# 2プロセス起動
+aws ssm send-command \
+  --instance-ids $INSTANCE_ID \
+  --document-name "AWS-RunShellScript" \
+  --parameters '{"commands":["nohup python3 /opt/web-api-worker.py > /var/log/web-api-worker-1.log 2>&1 &\nnohup python3 /opt/web-api-worker.py > /var/log/web-api-worker-2.log 2>&1 &\necho done"]}' \
+  --region $REGION
+```
+
+t3.micro で2プロセス起動すると CPU 使用率が 99% に達する。アラーム（`evaluation-periods: 2`）が発火するまで約3分待つ。
+
+</details>
+
+スクリプトの内容:
+
+```python title="/opt/web-api-worker.py"
+import hashlib, os
+
+def handle_request():
+    data = os.urandom(4096)
+    for _ in range(500):
+        data = hashlib.sha256(data).digest()
+    return data
+
+if __name__ == "__main__":
+    while True:
+        handle_request()
+```
+
+アラーム発火後、Chat から調査を依頼した。
+
+```text title="Chat への質問"
+ap-northeast-1 リージョンの本番 Web サーバー web-app-prod-01 (i-0123456789abcdef0) で
+CloudWatch アラーム prod-web-high-cpu が発火しました。CPU 使用率が 99% を超えています。
+ユーザーからレスポンス遅延の報告が来ています。原因を調査して根本原因を特定してください。
+```
+
+エージェントは Investigation タスクを作成し、約5分で調査を完了した。
+
+### パターン2: ディスク容量枯渇（ログ肥大化）
+
+ワーカーを停止した後、`/var/log/web-api/` 配下にログファイルを模擬した大容量ファイルを作成し、ディスク使用率を 90% まで上昇させた。
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">ワーカー停止とディスク容量枯渇の手順</summary>
+
+```bash title="Terminal"
+# ワーカーを停止
+aws ssm send-command \
+  --instance-ids $INSTANCE_ID \
+  --document-name "AWS-RunShellScript" \
+  --parameters '{"commands":["killall python3 2>/dev/null; echo done"]}' \
+  --region $REGION
+
+# ログファイル風のデータを作成（/var に書き込む）
+# 注意: AL2023 では /tmp が tmpfs（RAM ベース）のため、
+# ディスクを埋めるには /var や /home に書き込む必要がある
+aws ssm send-command \
+  --instance-ids $INSTANCE_ID \
+  --document-name "AWS-RunShellScript" \
+  --parameters '{"commands":["mkdir -p /var/log/web-api && dd if=/dev/urandom of=/var/log/web-api/access.log bs=1M count=3000 && dd if=/dev/urandom of=/var/log/web-api/error.log bs=1M count=2500 && df -h /"]}' \
+  --timeout-seconds 600 \
+  --region $REGION
+```
+
+8GB ボリュームで約5.5GB を書き込むと、使用率が 90% に達する。書き込みに数分かかる。
+
+</details>
+
+Chat から調査を依頼した。
+
+```text title="Chat への質問"
+ap-northeast-1 の本番 Web サーバー web-app-prod-01 (i-0123456789abcdef0) で
+ディスク容量が 90% に達しています。/var/log 配下のログファイルが肥大化している
+可能性があります。根本原因を調査してください。
+```
+
+エージェントは Investigation タスクを作成して調査を完了した。
+
+### 調査履歴の全体像
+
+この時点で、Agent Space には以下の調査履歴が蓄積されている。
+
+| # | インシデント | インスタンス | 原因 |
+|---|---|---|---|
+| 1-2 | CPU 高負荷 × 2件 | devops-agent-stress-test / devops-agent-skills-test | stress-ng（第1回・第2回の検証） |
+| 3-5 | メモリ枯渇 × 3件 | devops-agent-proactive-test | stress-ng --vm |
+| 6 | CPU 高負荷 | web-app-prod-01 | web-api-worker.py |
+| 7 | ディスク容量枯渇 | web-app-prod-01 | ログファイル肥大化 |
+
+Investigation タスクとして登録されたのは計8件である（上記7件に加え、メモリ枯渇の調査中に重複作成された1件を含む）。第2回の Skill あり調査と Agent Type テストは Chat 内で完結し、Investigation タスクとしては登録されなかった。
+
+## 検証: 評価の実行と Agent Summary
+
+### 手動評価の実行
+
+Operator Web App の「予防」ページで「今すぐ実行」をクリックして手動評価を開始した。
+
+評価は計3回実行した。
+
+| 回 | タイミング | 評価所要時間 | グループ数 | Recommendation |
+|---|---|---|---|---|
+| 1回目 | CPU 高負荷 + メモリ枯渇の調査後 | 約4分 | 4 | 0件 |
+| 2回目 | 前回のインスタンスでのディスク容量枯渇調査後 | 約3分 | 4 | 0件 |
+| 3回目 | 本番風インスタンス（#6, #7）の調査後 | 約8分 | 4 | 1件 |
+
+1回目・2回目は Recommendation が0件だった。すべて stress-ng や dd による意図的な負荷であり、エージェントが予防すべき問題がないと判断したと考えられる。
+
+本番風のインスタンス（web-app-prod-01、`Environment=production` タグ付き）で web-api-worker.py による CPU 高負荷とログ肥大化によるディスク容量枯渇を調査させた3回目の評価で、初めて Recommendation が生成された。3回目で生成された要因として、以下が考えられる:
+
+- **本番タグの存在** — `Environment=production` タグが付与されたインスタンスへの操作であったため、「本番環境のガバナンス不備」として検出された可能性がある
+- **stress-ng ではないプロセス** — stress-ng は既知のストレステストツールだが、web-api-worker.py はカスタムスクリプトであり、「不適切なスクリプト配備」として認識された可能性がある
+
+ただし、これらはエージェントの内部判断ロジックに関する推測であり、確認はできていない。
+
+なお、3回の評価すべてで調査は「4グループ」に分類されている。これはエージェントが類似のインシデントをグルーピングした結果であり、おそらく CPU 高負荷・メモリ枯渇・ディスク容量枯渇・その他のような分類と推測されるが、グループの内訳は API レスポンスに含まれていないため詳細は不明である。
+
+### Agent Summary
+
+3回目の評価後、「予防」ページに表示された Agent Summary:
+
+> AWS DevOps Agent は過去のインシデントを調査し、先週分として1件の新しい推奨事項を提供しました。注目すべき推奨事項として、本番環境への SSM RunCommand アクセスに対してタグベースのアクセス制御と MFA 要件を実装することで、不適切なスクリプト配備を防止する対策が含まれています。
+
+8件の調査を4グループに分類した上で、本番環境（web-app-prod-01）の CPU 高負荷インシデントに対する Recommendation を1件生成した。stress-ng によるテストインシデントからは Recommendation が生成されなかった。ディスク容量枯渇のインシデント（#7）も紐付けインシデントには含まれておらず、Recommendation は CPU 高負荷（#6）のみに基づいていた。
+
+## 検証: Recommendation の内容
+
+### 生成された Recommendation
+
+| 項目 | 内容 |
+|---|---|
+| タイトル | 本番環境への SSM RunCommand アクセスにタグベースのアクセス制御と MFA 要件を実装して不適切なスクリプト配備を防止 |
+| カテゴリ | ガバナンス（PROCESS_AND_GOVERNANCE） |
+| 優先度 | MEDIUM |
+| ステータス | レビューが必要（PROPOSED） |
+| 紐付けインシデント | web-app-prod-01 の CPU 高負荷（#6） |
+
+Recommendation の詳細ページには「推奨事項」と「エージェント対応スペック」の2つのタブがある。
+
+### 推奨事項の内容
+
+Recommendation は以下の構造で記述されていた（インスタンス ID・ユーザー名はマスク済み）。
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">Recommendation の全文</summary>
+
+> **概要**
+>
+> 本番 Web サーバー i-0123456789abcdef0 (ap-northeast-1) に対して、管理者権限を持つ IAM ロール経由で CPU 負荷生成スクリプトが無制限に配備され、CPU 使用率 99.64% に到達してサービス影響が発生。SSM RunCommand に対する IAM 条件キー (ssm:resourceTag/Environment) と MFA 必須化 (aws:MultiFactorAuthPresent) を組み合わせたアクセス制御を実装。本番環境リソースへの不適切なスクリプト配備を完全に防止し、同様のインシデント再発を阻止。
+>
+> **背景**
+>
+> 2026-04-01T06:08:44Z から 06:09:07Z にかけて、(user-name) ユーザーが AWS SSO 経由で IAM ロールを使用し、SSM RunCommand で5つのコマンドを実行。CPU 負荷生成スクリプト `/opt/web-api-worker.py` を配備し2つのプロセスとして起動した結果、06:10:00Z に CPU 使用率が 99.64% に急騰。ユーザーからレスポンス遅延報告が発生し、サービス影響が確認された。
+>
+> EC2 インスタンスには Environment=production タグが付与されているものの、SSM RunCommand に対するタグベースのアクセス制御 (TBAC)、MFA 要件、SSM Change Manager 承認フロー、EventBridge 通知、AWS Config Rules、IAM Permission Boundaries が未実装。AdministratorAccess の完全な管理者権限により、本番環境への任意のスクリプト配備が無制限に実行可能な状態だった。
+>
+> **次のステップ**
+>
+> IAM ポリシーで SSM SendCommand アクションに条件キー `ssm:resourceTag/Environment` を追加し、production 値を持つリソースへのアクセスを制限する。同時に `aws:MultiFactorAuthPresent` 条件キーを true に設定して MFA 認証を必須化する。
+>
+> SSM Change Manager で本番環境向けの変更テンプレートを作成し、SSM RunCommand 実行前にワークフロー承認を義務付ける。EventBridge ルールで SSM RunCommand 実行イベントを検知して SNS 通知を送信する設定を追加する。
+>
+> AWS Config Rules で `required-tags` ルールと `approved-ssm-documents` ルールを有効化し、承認済み SSM ドキュメントのみ実行可能にする。IAM Permission Boundaries を AWS SSO の Permission Set に適用し、本番環境タグを持つリソースへの SSM SendCommand は条件付きでのみ許可するよう制限する。
+>
+> **考慮事項**
+>
+> SSM Change Manager 承認フローの導入により、緊急時の対応速度が5〜10分程度遅延する可能性がある。MFA 要件の追加により、CLI ベースの自動化スクリプトは MFA トークン取得プロセスの実装が必要になる。タグベースアクセス制御は既存のタグ付け規則を前提としており、タグが欠落しているリソースへのアクセスはデフォルトで拒否されるため、段階的な展開と既存リソースのタグ監査が推奨される。
+
+</details>
+
+注目すべき点:
+
+- **背景の具体性** — CloudTrail のイベントから、誰が（(user-name)）、いつ（06:08:44Z〜06:09:07Z）、何を（SSM RunCommand で5つのコマンド）実行したかを正確に記述している
+- **提案の多層性** — IAM 条件キー（即時対応）→ SSM Change Manager（承認フロー）→ Config Rules + Permission Boundaries（長期的なガバナンス）と、段階的な対策を提案している
+- **考慮事項の実用性** — 承認フローによる緊急対応の遅延、MFA による自動化への影響など、導入時のトレードオフを具体的に指摘している
+
+### Recommendation の管理
+
+Recommendation には以下の操作が可能である。
+
+- **維持（Keep）** — バックログに残して追跡する
+- **破棄（Discard）** — 不要な場合に削除する。理由を自然言語で入力でき、エージェントが今後の提案に反映する
+- **実装済み（Implemented）** — 対策を実施した場合にマークする
+
+Keep または Implemented にマークされていない Recommendation は、約6週間後に自動的に削除される場合がある（ドキュメントによる）。
+
+### エージェント対応スペック（Agent-ready Specification）
+
+Recommendation の詳細ページには「エージェント対応スペック」タブがある。これは、コード変更を伴う Recommendation に対して、コーディングエージェントに直接渡せる構造化されたドキュメントを生成する機能である。
+
+ドキュメントによると、Specification には以下が含まれる:
+
+- **問題の説明** — 問題とその根本原因の要約
+- **解決策の概要** — 推奨アプローチの概要
+- **対象リポジトリ** — 変更が必要なリポジトリ
+- **コード変更** — 変更内容の詳細（ファイルパス、実装上の考慮事項）
+- **テスト要件** — テストすべきシナリオ
+- **実装計画** — 段階的な実装アプローチ
+
+今回の Recommendation はガバナンス系（IAM ポリシー変更、SSM Change Manager 設定）であり、コードリポジトリへの変更を伴わないため、「この推奨事項にはエージェント対応スペックがありません」と表示された。ドキュメントによると、Agent-ready Specification は「コードまたは設定の変更を伴う Recommendation」に対して生成される。
+
+## まとめ
+
+Proactive Prevention に8件のインシデント調査履歴（CPU 高負荷・メモリ枯渇・ディスク容量枯渇の3パターン）を与え、手動評価を3回実行した。
+
+**検証で確認できたこと:**
+
+- **評価の選択性** — 8件の調査を4グループに分類した上で、本番環境のインシデント（web-app-prod-01）に対してのみ Recommendation を生成した。stress-ng によるテストインシデントからは Recommendation が生成されなかった。すべての調査から一律に提案が生成されるわけではないことが確認できた
+- **Recommendation の具体性** — CloudTrail のイベントに基づく正確な背景説明、IAM 条件キーから Config Rules まで段階的な対策、導入時のトレードオフの指摘を含む実用的な内容だった
+- **4カテゴリ分類** — ドキュメントでは Observability / Infrastructure / Governance / Code optimization の4カテゴリが記載されている。今回はガバナンス（PROCESS_AND_GOVERNANCE）の1件のみが生成された
+- **Agent-ready Specification** — コード変更を伴わない今回の Recommendation では生成されなかった。ドキュメントによると、コードまたは設定の変更を伴う Recommendation に対して生成される
+
+**シリーズ全体の振り返り:**
+
+3記事を通じて、DevOps Agent の「調査 → 品質向上 → 予防」の3段階を検証した。
+
+- [第1回](/ja/blog/2026/04/01/aws-devops-agent-ga-verification): 最小構成でのセットアップとインシデント調査 — 4分25秒で stress-ng を正確に特定
+- [第2回](/ja/blog/2026/04/01/aws-devops-agent-custom-skills): Custom Skills による調査品質の向上 — 報告フォーマットの構造化と調査時間の短縮
+- 第3回（本記事）: Proactive Prevention による予防提案 — 過去の調査から具体的な改善提案を生成
+
+DevOps Agent は単なるインシデント調査ツールではなく、調査結果を蓄積して予防的な改善提案につなげるサイクルを持っている。今回の検証では CloudWatch + EC2 の最小構成だったが、コードリポジトリや CI/CD パイプラインを接続することで、コード変更を伴う Recommendation や Agent-ready Specification が得られる可能性がある。
+
+## クリーンアップ
+
+検証で作成したリソースを削除する。
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">クリーンアップ手順</summary>
+
+```bash title="Terminal"
+REGION=ap-northeast-1
+INSTANCE_ID="i-0123456789abcdef0"
+SG_ID="sg-0123456789abcdef0"
+
+# EC2 終了
+aws ec2 terminate-instances --instance-ids $INSTANCE_ID --region $REGION
+
+# CloudWatch アラーム削除
+aws cloudwatch delete-alarms \
+  --alarm-names "prod-web-high-cpu" "prod-web-network-anomaly" \
+  --region $REGION
+
+# インスタンス終了待ち → セキュリティグループ削除
+aws ec2 wait instance-terminated --instance-ids $INSTANCE_ID --region $REGION
+aws ec2 delete-security-group --group-id $SG_ID --region $REGION
+```
+
+</details>
+
+Agent Space と IAM ロールは引き続き利用可能な状態で残している。

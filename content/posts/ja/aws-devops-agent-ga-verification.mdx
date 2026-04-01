@@ -245,7 +245,7 @@ done
 
 調査開始から完了まで約4分25秒。エージェントが特定した根本原因:
 
-> インスタンス i-09329356f21adb8a5 で 2026-04-01 00:42:09 UTC に Systems Manager 経由で `stress-ng --cpu 2 --timeout 600` コマンドが実行された。t3.micro の2 vCPU を stress-ng が完全に使用していることが、100% の CPU 使用率の直接的な原因である。
+> インスタンス i-0123456789abcdef0 で 2026-04-01 00:42:09 UTC に Systems Manager 経由で `stress-ng --cpu 2 --timeout 600` コマンドが実行された。t3.micro の2 vCPU を stress-ng が完全に使用していることが、100% の CPU 使用率の直接的な原因である。
 
 CloudTrail から SSM SendCommand イベントを検出し、コマンド ID まで特定している。さらに付加的な分析として、CPU クレジット枯渇（サープラスクレジット24.45累積）の検出、ネットワークトラフィックとの時間的相関の分析、インスタンス起動からアラーム発火までのタイムライン構築が行われた。
 
@@ -302,6 +302,8 @@ CloudTrail から SSM SendCommand イベントを検出し、コマンド ID ま
 
 ## クリーンアップ
 
+検証用の EC2 インスタンスとアラームを削除する。Agent Space と IAM ロールは続きの検証記事で再利用するため残しておく。
+
 <details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
 <summary className="cursor-pointer font-medium">リソース削除手順</summary>
 
@@ -314,8 +316,12 @@ aws ec2 delete-security-group --group-id $SG_ID --region $REGION
 # CloudWatch アラーム削除
 aws cloudwatch delete-alarms \
   --alarm-names "devops-agent-verification-high-cpu" --region $REGION
+```
 
-# Agent Space 削除（association-id は associate-service 実行時の出力から取得）
+シリーズの検証がすべて完了した後に Agent Space と IAM ロールを削除する場合:
+
+```bash title="Terminal"
+# Agent Space 削除
 ASSOCIATION_ID=$(aws devops-agent list-associations \
   --agent-space-id $AGENT_SPACE_ID \
   --region $REGION \

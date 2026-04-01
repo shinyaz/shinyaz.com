@@ -1,0 +1,351 @@
+---
+title: "Verifying AWS DevOps Agent — What Proactive Prevention Actually Recommends"
+description: "Fed multiple incident investigation patterns to DevOps Agent's Proactive Prevention and ran a manual evaluation. Examined the generated Recommendation's content, category, and Agent-ready Specification availability to reveal what prevention proposals look like in practice."
+date: "2026-04-01"
+published: true
+featured: false
+categories: [infrastructure]
+tags: ["aws", "devops-agent", "proactive-prevention", "incident-response", "sre"]
+series: "aws-devops-agent"
+seriesOrder: 3
+---
+
+## Introduction
+
+[Part 1](/en/blog/2026/04/01/aws-devops-agent-ga-verification) covered DevOps Agent setup and incident investigation. [Part 2](/en/blog/2026/04/01/aws-devops-agent-custom-skills) explored how Custom Skills improve investigation quality. Both focused on post-incident response.
+
+DevOps Agent has another pillar. **Proactive Prevention** analyzes past incident investigations to generate improvement recommendations. By default, evaluations run automatically on a weekly schedule, but can also be triggered manually. It's accessible from the "Prevention" page in the Operator Web App.
+
+This article creates diverse incident investigation history, runs a manual evaluation, and examines the generated Recommendation.
+
+Prerequisites:
+
+- An active Agent Space from [Part 1](/en/blog/2026/04/01/aws-devops-agent-ga-verification)
+- Operator Web App access
+- AWS CLI v2, EC2/CloudWatch permissions
+
+If you only want the results, skip to [Summary](#summary).
+
+## Setup: Creating Incident Investigation History
+
+Proactive Prevention evaluation requires incident investigation history to analyze. Parts 1 and 2 produced 2 CPU spike investigations (both stress-ng), which are too homogeneous for diverse recommendations.
+
+To diversify, I created two additional incident patterns — **CPU spike** and **disk space exhaustion** — on a production-like instance.
+
+I also ran memory exhaustion investigations (stress-ng --vm) on a separate instance. The procedure is the same as Parts 1 & 2 (with `--vm 2 --vm-bytes 400M --vm-keep` options), so I'll omit the details here.
+
+### EC2 Environment
+
+I created an instance with production-like tags (`Environment=production`, `Service=web-api`).
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">EC2 + CloudWatch alarm setup steps</summary>
+
+```bash title="Terminal"
+REGION=ap-northeast-1
+
+AMI_ID=$(aws ssm get-parameters \
+  --names /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64 \
+  --query "Parameters[0].Value" --output text --region $REGION)
+
+SG_ID=$(aws ec2 create-security-group \
+  --group-name prod-web-sg \
+  --description "Security group for production web application" \
+  --region $REGION --query "GroupId" --output text)
+
+INSTANCE_ID=$(aws ec2 run-instances \
+  --image-id $AMI_ID --instance-type t3.micro \
+  --security-group-ids $SG_ID \
+  --tag-specifications 'ResourceType=instance,Tags=[{Key=Name,Value=web-app-prod-01},{Key=Environment,Value=production},{Key=Service,Value=web-api},{Key=Team,Value=platform}]' \
+  --region $REGION --query "Instances[0].InstanceId" --output text)
+
+aws ec2 wait instance-running --instance-ids $INSTANCE_ID --region $REGION
+
+# Wait for SSM Agent
+while true; do
+  STATUS=$(aws ssm describe-instance-information \
+    --filters "Key=InstanceIds,Values=${INSTANCE_ID}" \
+    --query "InstanceInformationList[0].PingStatus" \
+    --output text --region $REGION 2>/dev/null)
+  [ "$STATUS" = "Online" ] && break
+  echo "Waiting for SSM Agent..." && sleep 10
+done
+
+# CloudWatch alarm (CPU)
+aws cloudwatch put-metric-alarm \
+  --alarm-name "prod-web-high-cpu" \
+  --metric-name CPUUtilization --namespace AWS/EC2 \
+  --statistic Average --period 60 --threshold 80 \
+  --comparison-operator GreaterThanThreshold --evaluation-periods 2 \
+  --dimensions "Name=InstanceId,Value=${INSTANCE_ID}" \
+  --region $REGION
+```
+
+</details>
+
+### Pattern 1: CPU Spike (Web Application Worker)
+
+Instead of stress-ng, I used a Python script simulating a Web API worker to generate CPU load.
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">Worker deployment and startup steps</summary>
+
+Create the script and start 2 processes via SSM.
+
+```bash title="Terminal"
+# Create worker script
+aws ssm send-command \
+  --instance-ids $INSTANCE_ID \
+  --document-name "AWS-RunShellScript" \
+  --parameters '{"commands":["cat > /opt/web-api-worker.py << '\''PYEOF'\''\nimport hashlib, os\n\ndef handle_request():\n    data = os.urandom(4096)\n    for _ in range(500):\n        data = hashlib.sha256(data).digest()\n    return data\n\nif __name__ == \"__main__\":\n    while True:\n        handle_request()\nPYEOF\necho \"File created\""]}' \
+  --region $REGION
+
+# Start 2 processes
+aws ssm send-command \
+  --instance-ids $INSTANCE_ID \
+  --document-name "AWS-RunShellScript" \
+  --parameters '{"commands":["nohup python3 /opt/web-api-worker.py > /var/log/web-api-worker-1.log 2>&1 &\nnohup python3 /opt/web-api-worker.py > /var/log/web-api-worker-2.log 2>&1 &\necho done"]}' \
+  --region $REGION
+```
+
+With 2 processes on t3.micro, CPU reaches 99%. Wait ~3 minutes for the alarm (`evaluation-periods: 2`) to fire.
+
+</details>
+
+Script contents:
+
+```python title="/opt/web-api-worker.py"
+import hashlib, os
+
+def handle_request():
+    data = os.urandom(4096)
+    for _ in range(500):
+        data = hashlib.sha256(data).digest()
+    return data
+
+if __name__ == "__main__":
+    while True:
+        handle_request()
+```
+
+After the alarm fired, I asked Chat to investigate.
+
+```text title="Chat query"
+The production web server web-app-prod-01 (i-0123456789abcdef0) in ap-northeast-1
+has CloudWatch alarm prod-web-high-cpu firing. CPU utilization exceeds 99%.
+Users are reporting response delays. Please investigate and identify the root cause.
+```
+
+The agent created an Investigation task and completed it in about 5 minutes.
+
+### Pattern 2: Disk Space Exhaustion (Log Growth)
+
+After stopping the workers, I created large files under `/var/log/web-api/` to simulate log growth, pushing disk usage to 90%.
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">Worker stop and disk fill steps</summary>
+
+```bash title="Terminal"
+# Stop workers
+aws ssm send-command \
+  --instance-ids $INSTANCE_ID \
+  --document-name "AWS-RunShellScript" \
+  --parameters '{"commands":["killall python3 2>/dev/null; echo done"]}' \
+  --region $REGION
+
+# Create log-like data (write to /var)
+# Note: On AL2023, /tmp is tmpfs (RAM-based), so you must
+# write to /var or /home to fill the disk
+aws ssm send-command \
+  --instance-ids $INSTANCE_ID \
+  --document-name "AWS-RunShellScript" \
+  --parameters '{"commands":["mkdir -p /var/log/web-api && dd if=/dev/urandom of=/var/log/web-api/access.log bs=1M count=3000 && dd if=/dev/urandom of=/var/log/web-api/error.log bs=1M count=2500 && df -h /"]}' \
+  --timeout-seconds 600 \
+  --region $REGION
+```
+
+Writing ~5.5GB to an 8GB volume brings usage to 90%. The write takes a few minutes.
+
+</details>
+
+I asked Chat to investigate.
+
+```text title="Chat query"
+The production web server web-app-prod-01 (i-0123456789abcdef0) in ap-northeast-1
+has disk usage at 90%. Log files under /var/log may be growing excessively.
+Please investigate the root cause.
+```
+
+The agent created an Investigation task and completed it.
+
+### Investigation History Overview
+
+At this point, the Agent Space had the following investigation history.
+
+| # | Incident | Instance | Cause |
+|---|---|---|---|
+| 1-2 | CPU spike × 2 | devops-agent-stress-test / devops-agent-skills-test | stress-ng (Parts 1 & 2) |
+| 3-5 | Memory exhaustion × 3 | devops-agent-proactive-test | stress-ng --vm |
+| 6 | CPU spike | web-app-prod-01 | web-api-worker.py |
+| 7 | Disk space exhaustion | web-app-prod-01 | Log file growth |
+
+8 Investigation tasks were registered in total (the 7 above plus 1 duplicate created during memory exhaustion investigation). The Skill-enabled investigation and Agent Type test from Part 2 completed within Chat and were not registered as Investigation tasks.
+
+## Verification: Running the Evaluation and Agent Summary
+
+### Manual Evaluation
+
+I clicked "Run Now" on the "Prevention" page in the Operator Web App.
+
+I ran the evaluation 3 times total.
+
+| Run | Timing | Duration | Groups | Recommendations |
+|---|---|---|---|---|
+| 1st | After CPU spike + memory exhaustion investigations | ~4 min | 4 | 0 |
+| 2nd | After disk exhaustion investigation on previous instance | ~3 min | 4 | 0 |
+| 3rd | After production-like instance (#6, #7) investigations | ~8 min | 4 | 1 |
+
+The 1st and 2nd evaluations produced 0 Recommendations. All incidents were intentional load from stress-ng or dd, and the agent likely determined there was nothing to prevent.
+
+The 3rd evaluation, after investigating CPU spike (web-api-worker.py) and disk exhaustion (log growth) on the production-like instance (web-app-prod-01, tagged `Environment=production`), generated the first Recommendation. Possible factors:
+
+- **Production tag** — The `Environment=production` tag on the instance may have triggered detection of "governance gaps in production environments"
+- **Non-standard process** — stress-ng is a known stress testing tool, but web-api-worker.py is a custom script that may have been recognized as "inappropriate script deployment"
+
+These are speculations about the agent's internal logic and have not been confirmed.
+
+All 3 evaluations classified investigations into "4 groups." This represents the agent's grouping of similar incidents — likely CPU spike, memory exhaustion, disk exhaustion, and other, though the group breakdown is not included in the API response.
+
+### Agent Summary
+
+The Agent Summary displayed after the third evaluation:
+
+> AWS DevOps Agent looked into past incidents and provided 1 new recommendation for the past week. The notable recommendation involves implementing tag-based access control and MFA requirements for SSM RunCommand access to production environments to prevent inappropriate script deployment.
+
+The agent classified 8 investigations into 4 groups and generated a Recommendation only for the production environment incident (web-app-prod-01). No Recommendations were generated from the stress-ng test incidents. The disk space exhaustion incident (#7) was also not linked to the Recommendation — it was based solely on the CPU spike (#6).
+
+## Verification: Recommendation Content
+
+### Generated Recommendation
+
+| Item | Content |
+|---|---|
+| Title | Implement tag-based access control and MFA requirements for SSM RunCommand access to production environments to prevent inappropriate script deployment |
+| Category | Governance (PROCESS_AND_GOVERNANCE) |
+| Priority | MEDIUM |
+| Status | Needs Review (PROPOSED) |
+| Linked incident | web-app-prod-01 CPU spike (#6) |
+
+The Recommendation detail page has two tabs: "Recommendation" and "Agent-ready spec".
+
+### Recommendation Details
+
+The Recommendation was structured as follows (instance IDs and user names are masked).
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">Full Recommendation text</summary>
+
+> **Overview**
+>
+> An IAM role with administrator privileges was used to deploy a CPU load generation script to production web server i-0123456789abcdef0 (ap-northeast-1) without restrictions via SSM RunCommand, causing CPU utilization to reach 99.64% and service impact. Implement IAM condition keys (ssm:resourceTag/Environment) combined with MFA requirement (aws:MultiFactorAuthPresent) for SSM RunCommand to completely prevent inappropriate script deployment to production resources.
+>
+> **Background**
+>
+> Between 2026-04-01T06:08:44Z and 06:09:07Z, user (user-name) used an IAM role via AWS SSO to execute 5 commands through SSM RunCommand. A CPU load generation script `/opt/web-api-worker.py` was deployed and started as 2 processes, causing CPU utilization to spike to 99.64% at 06:10:00Z. User response delay reports confirmed service impact.
+>
+> The EC2 instance had an Environment=production tag, but no tag-based access control (TBAC), MFA requirements, SSM Change Manager approval workflows, EventBridge notifications, AWS Config Rules, or IAM Permission Boundaries were implemented for SSM RunCommand. Full administrator privileges allowed unrestricted script deployment to production.
+>
+> **Next Steps**
+>
+> Add IAM condition key `ssm:resourceTag/Environment` to SSM SendCommand actions to restrict access to production-tagged resources. Set `aws:MultiFactorAuthPresent` condition to true to require MFA authentication.
+>
+> Create SSM Change Manager change templates for production environments to require workflow approval before SSM RunCommand execution. Add EventBridge rules to detect SSM RunCommand execution events and send SNS notifications.
+>
+> Enable AWS Config Rules for `required-tags` and `approved-ssm-documents` to allow only approved SSM documents. Apply IAM Permission Boundaries to AWS SSO Permission Sets to restrict SSM SendCommand to production-tagged resources to conditional access only.
+>
+> **Considerations**
+>
+> SSM Change Manager approval workflows may add 5-10 minutes of delay during emergency response. MFA requirements will require CLI-based automation scripts to implement MFA token retrieval. Tag-based access control assumes existing tagging conventions (Environment, Service), and resources missing tags will be denied access by default, so phased rollout and tag auditing of existing resources is recommended.
+
+</details>
+
+Notable points:
+
+- **Background specificity** — Accurately describes who ((user-name)), when (06:08:44Z-06:09:07Z), and what (5 SSM RunCommand executions) based on CloudTrail events
+- **Multi-layered proposals** — IAM condition keys (immediate) → SSM Change Manager (approval workflow) → Config Rules + Permission Boundaries (long-term governance), providing graduated countermeasures
+- **Practical considerations** — Specifically identifies trade-offs like emergency response delays from approval workflows and MFA impact on automation
+
+### Recommendation Management
+
+Recommendations support the following actions:
+
+- **Keep** — Retain in backlog for tracking
+- **Discard** — Remove if not needed. You can provide a natural language explanation, and the agent incorporates this feedback into future recommendations
+- **Implemented** — Mark when the countermeasure has been applied
+
+Recommendations not marked as Keep or Implemented may be automatically removed after approximately 6 weeks (per documentation).
+
+### Agent-ready Specification
+
+The Recommendation detail page has an "Agent-ready spec" tab. This feature generates a structured document for recommendations involving code changes that can be handed directly to a coding agent.
+
+Per documentation, the specification includes:
+
+- **Problem statement** — Summary of the issue and root cause
+- **Solution summary** — High-level description of the recommended approach
+- **Target repositories** — Specific repositories where changes are needed
+- **Code changes** — Detailed descriptions with file paths and implementation considerations
+- **Test requirements** — Scenarios to test
+- **Implementation plan** — Phased implementation approach
+
+This Recommendation was governance-focused (IAM policy changes, SSM Change Manager configuration) and did not involve code repository changes, so the tab displayed "There is no agent-ready spec for this recommendation." Per documentation, Agent-ready Specifications are generated for recommendations that involve code or configuration changes.
+
+## Summary
+
+I fed 8 incident investigations (3 patterns: CPU spike, memory exhaustion, disk space exhaustion) to Proactive Prevention and ran 3 manual evaluations.
+
+**What the verification confirmed:**
+
+- **Evaluation selectivity** — The agent classified 8 investigations into 4 groups and generated a Recommendation only for the production environment incident (web-app-prod-01). No Recommendations were generated from stress-ng test incidents (#1-#5). Not all investigations result in recommendations
+- **Recommendation specificity** — The Recommendation included accurate background based on CloudTrail events, graduated countermeasures from IAM condition keys to Config Rules, and practical trade-off considerations
+- **4-category classification** — Documentation describes Observability / Infrastructure / Governance / Code optimization categories. This verification produced only a Governance (PROCESS_AND_GOVERNANCE) recommendation
+- **Agent-ready Specification** — Not generated for this non-code-change Recommendation. Per documentation, generated for recommendations involving code or configuration changes
+
+**Series retrospective:**
+
+Across 3 articles, I verified DevOps Agent's "investigation → quality improvement → prevention" cycle.
+
+- [Part 1](/en/blog/2026/04/01/aws-devops-agent-ga-verification): Minimal setup and incident investigation — identified stress-ng in 4 minutes 25 seconds
+- [Part 2](/en/blog/2026/04/01/aws-devops-agent-custom-skills): Custom Skills for investigation quality — structured report format and reduced investigation time
+- Part 3 (this article): Proactive Prevention — generated specific improvement recommendations from past investigations
+
+DevOps Agent is not just an incident investigation tool but has a cycle that accumulates investigation results and connects them to preventive improvement recommendations. This verification used a minimal CloudWatch + EC2 configuration, but connecting code repositories and CI/CD pipelines could yield code-change Recommendations with Agent-ready Specifications.
+
+## Cleanup
+
+Delete resources created during verification.
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">Cleanup steps</summary>
+
+```bash title="Terminal"
+REGION=ap-northeast-1
+INSTANCE_ID="i-0123456789abcdef0"
+SG_ID="sg-0123456789abcdef0"
+
+# Terminate EC2
+aws ec2 terminate-instances --instance-ids $INSTANCE_ID --region $REGION
+
+# Delete CloudWatch alarms
+aws cloudwatch delete-alarms \
+  --alarm-names "prod-web-high-cpu" "prod-web-network-anomaly" \
+  --region $REGION
+
+# Wait for termination → delete security group
+aws ec2 wait instance-terminated --instance-ids $INSTANCE_ID --region $REGION
+aws ec2 delete-security-group --group-id $SG_ID --region $REGION
+```
+
+</details>
+
+The Agent Space and IAM roles are left intact for continued use.

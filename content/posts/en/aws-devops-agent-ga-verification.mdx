@@ -243,7 +243,7 @@ When I asked "Investigate the high CPU alarm and identify the root cause," DevOp
 
 From investigation start to completion: approximately 4 minutes 25 seconds. The root cause identified by the agent:
 
-> On instance i-09329356f21adb8a5, the command `stress-ng --cpu 2 --timeout 600` was executed via Systems Manager at 2026-04-01 00:42:09 UTC. Since the t3.micro instance has 2 vCPUs, stress-ng fully utilizing both CPUs is the direct cause of the 100% CPU utilization.
+> On instance i-0123456789abcdef0, the command `stress-ng --cpu 2 --timeout 600` was executed via Systems Manager at 2026-04-01 00:42:09 UTC. Since the t3.micro instance has 2 vCPUs, stress-ng fully utilizing both CPUs is the direct cause of the 100% CPU utilization.
 
 It detected the SSM SendCommand event from CloudTrail and identified the specific command ID. Additional analysis included CPU credit exhaustion detection (surplus credits accumulated to 24.45), network traffic correlation analysis, and a full timeline from instance launch to alarm trigger.
 
@@ -300,6 +300,10 @@ Fact-checking queries took around 30 seconds; analysis and proposals took around
 
 ## Cleanup
 
+## Cleanup
+
+Delete the EC2 instance and alarm used for verification. The Agent Space and IAM roles are kept for use in subsequent articles in this series.
+
 <details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
 <summary className="cursor-pointer font-medium">Resource deletion steps</summary>
 
@@ -312,8 +316,12 @@ aws ec2 delete-security-group --group-id $SG_ID --region $REGION
 # Delete CloudWatch alarm
 aws cloudwatch delete-alarms \
   --alarm-names "devops-agent-verification-high-cpu" --region $REGION
+```
 
-# Delete Agent Space (get association-id from list-associations)
+To delete the Agent Space and IAM roles after completing all articles in the series:
+
+```bash title="Terminal"
+# Delete Agent Space
 ASSOCIATION_ID=$(aws devops-agent list-associations \
   --agent-space-id $AGENT_SPACE_ID \
   --region $REGION \
