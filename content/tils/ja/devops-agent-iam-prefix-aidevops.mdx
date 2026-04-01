@@ -1,0 +1,29 @@
+---
+title: "DevOps Agent の IAM アクションプレフィックスは aidevops だった"
+description: "AWS DevOps Agent の IAM アクションプレフィックスは devops-agent ではなく aidevops。boto3 のクライアント名は devops-agent だがポリシーでは aidevops:* を指定する。AWS CLI は v2.34.20 以降で対応。"
+date: 2026-04-01
+published: true
+tags:
+  - aws
+  - devops-agent
+  - iam
+---
+
+DevOps Agent の IAM ポリシーを書こうとして `devops-agent:*` を指定したら権限エラーになった。
+
+正しいプレフィックスは `aidevops` である。boto3 のクライアント名は `devops-agent` なのに、IAM アクションは `aidevops:GetAgentSpace` のような形式になる。
+
+```python title="Python"
+client = boto3.client("devops-agent")  # クライアント名
+# IAM アクションは aidevops:ListBacklogTasks
+```
+
+```json title="IAM Policy"
+{
+  "Effect": "Allow",
+  "Action": "aidevops:*",
+  "Resource": "*"
+}
+```
+
+さらに、検証時点の AWS CLI v2.34.16 には `aws devops-agent` サブコマンドが存在しなかった。v2.34.20 以降で追加されているため、最新版にアップデートすれば CLI からも操作できる。[ドキュメントの IAM permissions ページ](https://docs.aws.amazon.com/devopsagent/latest/userguide/aws-devops-agent-security-devops-agent-iam-permissions.html)に全アクション一覧がある。

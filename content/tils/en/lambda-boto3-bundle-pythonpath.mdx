@@ -1,0 +1,30 @@
+---
+title: "Use PYTHONPATH=/var/task to prioritize bundled boto3 in Lambda for new AWS services"
+description: "Lambda's managed Python runtime may lack service models for new AWS services like DevOps Agent. Set PYTHONPATH=/var/task to prioritize the bundled boto3 over the managed runtime version."
+date: 2026-04-01
+published: true
+tags:
+  - aws
+  - lambda
+  - boto3
+---
+
+Tried calling the DevOps Agent API from Lambda and got `UnknownServiceError: Unknown service: 'devops-agent'`.
+
+Lambda's managed Python runtime ships with an older boto3 that may not include service models for newly launched services. Even if you bundle a newer boto3 in your deployment package, the managed runtime version takes precedence.
+
+The fix is setting the environment variable `PYTHONPATH=/var/task`. This puts `/var/task` (where your deployment package is extracted) at the front of the import path, so your bundled boto3 wins.
+
+```bash title="Terminal"
+# Bundle boto3 in deployment package
+pip install boto3 -t .
+zip -r function.zip .
+
+# Add environment variable
+aws lambda update-function-configuration \
+  --function-name my-function \
+  --environment "Variables={PYTHONPATH=/var/task}" \
+  --region ap-northeast-1
+```
+
+This applies to any newly GA'd service, not just DevOps Agent.

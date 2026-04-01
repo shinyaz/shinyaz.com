@@ -1,0 +1,29 @@
+---
+title: "DevOps Agent IAM action prefix is aidevops, not devops-agent"
+description: "AWS DevOps Agent IAM actions use the aidevops prefix, not devops-agent. The boto3 client name is devops-agent but IAM policies need aidevops:*. AWS CLI support was added in v2.34.20."
+date: 2026-04-01
+published: true
+tags:
+  - aws
+  - devops-agent
+  - iam
+---
+
+Tried writing an IAM policy with `devops-agent:*` and got permission errors.
+
+The correct prefix is `aidevops`. The boto3 client name is `devops-agent`, but IAM actions are `aidevops:GetAgentSpace` and so on.
+
+```python title="Python"
+client = boto3.client("devops-agent")  # client name
+# IAM actions are aidevops:ListBacklogTasks
+```
+
+```json title="IAM Policy"
+{
+  "Effect": "Allow",
+  "Action": "aidevops:*",
+  "Resource": "*"
+}
+```
+
+Also, as of AWS CLI v2.34.16, there is no `aws devops-agent` subcommand — it was added in v2.34.20. Update to the latest version to use the CLI. The [IAM permissions page](https://docs.aws.amazon.com/devopsagent/latest/userguide/aws-devops-agent-security-devops-agent-iam-permissions.html) lists all available actions.

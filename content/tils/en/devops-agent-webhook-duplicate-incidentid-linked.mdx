@@ -1,0 +1,18 @@
+---
+title: "DevOps Agent Webhook duplicate incidentId is linked, not discarded"
+description: "The docs say 'Duplicate messages are deduplicated' but duplicate incidentId Webhook submissions actually create separate Investigations that get linked to an existing one, which then transitions back to In Progress."
+date: 2026-04-01
+published: true
+tags:
+  - aws
+  - devops-agent
+  - webhook
+---
+
+The DevOps Agent Webhook docs say "Duplicate messages are deduplicated," so I expected the second submission with the same `incidentId` to be silently dropped.
+
+What actually happened: both requests created separate Investigations, which were then **linked** to an existing related Investigation. The linked Investigation transitioned back to In Progress and completed in 42 seconds. It's "link and reprocess," not "discard."
+
+EventBridge fires an `Investigation Linked` event (status: `LINKED`). It's listed as the 9th Investigation event type in the [documentation](https://docs.aws.amazon.com/devopsagent/latest/userguide/integrating-devops-agent-into-event-driven-applications-using-amazon-eventbridge-devops-agent-events-detail-reference.html), but its trigger conditions aren't described.
+
+When building alarm-to-Webhook pipelines, decide upfront whether to include a timestamp in `incidentId` for uniqueness or accept the linking behavior.

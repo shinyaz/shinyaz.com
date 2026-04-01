@@ -1,0 +1,30 @@
+---
+title: "Lambda マネージドランタイムの boto3 に新サービスのモデルがない場合は PYTHONPATH でバンドル版を優先する"
+description: "Lambda の Python マネージドランタイムに含まれる boto3 が古く、DevOps Agent などの新サービスのサービスモデルがない場合がある。PYTHONPATH=/var/task を設定してバンドル版 boto3 を優先させることで解決する。"
+date: 2026-04-01
+published: true
+tags:
+  - aws
+  - lambda
+  - boto3
+---
+
+DevOps Agent の API を Lambda から呼ぼうとしたら `UnknownServiceError: Unknown service: 'devops-agent'` になった。
+
+Lambda の Python マネージドランタイムに含まれる boto3 はバージョンが古く、新しいサービスのサービスモデルが含まれていないことがある。デプロイパッケージに新しい boto3 をバンドルしても、マネージドランタイム側が優先されてしまう。
+
+解決策は環境変数 `PYTHONPATH=/var/task` を設定すること。これにより `/var/task`（デプロイパッケージの展開先）がインポートパスの先頭になり、バンドルした boto3 が優先される。
+
+```bash title="Terminal"
+# デプロイパッケージに boto3 をバンドル
+pip install boto3 -t .
+zip -r function.zip .
+
+# Lambda の環境変数に追加
+aws lambda update-function-configuration \
+  --function-name my-function \
+  --environment "Variables={PYTHONPATH=/var/task}" \
+  --region ap-northeast-1
+```
+
+DevOps Agent に限らず、GA 直後のサービスでは同じ問題が起きる可能性がある。

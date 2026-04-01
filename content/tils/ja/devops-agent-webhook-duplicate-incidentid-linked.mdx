@@ -1,0 +1,18 @@
+---
+title: "DevOps Agent Webhook の同一 incidentId は破棄ではなくリンクされる"
+description: "ドキュメントには Duplicate messages are deduplicated と記載されているが、実際には同一 incidentId の Webhook は既存の Investigation にリンクされ、リンク先の Investigation が再び In Progress に遷移する動作が確認された。"
+date: 2026-04-01
+published: true
+tags:
+  - aws
+  - devops-agent
+  - webhook
+---
+
+DevOps Agent の Webhook ドキュメントに「Duplicate messages are deduplicated」とあったので、同じ `incidentId` で2回送信したら2回目は無視されると思っていた。
+
+実際に試すと、2つのリクエストはそれぞれ別の Investigation として作成された後、既存の関連 Investigation に **リンク** された。リンク先の Investigation は再び In Progress に遷移し、42秒で完了した。「破棄」ではなく「リンクして再処理」という動作である。
+
+EventBridge には `Investigation Linked`（status: `LINKED`）というイベントが発火する。[ドキュメントの Investigation イベント一覧](https://docs.aws.amazon.com/devopsagent/latest/userguide/integrating-devops-agent-into-event-driven-applications-using-amazon-eventbridge-devops-agent-events-detail-reference.html)に9種類目として記載されているが、発火条件の説明はない。
+
+アラーム連携で Lambda から Webhook を送る場合、`incidentId` にタイムスタンプを含めて毎回一意にするか、リンク動作を許容するかを設計時に決めておく必要がある。
