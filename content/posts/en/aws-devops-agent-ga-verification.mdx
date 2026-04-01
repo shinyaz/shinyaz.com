@@ -1,0 +1,342 @@
+---
+title: "Verifying AWS DevOps Agent — Setup, Incident Investigation, and Chat in a Minimal Configuration"
+description: "Set up AWS DevOps Agent from scratch in Tokyo region and verified incident investigation and Chat capabilities. CLI setup took 66 seconds; Chat accurately identified stress-ng as the root cause."
+date: "2026-04-01"
+published: true
+featured: false
+categories: [infrastructure]
+tags: ["aws", "devops-agent", "incident-response", "sre", "observability"]
+series: "aws-devops-agent"
+seriesOrder: 1
+---
+
+## Introduction
+
+On March 31, 2026, AWS [announced the general availability of AWS DevOps Agent](https://aws.amazon.com/about-aws/whats-new/2026/03/aws-devops-agent-generally-available/). It's a "frontier agent" built on three pillars: autonomous incident investigation and resolution, proactive improvement recommendations, and on-demand SRE tasks. GA adds Azure and on-premises investigation support, custom skills for extensibility, a Triage Agent for duplicate ticket detection, and PagerDuty / Grafana integrations. Supported regions are us-east-1, us-west-2, ap-southeast-2, ap-northeast-1, eu-central-1, and eu-west-1.
+
+Preview customers reported "up to 75% lower MTTR" and "hours to minutes" resolution times. Looking at the customer stories in the [launch blog](https://aws.amazon.com/blogs/mt/announcing-general-availability-of-aws-devops-agent/), WGU used Dynatrace integration, and Zenchef's investigation spanned ECS deployments and IAM configuration on an EC2 instance hosting GitHub — all results came from environments with multiple tool connections. Can a minimal configuration — single account with CloudWatch only — still deliver practical results? This article sets up DevOps Agent from scratch in the Tokyo region and verifies incident investigation and Chat capabilities. Official documentation: [AWS DevOps Agent User Guide](https://docs.aws.amazon.com/devopsagent/latest/userguide/).
+
+Prerequisites:
+
+- AWS CLI v2 (verified with 2.34.21; `devops-agent` subcommand was not available in 2.34.16)
+- IAM role creation permissions, EC2/CloudWatch operation permissions
+- Test region: ap-northeast-1 (Tokyo)
+
+Pricing is per-second billing, and AWS Support customers receive monthly credits (Unified Operations: 100%, Enterprise: 75%, Business+: 30%). See the [pricing page](https://aws.amazon.com/devops-agent/pricing) for details.
+
+If you only want the results, skip to [Summary](#summary--which-teams-should-consider-this).
+
+## Verification 1: Agent Space Setup and Topology Discovery
+
+An Agent Space is a logical container that defines the tools and infrastructure DevOps Agent can access. DevOps Agent uses a dual-console architecture: administrators use the AWS Management Console to create Agent Spaces and configure integrations, while operators use a dedicated Web App (Operator App) for day-to-day incident investigation and Chat. Following the CLI onboarding guide, I executed everything from IAM role creation to Web App enablement.
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">IAM role and Agent Space creation steps</summary>
+
+Two IAM roles are required: one for the Agent Space (resource discovery and investigation) and one for the Operator App (Web App access).
+
+```bash title="Terminal (Agent Space role)"
+ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+REGION=ap-northeast-1
+
+cat > devops-agentspace-trust-policy.json << EOF
+{
+  "Version": "2012-10-17",
+  "Statement": [{
+    "Effect": "Allow",
+    "Principal": { "Service": "aidevops.amazonaws.com" },
+    "Action": "sts:AssumeRole",
+    "Condition": {
+      "StringEquals": { "aws:SourceAccount": "${ACCOUNT_ID}" },
+      "ArnLike": { "aws:SourceArn": "arn:aws:aidevops:${REGION}:${ACCOUNT_ID}:agentspace/*" }
+    }
+  }]
+}
+EOF
+
+aws iam create-role \
+  --role-name DevOpsAgentRole-AgentSpace \
+  --assume-role-policy-document file://devops-agentspace-trust-policy.json
+
+aws iam attach-role-policy \
+  --role-name DevOpsAgentRole-AgentSpace \
+  --policy-arn arn:aws:iam::aws:policy/AIDevOpsAgentAccessPolicy
+
+cat > devops-agentspace-additional-policy.json << EOF
+{
+  "Version": "2012-10-17",
+  "Statement": [{
+    "Sid": "AllowCreateServiceLinkedRoles",
+    "Effect": "Allow",
+    "Action": ["iam:CreateServiceLinkedRole"],
+    "Resource": [
+      "arn:aws:iam::${ACCOUNT_ID}:role/aws-service-role/resource-explorer-2.amazonaws.com/AWSServiceRoleForResourceExplorer"
+    ]
+  }]
+}
+EOF
+
+aws iam put-role-policy \
+  --role-name DevOpsAgentRole-AgentSpace \
+  --policy-name AllowCreateServiceLinkedRoles \
+  --policy-document file://devops-agentspace-additional-policy.json
+```
+
+```bash title="Terminal (Operator App role)"
+cat > devops-operator-trust-policy.json << EOF
+{
+  "Version": "2012-10-17",
+  "Statement": [{
+    "Effect": "Allow",
+    "Principal": { "Service": "aidevops.amazonaws.com" },
+    "Action": ["sts:AssumeRole", "sts:TagSession"],
+    "Condition": {
+      "StringEquals": { "aws:SourceAccount": "${ACCOUNT_ID}" },
+      "ArnLike": { "aws:SourceArn": "arn:aws:aidevops:${REGION}:${ACCOUNT_ID}:agentspace/*" }
+    }
+  }]
+}
+EOF
+
+aws iam create-role \
+  --role-name DevOpsAgentRole-WebappAdmin \
+  --assume-role-policy-document file://devops-operator-trust-policy.json
+
+aws iam attach-role-policy \
+  --role-name DevOpsAgentRole-WebappAdmin \
+  --policy-arn arn:aws:iam::aws:policy/AIDevOpsOperatorAppAccessPolicy
+```
+
+```bash title="Terminal (Agent Space creation, account association, Operator App)"
+AGENT_SPACE_ID=$(aws devops-agent create-agent-space \
+  --name "verification-space" \
+  --description "Agent Space for verification" \
+  --locale "ja-JP" \
+  --region $REGION \
+  --query "agentSpace.agentSpaceId" --output text)
+
+aws devops-agent associate-service \
+  --agent-space-id $AGENT_SPACE_ID \
+  --service-id aws \
+  --configuration "{
+    \"aws\": {
+      \"assumableRoleArn\": \"arn:aws:iam::${ACCOUNT_ID}:role/DevOpsAgentRole-AgentSpace\",
+      \"accountId\": \"${ACCOUNT_ID}\",
+      \"accountType\": \"monitor\"
+    }
+  }" \
+  --region $REGION
+
+aws devops-agent enable-operator-app \
+  --agent-space-id $AGENT_SPACE_ID \
+  --auth-flow iam \
+  --operator-app-role-arn "arn:aws:iam::${ACCOUNT_ID}:role/DevOpsAgentRole-WebappAdmin" \
+  --region $REGION
+```
+
+</details>
+
+### Results
+
+| Step | Time |
+| --- | --- |
+| Create 2 IAM roles + attach policies | ~26s |
+| Create Agent Space | ~8s |
+| Associate AWS account | ~10s |
+| Enable Operator App | ~6s |
+| **Total** | **~50 seconds** |
+
+Including the initial `aws sts get-caller-identity` call for account ID retrieval, the entire process completed in about 66 seconds.
+
+A `SYSTEM_LEARNING` task automatically started right after Agent Space creation, beginning to learn the account's resources. Topology discovery completed in about 20 minutes. The fact that everything works via CLI without console interaction makes it highly compatible with IaC.
+
+The `--locale "ja-JP"` option is noteworthy — it makes all agent responses come back in Japanese. Investigation reports and chat responses in the team's native language is a significant benefit.
+
+## Verification 2: Incident Investigation — Can Chat Identify the Root Cause?
+
+I launched an EC2 instance (t3.micro), applied CPU load with stress-ng, and triggered a CloudWatch alarm. Then I asked the agent to investigate via the Web App Chat.
+
+Note that in this verification, a CloudWatch alarm firing did not automatically trigger a DevOps Agent investigation. According to the documentation, PagerDuty integration enables automatic investigation triggered by PagerDuty alerts. Since this is a minimal configuration, I manually requested the investigation via Chat.
+
+I also recommend waiting for the topology discovery from Verification 1 (~20 minutes) to complete before proceeding. The documentation states that topology is used to understand resource relationships during investigations, so an incomplete topology may affect investigation accuracy (I did not test with an incomplete topology for comparison).
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">EC2 instance launch, stress test, and alarm setup</summary>
+
+Uses `$REGION` and `$ACCOUNT_ID` from Verification 1. Assumes a default VPC exists.
+
+```bash title="Terminal (EC2 + CloudWatch alarm)"
+AMI_ID=$(aws ssm get-parameters \
+  --names /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64 \
+  --query "Parameters[0].Value" --output text --region $REGION)
+
+SG_ID=$(aws ec2 create-security-group \
+  --group-name devops-agent-verification \
+  --description "SG for DevOps Agent verification" \
+  --region $REGION --query "GroupId" --output text)
+
+INSTANCE_ID=$(aws ec2 run-instances \
+  --image-id $AMI_ID --instance-type t3.micro \
+  --security-group-ids $SG_ID \
+  --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=devops-agent-stress-test}]" \
+  --region $REGION --query "Instances[0].InstanceId" --output text)
+
+aws ec2 wait instance-running --instance-ids $INSTANCE_ID --region $REGION
+
+aws cloudwatch put-metric-alarm \
+  --alarm-name "devops-agent-verification-high-cpu" \
+  --metric-name CPUUtilization --namespace AWS/EC2 \
+  --statistic Average --period 60 --threshold 80 \
+  --comparison-operator GreaterThanThreshold --evaluation-periods 1 \
+  --dimensions "Name=InstanceId,Value=${INSTANCE_ID}" \
+  --region $REGION
+```
+
+```bash title="Terminal (Wait for SSM Agent + run stress-ng)"
+# Wait for SSM Agent to come online (15-30 seconds)
+while true; do
+  STATUS=$(aws ssm describe-instance-information \
+    --filters "Key=InstanceIds,Values=${INSTANCE_ID}" \
+    --query "InstanceInformationList[0].PingStatus" \
+    --output text --region $REGION 2>/dev/null)
+  [ "$STATUS" = "Online" ] && break
+  echo "Waiting for SSM Agent..." && sleep 10
+done
+
+# Apply CPU load with stress-ng (10 minutes)
+aws ssm send-command \
+  --instance-ids $INSTANCE_ID \
+  --document-name "AWS-RunShellScript" \
+  --parameters '{"commands":["sudo dnf install -y stress-ng","nohup stress-ng --cpu 2 --timeout 600 &"]}' \
+  --region $REGION
+```
+
+```bash title="Terminal (Confirm alarm fires)"
+# CloudWatch metrics take 2-5 minutes to reflect
+while true; do
+  STATE=$(aws cloudwatch describe-alarms \
+    --alarm-names "devops-agent-verification-high-cpu" \
+    --query "MetricAlarms[0].StateValue" --output text \
+    --region $REGION)
+  echo "Alarm state: $STATE"
+  [ "$STATE" = "ALARM" ] && break
+  sleep 60
+done
+```
+
+</details>
+
+### Requesting the Investigation
+
+Once the alarm enters ALARM state, navigate to DevOps Agent in the AWS Management Console, select your Agent Space, and click "Operator access" to open the Web App. Enter your question in natural language in the Chat interface.
+
+When I asked "Investigate the high CPU alarm and identify the root cause," DevOps Agent immediately created an INVESTIGATION task and ran four subtasks in parallel:
+
+| Subtask | Description |
+| --- | --- |
+| analyze-cpu-metrics | CPUUtilization / CreditUsage / CreditBalance trend analysis |
+| analyze-network-metrics | NetworkIn / NetworkOut correlation analysis |
+| investigate-infrastructure-changes | CloudTrail event investigation |
+| check-instance-logs | Console output and SSM command history review |
+
+### Investigation Results
+
+From investigation start to completion: approximately 4 minutes 25 seconds. The root cause identified by the agent:
+
+> On instance i-09329356f21adb8a5, the command `stress-ng --cpu 2 --timeout 600` was executed via Systems Manager at 2026-04-01 00:42:09 UTC. Since the t3.micro instance has 2 vCPUs, stress-ng fully utilizing both CPUs is the direct cause of the 100% CPU utilization.
+
+It detected the SSM SendCommand event from CloudTrail and identified the specific command ID. Additional analysis included CPU credit exhaustion detection (surplus credits accumulated to 24.45), network traffic correlation analysis, and a full timeline from instance launch to alarm trigger.
+
+The agent accurately identified the intentionally planted cause. However, this is a relatively simple scenario. In real production environments with multiple contributing factors, investigation accuracy will depend on environment complexity.
+
+## Verification 3: Chat's General-Purpose Query Capabilities
+
+With incident investigation confirmed in Verification 2, I tested whether Chat is useful for day-to-day operations with four questions.
+
+### Q1: "Show me CloudWatch alarms currently in ALARM state in ap-northeast-1"
+
+**Accurate** ✅ — Reported the alarm name, target instance ID, CPU utilization (99.997%), threshold, and trigger time accurately.
+
+One caveat: the first attempt without specifying a region caused the agent to scan 13 regions sequentially, and it happened to check ap-northeast-1 after the alarm had returned to OK state, resulting in a false "no alarms" report. The second attempt with an explicit region worked correctly. **Always specify the region explicitly in Chat queries.**
+
+### Q2: "List EC2 instances and their status"
+
+**Accurate** ✅ — Listed all four instances with instance type, launch time, AZ, IP addresses, and VPC. EKS nodes included cluster name and node pool name, showing proper tag interpretation. Response time: 19 seconds. Even for simple resource listings, the contextual annotations from tags and metadata make it more readable than raw AWS CLI output.
+
+### Q3: "Are there any security concerns in this account?"
+
+**Practical** ✅ — Scanned the entire account and detected publicly accessible RDS databases (4 Aurora MySQL instances), no MFA configured, unencrypted EBS volumes, EC2 instances with public IPs, Security Hub not enabled, and missing VPC flow logs. A prioritized action list ("Immediately," "This week," "This month") was provided, along with positive findings like GuardDuty enablement and S3 encryption. Response time: 2 minutes 45 seconds. Not a Security Hub replacement, but practical for initial triage of "what to fix first."
+
+### Q4: "Suggest a scaling strategy for the high-CPU instance"
+
+**Practical** ✅ — Understanding the t3.micro CPU credit model, it proposed vertical scaling (c7a.large with monthly cost comparison table), Spot instances (70% cost reduction), and horizontal scaling (Auto Scaling Group with architecture diagram). Response time: 3 minutes 7 seconds. Each strategy included criteria for "which workload type it suits," making it directly usable for decision-making.
+
+### Chat Response Time Summary
+
+| Query Type | Response Time |
+| --- | --- |
+| Resource status checks (Q1, Q2) | 19-36s |
+| Security analysis (Q3) | 2m 45s |
+| Architecture proposals (Q4) | 3m 7s |
+| Incident investigation (Verification 2) | ~4m 25s |
+
+Fact-checking queries took around 30 seconds; analysis and proposals took around 3 minutes. The sample size is too small to generalize, but response time clearly varied with query complexity.
+
+## Summary — Which Teams Should Consider This
+
+| Aspect | Measurement | Rating |
+| --- | --- | --- |
+| Setup (CLI) | 66 seconds (IAM roles to Operator App) | ◎ |
+| Topology discovery | ~20 minutes (automatic, background) | ○ |
+| Incident investigation | 4m 25s, accurate root cause identification | ◎ |
+| Chat (fact-checking) | Accurate, 19-36s | ◎ |
+| Chat (analysis/proposals) | Practical, 2-3 min | ○ |
+| Japanese support | All responses in Japanese with locale setting | ◎ |
+
+- **Practical even in minimal configuration** — With just a single account and CloudWatch, incident investigation accurately identified the root cause. Whether adding external monitoring tools improves accuracy was not tested, but CloudWatch alone is a viable starting point
+- **CLI-first setup is a strength** — Agent Space is operational in 66 seconds. Official IaC templates (CDK / CloudFormation / Terraform) are available, keeping the organizational rollout barrier low
+- **Chat investigation capability matches "experienced SRE first response"** — The ability to cross-analyze CloudTrail, CloudWatch metrics, and SSM command history to build a timeline is impressive. Application-level log analysis was outside the scope of this verification, but the documentation indicates Datadog / Splunk integration can cover this
+- **Security analysis is a useful bonus** — Not a Security Hub replacement, but the prioritized "act now" items were practical
+
+## Cleanup
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">Resource deletion steps</summary>
+
+```bash title="Terminal"
+# Terminate EC2 instance
+aws ec2 terminate-instances --instance-ids $INSTANCE_ID --region $REGION
+aws ec2 wait instance-terminated --instance-ids $INSTANCE_ID --region $REGION
+aws ec2 delete-security-group --group-id $SG_ID --region $REGION
+
+# Delete CloudWatch alarm
+aws cloudwatch delete-alarms \
+  --alarm-names "devops-agent-verification-high-cpu" --region $REGION
+
+# Delete Agent Space (get association-id from list-associations)
+ASSOCIATION_ID=$(aws devops-agent list-associations \
+  --agent-space-id $AGENT_SPACE_ID \
+  --region $REGION \
+  --query "associations[0].associationId" --output text)
+
+aws devops-agent disable-operator-app \
+  --agent-space-id $AGENT_SPACE_ID --region $REGION
+aws devops-agent disassociate-service \
+  --agent-space-id $AGENT_SPACE_ID \
+  --association-id $ASSOCIATION_ID --region $REGION
+aws devops-agent delete-agent-space \
+  --agent-space-id $AGENT_SPACE_ID --region $REGION
+
+# Delete IAM roles
+aws iam detach-role-policy --role-name DevOpsAgentRole-AgentSpace \
+  --policy-arn arn:aws:iam::aws:policy/AIDevOpsAgentAccessPolicy
+aws iam delete-role-policy --role-name DevOpsAgentRole-AgentSpace \
+  --policy-name AllowCreateServiceLinkedRoles
+aws iam delete-role --role-name DevOpsAgentRole-AgentSpace
+
+aws iam detach-role-policy --role-name DevOpsAgentRole-WebappAdmin \
+  --policy-arn arn:aws:iam::aws:policy/AIDevOpsOperatorAppAccessPolicy
+aws iam delete-role --role-name DevOpsAgentRole-WebappAdmin
+```
+
+</details>

@@ -1,0 +1,344 @@
+---
+title: "AWS DevOps Agent 検証 — 最小構成でのセットアップ・インシデント調査・Chat の実力"
+description: "AWS DevOps Agent を東京リージョンでゼロからセットアップし、インシデント自動調査と Chat 機能を検証した。CLI で66秒でセットアップ完了、Chat は stress-ng の根本原因を正確に特定した。"
+date: "2026-04-01"
+published: true
+featured: false
+categories: [infrastructure]
+tags: ["aws", "devops-agent", "incident-response", "sre", "observability"]
+series: "aws-devops-agent"
+seriesOrder: 1
+---
+
+## はじめに
+
+2026年3月31日、AWS は [AWS DevOps Agent の一般提供（GA）](https://aws.amazon.com/jp/about-aws/whats-new/2026/03/aws-devops-agent-generally-available/)を発表した。インシデント対応の自律的な調査・解決、予防的な改善提案、オンデマンド SRE タスクの3つの柱を持つ「フロンティアエージェント」である。GA では Azure / オンプレミス環境の調査対応、カスタムスキルによる拡張、Triage Agent（重複チケット自動検出）、PagerDuty / Grafana 連携などが追加された。対応リージョンは us-east-1、us-west-2、ap-southeast-2、ap-northeast-1、eu-central-1、eu-west-1 の6つ。
+
+プレビューでは「MTTR を数時間から数分に短縮」「最大75% の MTTR 改善」と報告されている。ただし、[ローンチブログ](https://aws.amazon.com/blogs/mt/announcing-general-availability-of-aws-devops-agent/)の顧客事例を見ると、WGU は Dynatrace 連携、Zenchef は ECS デプロイメントと EC2 上の GitHub の IAM 設定を横断的に調査するなど、いずれも複数ツールを接続した環境での成果である。最小構成（単一アカウント + CloudWatch のみ）でも実用的な結果が得られるのか。本記事では東京リージョンでゼロからセットアップし、インシデント調査と Chat 機能を検証する。公式ドキュメントは [AWS DevOps Agent User Guide](https://docs.aws.amazon.com/devopsagent/latest/userguide/)。
+
+前提条件:
+
+- AWS CLI v2（2.34.21 で動作確認済み。2.34.16 では `devops-agent` サブコマンド未対応）
+- IAM ロール作成権限、EC2 / CloudWatch の操作権限
+- 検証リージョン: ap-northeast-1（東京）
+
+料金は秒単位課金で、AWS Support 顧客は月額クレジットが付与される（Unified Operations: 100%、Enterprise: 75%、Business+: 30%）。詳細は[料金ページ](https://aws.amazon.com/devops-agent/pricing)を参照。
+
+結果だけ見たい場合は[まとめ](#まとめ--どのようなチームに向いているか)に進んでほしい。
+
+## 検証 1: Agent Space セットアップとトポロジー構築
+
+Agent Space は DevOps Agent の論理的なコンテナで、AWS アカウント・外部ツール連携・ユーザー権限を定義する。DevOps Agent はデュアルコンソール構成を採用しており、管理者は AWS マネジメントコンソールで Agent Space の作成や連携設定を行い、オペレーターは専用の Web App（Operator App）で日常のインシデント調査や Chat を利用する。CLI オンボーディングガイドに従い、IAM ロール作成から Web App 有効化までを実行した。
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">IAM ロール・Agent Space 作成手順</summary>
+
+2つの IAM ロールが必要である。Agent Space 用ロール（リソース検出・調査用）と Operator App 用ロール（Web App アクセス用）だ。
+
+```bash title="Terminal (Agent Space ロール作成)"
+ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+REGION=ap-northeast-1
+
+# 信頼ポリシー
+cat > devops-agentspace-trust-policy.json << EOF
+{
+  "Version": "2012-10-17",
+  "Statement": [{
+    "Effect": "Allow",
+    "Principal": { "Service": "aidevops.amazonaws.com" },
+    "Action": "sts:AssumeRole",
+    "Condition": {
+      "StringEquals": { "aws:SourceAccount": "${ACCOUNT_ID}" },
+      "ArnLike": { "aws:SourceArn": "arn:aws:aidevops:${REGION}:${ACCOUNT_ID}:agentspace/*" }
+    }
+  }]
+}
+EOF
+
+aws iam create-role \
+  --role-name DevOpsAgentRole-AgentSpace \
+  --assume-role-policy-document file://devops-agentspace-trust-policy.json
+
+aws iam attach-role-policy \
+  --role-name DevOpsAgentRole-AgentSpace \
+  --policy-arn arn:aws:iam::aws:policy/AIDevOpsAgentAccessPolicy
+
+# Resource Explorer SLR 作成用インラインポリシー
+cat > devops-agentspace-additional-policy.json << EOF
+{
+  "Version": "2012-10-17",
+  "Statement": [{
+    "Sid": "AllowCreateServiceLinkedRoles",
+    "Effect": "Allow",
+    "Action": ["iam:CreateServiceLinkedRole"],
+    "Resource": [
+      "arn:aws:iam::${ACCOUNT_ID}:role/aws-service-role/resource-explorer-2.amazonaws.com/AWSServiceRoleForResourceExplorer"
+    ]
+  }]
+}
+EOF
+
+aws iam put-role-policy \
+  --role-name DevOpsAgentRole-AgentSpace \
+  --policy-name AllowCreateServiceLinkedRoles \
+  --policy-document file://devops-agentspace-additional-policy.json
+```
+
+```bash title="Terminal (Operator App ロール作成)"
+cat > devops-operator-trust-policy.json << EOF
+{
+  "Version": "2012-10-17",
+  "Statement": [{
+    "Effect": "Allow",
+    "Principal": { "Service": "aidevops.amazonaws.com" },
+    "Action": ["sts:AssumeRole", "sts:TagSession"],
+    "Condition": {
+      "StringEquals": { "aws:SourceAccount": "${ACCOUNT_ID}" },
+      "ArnLike": { "aws:SourceArn": "arn:aws:aidevops:${REGION}:${ACCOUNT_ID}:agentspace/*" }
+    }
+  }]
+}
+EOF
+
+aws iam create-role \
+  --role-name DevOpsAgentRole-WebappAdmin \
+  --assume-role-policy-document file://devops-operator-trust-policy.json
+
+aws iam attach-role-policy \
+  --role-name DevOpsAgentRole-WebappAdmin \
+  --policy-arn arn:aws:iam::aws:policy/AIDevOpsOperatorAppAccessPolicy
+```
+
+```bash title="Terminal (Agent Space 作成・アカウント関連付け・Operator App 有効化)"
+AGENT_SPACE_ID=$(aws devops-agent create-agent-space \
+  --name "verification-space" \
+  --description "Agent Space for verification" \
+  --locale "ja-JP" \
+  --region $REGION \
+  --query "agentSpace.agentSpaceId" --output text)
+
+aws devops-agent associate-service \
+  --agent-space-id $AGENT_SPACE_ID \
+  --service-id aws \
+  --configuration "{
+    \"aws\": {
+      \"assumableRoleArn\": \"arn:aws:iam::${ACCOUNT_ID}:role/DevOpsAgentRole-AgentSpace\",
+      \"accountId\": \"${ACCOUNT_ID}\",
+      \"accountType\": \"monitor\"
+    }
+  }" \
+  --region $REGION
+
+aws devops-agent enable-operator-app \
+  --agent-space-id $AGENT_SPACE_ID \
+  --auth-flow iam \
+  --operator-app-role-arn "arn:aws:iam::${ACCOUNT_ID}:role/DevOpsAgentRole-WebappAdmin" \
+  --region $REGION
+```
+
+</details>
+
+### 結果
+
+| ステップ | 所要時間 |
+| --- | --- |
+| IAM ロール 2つ作成 + ポリシーアタッチ | 約26秒 |
+| Agent Space 作成 | 約8秒 |
+| AWS アカウント関連付け | 約10秒 |
+| Operator App 有効化 | 約6秒 |
+| **合計** | **約50秒** |
+
+`aws sts get-caller-identity` によるアカウント ID 取得を含めると約66秒で全工程が完了した。
+
+Agent Space 作成直後に `SYSTEM_LEARNING` タスクが自動起動し、アカウント内のリソースを学習し始めた。トポロジー構築は約20分で完了した。コンソール操作なしで CLI のみで完結する点は、IaC との親和性が高い。
+
+注目すべきは `--locale "ja-JP"` オプションである。これを指定すると、エージェントの応答がすべて日本語になる。調査レポートやチャット応答が日本語で返ってくるのは、日本のチームにとって大きなメリットだ。
+
+## 検証 2: インシデント調査 — Chat で根本原因を特定できるか
+
+EC2 インスタンス（t3.micro）を起動し、stress-ng で CPU 負荷をかけて CloudWatch アラームを発火させた。その後、Web App の Chat 経由で調査を依頼した。
+
+なお、今回の検証では CloudWatch アラームが発火しても DevOps Agent が自動的に調査を開始しなかった。ドキュメントによると、PagerDuty との連携では PagerDuty アラートをトリガーとした自動調査が可能である。今回は最小構成のため、手動で Chat から調査を依頼する方式で検証した。
+
+また、検証 1 のトポロジー構築（約20分）が完了してから検証 2 に進むことを推奨する。ドキュメントではトポロジーが調査時のリソース関係の理解に使われると説明されており、未構築の状態では調査精度に影響する可能性がある（今回はトポロジー構築完了後に検証を実施したため、未構築時との比較は行っていない）。
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">EC2 インスタンス起動・stress テスト・アラーム設定</summary>
+
+検証 1 で設定した `$REGION`、`$ACCOUNT_ID` をそのまま使用する。デフォルト VPC が存在する環境を前提としている。
+
+```bash title="Terminal (EC2 + CloudWatch アラーム)"
+AMI_ID=$(aws ssm get-parameters \
+  --names /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64 \
+  --query "Parameters[0].Value" --output text --region $REGION)
+
+SG_ID=$(aws ec2 create-security-group \
+  --group-name devops-agent-verification \
+  --description "SG for DevOps Agent verification" \
+  --region $REGION --query "GroupId" --output text)
+
+INSTANCE_ID=$(aws ec2 run-instances \
+  --image-id $AMI_ID --instance-type t3.micro \
+  --security-group-ids $SG_ID \
+  --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=devops-agent-stress-test}]" \
+  --region $REGION --query "Instances[0].InstanceId" --output text)
+
+aws ec2 wait instance-running --instance-ids $INSTANCE_ID --region $REGION
+
+aws cloudwatch put-metric-alarm \
+  --alarm-name "devops-agent-verification-high-cpu" \
+  --metric-name CPUUtilization --namespace AWS/EC2 \
+  --statistic Average --period 60 --threshold 80 \
+  --comparison-operator GreaterThanThreshold --evaluation-periods 1 \
+  --dimensions "Name=InstanceId,Value=${INSTANCE_ID}" \
+  --region $REGION
+```
+
+```bash title="Terminal (SSM Agent 起動待ち + stress-ng 実行)"
+# SSM Agent がオンラインになるまで待機（15〜30秒程度）
+while true; do
+  STATUS=$(aws ssm describe-instance-information \
+    --filters "Key=InstanceIds,Values=${INSTANCE_ID}" \
+    --query "InstanceInformationList[0].PingStatus" \
+    --output text --region $REGION 2>/dev/null)
+  [ "$STATUS" = "Online" ] && break
+  echo "Waiting for SSM Agent..." && sleep 10
+done
+
+# stress-ng で CPU 負荷をかける（10分間）
+aws ssm send-command \
+  --instance-ids $INSTANCE_ID \
+  --document-name "AWS-RunShellScript" \
+  --parameters '{"commands":["sudo dnf install -y stress-ng","nohup stress-ng --cpu 2 --timeout 600 &"]}' \
+  --region $REGION
+```
+
+```bash title="Terminal (アラーム発火を確認)"
+# CloudWatch メトリクスの反映に2〜5分かかる
+while true; do
+  STATE=$(aws cloudwatch describe-alarms \
+    --alarm-names "devops-agent-verification-high-cpu" \
+    --query "MetricAlarms[0].StateValue" --output text \
+    --region $REGION)
+  echo "Alarm state: $STATE"
+  [ "$STATE" = "ALARM" ] && break
+  sleep 60
+done
+```
+
+</details>
+
+### 調査の依頼
+
+アラームが ALARM 状態になったら、AWS マネジメントコンソールの DevOps Agent ページから Agent Space を選択し、「Operator access」ボタンで Web App を開く。Chat 画面で自然言語で質問を入力すればよい。
+
+「高 CPU 使用率アラームについて、原因を調査して根本原因を特定してください」と依頼すると、DevOps Agent は即座に INVESTIGATION タスクを作成し、以下の4つのサブタスクを並列実行した。
+
+| サブタスク | 内容 |
+| --- | --- |
+| analyze-cpu-metrics | CPUUtilization / CreditUsage / CreditBalance の推移分析 |
+| analyze-network-metrics | NetworkIn / NetworkOut の相関分析 |
+| investigate-infrastructure-changes | CloudTrail イベントの調査 |
+| check-instance-logs | コンソール出力・SSM コマンド履歴の確認 |
+
+### 調査結果
+
+調査開始から完了まで約4分25秒。エージェントが特定した根本原因:
+
+> インスタンス i-09329356f21adb8a5 で 2026-04-01 00:42:09 UTC に Systems Manager 経由で `stress-ng --cpu 2 --timeout 600` コマンドが実行された。t3.micro の2 vCPU を stress-ng が完全に使用していることが、100% の CPU 使用率の直接的な原因である。
+
+CloudTrail から SSM SendCommand イベントを検出し、コマンド ID まで特定している。さらに付加的な分析として、CPU クレジット枯渇（サープラスクレジット24.45累積）の検出、ネットワークトラフィックとの時間的相関の分析、インスタンス起動からアラーム発火までのタイムライン構築が行われた。
+
+意図的に仕込んだ原因を正確に特定できた点は評価できる。ただし、これは比較的シンプルなシナリオである。実際の本番環境では複数の要因が絡むため、調査精度は環境の複雑さに依存するだろう。
+
+## 検証 3: Chat の汎用的な質問対応力
+
+検証 2 でインシデント調査の能力は確認できた。次に、日常的なオペレーション業務で使えるかを4つの質問で検証した。
+
+### Q1: 「ap-northeast-1 で現在 ALARM 状態の CloudWatch アラームを教えて」
+
+**正確** ✅ — アラーム名、対象インスタンス ID、CPU 使用率（99.997%）、閾値、発火時刻まで正確に報告した。
+
+ただし注意点がある。最初の質問ではリージョンを指定しなかったため、エージェントが13リージョンを順番にスキャンした。たまたまアラームが OK に戻った後のタイミングで ap-northeast-1 をチェックしたため「アラームなし」と誤報告した。リージョンを明示的に指定した2回目で正確に検出できた。**Chat への質問はリージョンを明示的に指定すべきである。**
+
+### Q2: 「EC2 インスタンスの一覧と状態を教えて」
+
+**正確** ✅ — 4つのインスタンスすべてを列挙し、インスタンスタイプ、起動日時、AZ、IP アドレス、VPC まで報告した。EKS ノードには「EKS クラスター名」「ノードプール名」まで付記されており、タグ情報を適切に解釈していた。応答時間は19秒。単純なリソース一覧でも、タグやメタデータを解釈して文脈を付加してくれる点は、AWS CLI の生出力より読みやすい。
+
+### Q3: 「セキュリティ上の懸念点はあるか」
+
+**実用的** ✅ — アカウント全体をスキャンし、RDS の公開アクセス設定（4つの Aurora MySQL）、MFA 未設定、暗号化されていない EBS ボリューム、EC2 のパブリック IP、Security Hub 未有効化、VPC フローログの不足を検出した。優先度付きのアクションリスト（「今すぐ」「今週」「今月」）まで提示された。GuardDuty の有効化や S3 暗号化など良好な点も併記されていた。応答時間は2分45秒。Security Hub の代替ではないが、「まず何から手をつけるべきか」の初期トリアージとしては十分実用的だ。
+
+### Q4: 「CPU 使用率が高いインスタンスのスケーリング戦略を提案して」
+
+**実用的** ✅ — t3.micro の CPU クレジットモデルを理解した上で、垂直スケーリング（c7a.large、月額コスト比較テーブル付き）、Spot インスタンス（70% コスト削減）、水平スケーリング（Auto Scaling Group、構成図付き）の3つの戦略を提案した。応答時間は3分7秒。各戦略に「どのようなワークロードに向いているか」の判断基準が付いており、読者がそのまま意思決定に使える形式だった。
+
+### Chat 応答時間まとめ
+
+| 質問タイプ | 応答時間 |
+| --- | --- |
+| リソース状態の確認（Q1, Q2） | 19〜36秒 |
+| セキュリティ分析（Q3） | 2分45秒 |
+| アーキテクチャ提案（Q4） | 3分7秒 |
+| インシデント調査（検証 2） | 約4分25秒 |
+
+事実確認系は30秒前後、分析・提案系は3分前後だった。サンプル数が少ないため一般化はできないが、質問の複雑さに応じて応答時間が変わる傾向は見て取れる。
+
+## まとめ — どのようなチームに向いているか
+
+| 観点 | 計測結果 | 評価 |
+| --- | --- | --- |
+| セットアップ（CLI） | 66秒（IAM ロール〜Operator App 有効化） | ◎ |
+| トポロジー構築 | 約20分（自動・バックグラウンド） | ○ |
+| インシデント調査 | 4分25秒で根本原因を正確に特定 | ◎ |
+| Chat（事実確認） | 正確、19〜36秒 | ◎ |
+| Chat（分析・提案） | 実用的、2〜3分 | ○ |
+| 日本語対応 | locale 設定で全応答が日本語 | ◎ |
+
+- **最小構成でも実用的** — 単一アカウント + CloudWatch のみの構成でも、インシデント調査は根本原因まで正確に特定できた。外部監視ツールを追加した場合の精度向上は今回未検証だが、まずは CloudWatch だけで始められる
+- **CLI 完結のセットアップが強み** — 66秒で Agent Space が稼働する。IaC（CDK / CloudFormation / Terraform）テンプレートも公式提供されており、組織展開のハードルは低い
+- **Chat の調査能力は「経験豊富な SRE の初動対応」レベル** — CloudTrail・CloudWatch メトリクス・SSM コマンド履歴を横断的に分析し、タイムラインを構築する能力は高い。アプリケーションレベルのログ分析は今回の検証範囲外だが、ドキュメントによると Datadog / Splunk 等との連携でカバーできる
+- **セキュリティ分析は副次的だが有用** — Security Hub の代替ではないが、「今すぐ対応すべき項目」の優先度付けは実用的だった
+
+## クリーンアップ
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">リソース削除手順</summary>
+
+```bash title="Terminal"
+# EC2 インスタンス終了
+aws ec2 terminate-instances --instance-ids $INSTANCE_ID --region $REGION
+aws ec2 wait instance-terminated --instance-ids $INSTANCE_ID --region $REGION
+aws ec2 delete-security-group --group-id $SG_ID --region $REGION
+
+# CloudWatch アラーム削除
+aws cloudwatch delete-alarms \
+  --alarm-names "devops-agent-verification-high-cpu" --region $REGION
+
+# Agent Space 削除（association-id は associate-service 実行時の出力から取得）
+ASSOCIATION_ID=$(aws devops-agent list-associations \
+  --agent-space-id $AGENT_SPACE_ID \
+  --region $REGION \
+  --query "associations[0].associationId" --output text)
+
+aws devops-agent disable-operator-app \
+  --agent-space-id $AGENT_SPACE_ID --region $REGION
+aws devops-agent disassociate-service \
+  --agent-space-id $AGENT_SPACE_ID \
+  --association-id $ASSOCIATION_ID --region $REGION
+aws devops-agent delete-agent-space \
+  --agent-space-id $AGENT_SPACE_ID --region $REGION
+
+# IAM ロール削除
+aws iam detach-role-policy --role-name DevOpsAgentRole-AgentSpace \
+  --policy-arn arn:aws:iam::aws:policy/AIDevOpsAgentAccessPolicy
+aws iam delete-role-policy --role-name DevOpsAgentRole-AgentSpace \
+  --policy-name AllowCreateServiceLinkedRoles
+aws iam delete-role --role-name DevOpsAgentRole-AgentSpace
+
+aws iam detach-role-policy --role-name DevOpsAgentRole-WebappAdmin \
+  --policy-arn arn:aws:iam::aws:policy/AIDevOpsOperatorAppAccessPolicy
+aws iam delete-role --role-name DevOpsAgentRole-WebappAdmin
+```
+
+</details>

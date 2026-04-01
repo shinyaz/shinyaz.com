@@ -1,0 +1,5 @@
+name: AWS DevOps Agent
+slug: aws-devops-agent
+nameJa: AWS DevOps Agent 検証
+description: Hands-on verification of AWS DevOps Agent — setup, incident investigation, Chat capabilities, and integrations
+descriptionJa: AWS DevOps Agent のハンズオン検証 — セットアップ、インシデント調査、Chat 機能、外部ツール連携
