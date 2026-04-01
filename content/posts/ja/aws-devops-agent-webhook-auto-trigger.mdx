@@ -286,7 +286,7 @@ def lambda_handler(event, context):
 
 </details>
 
-外部ライブラリは不要で、Python 標準ライブラリのみで実装できる。環境変数 `WEBHOOK_URL` と `WEBHOOK_SECRET` に Webhook の URL と HMAC Secret を設定する。本番運用では `WEBHOOK_SECRET` を AWS Secrets Manager に格納し、Lambda から取得する構成が望ましい。
+外部ライブラリは不要で、Python 標準ライブラリのみで実装できる。環境変数 `WEBHOOK_URL` と `WEBHOOK_SECRET` に Webhook の URL と HMAC Secret を設定する。本番運用では `WEBHOOK_SECRET` を AWS Secrets Manager に格納し、Lambda から取得する構成が望ましい。[ベストプラクティスガイド](https://aws.amazon.com/jp/blogs/news/best-practices-for-deploying-aws-devops-agent-in-production/)でもセキュリティポリシーに従ったローテーションが推奨されている。
 
 `incidentId` にはアラーム名とタイムスタンプを組み合わせた値を使用している。これにより、同一アラームの繰り返し発火でも一意の ID が生成される。`incidentId` の重複がどう扱われるかは後述する。
 

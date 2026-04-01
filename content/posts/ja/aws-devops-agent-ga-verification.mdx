@@ -20,6 +20,7 @@ seriesOrder: 1
 
 - AWS CLI v2（2.34.21 で動作確認済み。2.34.16 では `devops-agent` サブコマンド未対応）
 - IAM ロール作成権限、EC2 / CloudWatch の操作権限
+- AWS Organizations を使用している場合、SCP で `aidevops:*` アクションがブロックされていないことを確認する（[よくあるトラブル](https://aws.amazon.com/jp/blogs/news/best-practices-for-deploying-aws-devops-agent-in-production/)として報告されている）
 - 検証リージョン: ap-northeast-1（東京）
 
 料金は秒単位課金で、AWS Support 顧客は月額クレジットが付与される（Unified Operations: 100%、Enterprise: 75%、Business+: 30%）。詳細は[料金ページ](https://aws.amazon.com/devops-agent/pricing)を参照。
@@ -28,7 +29,7 @@ seriesOrder: 1
 
 ## 検証 1: エージェントスペース セットアップとトポロジー構築
 
-エージェントスペース は DevOps Agent の論理的なコンテナで、AWS アカウント・外部ツール連携・ユーザー権限を定義する。DevOps Agent はデュアルコンソール構成を採用しており、管理者は AWS マネジメントコンソールで エージェントスペース の作成や連携設定を行い、オペレーターはオペレーターアクセスで日常のインシデント調査や Chat を利用する。CLI オンボーディングガイドに従い、IAM ロール作成から オペレーターアクセス有効化までを実行した。
+エージェントスペース は DevOps Agent の論理的なコンテナで、AWS アカウント・外部ツール連携・ユーザー権限を定義する。[ベストプラクティスガイド](https://aws.amazon.com/jp/blogs/news/best-practices-for-deploying-aws-devops-agent-in-production/)では、エージェントスペースの境界をオンコールの責任範囲に合わせ、本番環境と非本番環境を分離することを推奨している。本記事では検証目的のため単一アカウント・最小構成で進める。DevOps Agent はデュアルコンソール構成を採用しており、管理者は AWS マネジメントコンソールで エージェントスペース の作成や連携設定を行い、オペレーターはオペレーターアクセスで日常のインシデント調査や Chat を利用する。CLI オンボーディングガイドに従い、IAM ロール作成から オペレーターアクセス有効化までを実行した。本番環境では [CDK](https://github.com/aws-samples/sample-aws-devops-agent-cdk) や [Terraform](https://github.com/aws-samples/sample-aws-devops-agent-terraform) のテンプレートを使った IaC デプロイが推奨されている。
 
 <details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
 <summary className="cursor-pointer font-medium">IAM ロール・エージェントスペース 作成手順</summary>

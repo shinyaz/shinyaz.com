@@ -20,6 +20,7 @@ Prerequisites:
 
 - AWS CLI v2 (verified with 2.34.21; `devops-agent` subcommand was not available in 2.34.16)
 - IAM role creation permissions, EC2/CloudWatch operation permissions
+- If using AWS Organizations, verify that SCPs do not block `aidevops:*` actions (reported as a [common pitfall](https://aws.amazon.com/blogs/devops/best-practices-for-deploying-aws-devops-agent-in-production/))
 - Test region: ap-northeast-1 (Tokyo)
 
 Pricing is per-second billing, and AWS Support customers receive monthly credits (Unified Operations: 100%, Enterprise: 75%, Business+: 30%). See the [pricing page](https://aws.amazon.com/devops-agent/pricing) for details.
@@ -28,7 +29,7 @@ If you only want the results, skip to [Summary](#summary--which-teams-should-con
 
 ## Verification 1: Agent Space Setup and Topology Discovery
 
-An Agent Space is a logical container that defines the tools and infrastructure DevOps Agent can access. DevOps Agent uses a dual-console architecture: administrators use the AWS Management Console to create Agent Spaces and configure integrations, while operators use Operator Access for day-to-day incident investigation and Chat. Following the CLI onboarding guide, I executed everything from IAM role creation to Operator Access enablement.
+An Agent Space is a logical container that defines the tools and infrastructure DevOps Agent can access. The [best practices guide](https://aws.amazon.com/blogs/devops/best-practices-for-deploying-aws-devops-agent-in-production/) recommends aligning Agent Space boundaries with on-call responsibilities and separating production from non-production environments. This article uses a single-account minimal configuration for verification purposes. DevOps Agent uses a dual-console architecture: administrators use the AWS Management Console to create Agent Spaces and configure integrations, while operators use Operator Access for day-to-day incident investigation and Chat. Following the CLI onboarding guide, I executed everything from IAM role creation to Operator Access enablement. For production environments, IaC deployment using [CDK](https://github.com/aws-samples/sample-aws-devops-agent-cdk) or [Terraform](https://github.com/aws-samples/sample-aws-devops-agent-terraform) templates is recommended.
 
 <details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
 <summary className="cursor-pointer font-medium">IAM role and Agent Space creation steps</summary>

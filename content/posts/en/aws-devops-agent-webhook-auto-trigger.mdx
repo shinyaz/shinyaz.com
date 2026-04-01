@@ -286,7 +286,7 @@ def lambda_handler(event, context):
 
 </details>
 
-No external libraries required — the function uses only Python standard library modules. Set `WEBHOOK_URL` and `WEBHOOK_SECRET` as environment variables. For production use, store `WEBHOOK_SECRET` in AWS Secrets Manager and retrieve it from the Lambda function.
+No external libraries required — the function uses only Python standard library modules. Set `WEBHOOK_URL` and `WEBHOOK_SECRET` as environment variables. For production use, store `WEBHOOK_SECRET` in AWS Secrets Manager and retrieve it from the Lambda function. The [best practices guide](https://aws.amazon.com/blogs/devops/best-practices-for-deploying-aws-devops-agent-in-production/) also recommends rotating secrets according to your security policy.
 
 The `incidentId` combines the alarm name with a Unix timestamp to ensure uniqueness across repeated alarm firings. How duplicate `incidentId` values are handled is discussed below.
 
