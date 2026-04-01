@@ -1,0 +1,348 @@
+---
+title: "AWS DevOps Agent 検証 — Custom Skills で調査品質はどう変わるか"
+description: "DevOps Agent の Custom Skills を作成し、同一インシデントシナリオで Skill あり/なしの調査結果を比較した。調査時間が 164秒→64秒に短縮され、報告フォーマットが Skill の指示に従った構造化された形式に変化した。"
+date: "2026-04-01"
+published: true
+featured: false
+categories: [infrastructure]
+tags: ["aws", "devops-agent", "custom-skills", "incident-response", "sre"]
+series: "aws-devops-agent"
+seriesOrder: 2
+---
+
+## はじめに
+
+[前回の記事](/ja/blog/2026/04/01/aws-devops-agent-ga-verification)では、AWS DevOps Agent を最小構成（単一アカウント + CloudWatch のみ）でセットアップし、stress-ng による CPU 高負荷インシデントを Chat 経由で調査した。結果、4分25秒で根本原因（stress-ng コマンドの実行）を正確に特定できた。
+
+しかし、実際の運用では「汎用的な調査」だけでは不十分な場面がある。チームごとに優先的に確認すべきメトリクスがあり、報告フォーマットにも組織のルールがある。DevOps Agent の GA で追加された **Custom Skills** は、こうした組織固有の調査手順をエージェントに教える機能である。
+
+Custom Skills は [agentskills.io](https://agentskills.io/) というオープン仕様のサブセットに基づいており、SKILL.md ファイルに Markdown で手順を記述する。主な特徴:
+
+- **Agent Type ターゲティング**: Generic（全タイプ）/ On-demand / Incident Triage / Incident RCA / Incident Mitigation / Evaluation から選択し、Skill の適用範囲を制御できる
+- **2つの作成方式**: Operator Web App での UI 作成と、references/ や assets/ を含む zip アップロード
+- **Active/Inactive 切り替え**: 削除せずに一時無効化が可能
+- **CLI 未対応**: 現時点では Skill の作成・管理は Operator Web App からのみ（CLI / SDK に skill 関連の API は存在しない）
+
+本記事では、EC2 CPU 高負荷インシデントに特化した Custom Skill を作成し、前回と同じ stress-ng シナリオで Skill あり/なしの調査結果を比較する。Custom Skills が調査プロセスと結果にどう影響するかを定量的に示す。
+
+前提条件:
+
+- [前回の記事](/ja/blog/2026/04/01/aws-devops-agent-ga-verification)で作成した Agent Space が稼働中であること
+- Operator Web App へのアクセス権限
+- AWS CLI v2、EC2 / CloudWatch の操作権限
+
+結果だけ見たい場合は[まとめ](#まとめ)に進んでほしい。
+
+## 準備
+
+### EC2 環境の再構築
+
+前回と同じ構成（EC2 t3.micro + stress-ng + CloudWatch アラーム）を再構築した。
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">EC2 + CloudWatch アラーム + stress-ng の構築手順</summary>
+
+```bash title="Terminal"
+REGION=ap-northeast-1
+
+AMI_ID=$(aws ssm get-parameters \
+  --names /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64 \
+  --query "Parameters[0].Value" --output text --region $REGION)
+
+SG_ID=$(aws ec2 create-security-group \
+  --group-name devops-agent-skills-verification \
+  --description "SG for DevOps Agent Skills verification" \
+  --region $REGION --query "GroupId" --output text)
+
+INSTANCE_ID=$(aws ec2 run-instances \
+  --image-id $AMI_ID --instance-type t3.micro \
+  --security-group-ids $SG_ID \
+  --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=devops-agent-skills-test}]" \
+  --region $REGION --query "Instances[0].InstanceId" --output text)
+
+aws ec2 wait instance-running --instance-ids $INSTANCE_ID --region $REGION
+
+# SSM Agent 起動待ち
+while true; do
+  STATUS=$(aws ssm describe-instance-information \
+    --filters "Key=InstanceIds,Values=${INSTANCE_ID}" \
+    --query "InstanceInformationList[0].PingStatus" \
+    --output text --region $REGION 2>/dev/null)
+  [ "$STATUS" = "Online" ] && break
+  echo "Waiting for SSM Agent..." && sleep 10
+done
+
+# CloudWatch アラーム
+aws cloudwatch put-metric-alarm \
+  --alarm-name "devops-agent-skills-high-cpu" \
+  --metric-name CPUUtilization --namespace AWS/EC2 \
+  --statistic Average --period 60 --threshold 80 \
+  --comparison-operator GreaterThanThreshold --evaluation-periods 1 \
+  --dimensions "Name=InstanceId,Value=${INSTANCE_ID}" \
+  --region $REGION
+
+# stress-ng 実行（30分間）
+aws ssm send-command \
+  --instance-ids $INSTANCE_ID \
+  --document-name "AWS-RunShellScript" \
+  --parameters '{"commands":["sudo dnf install -y stress-ng","nohup stress-ng --cpu 2 --timeout 1800 &"]}' \
+  --region $REGION
+```
+
+```bash title="Terminal (アラーム発火を確認)"
+while true; do
+  STATE=$(aws cloudwatch describe-alarms \
+    --alarm-names "devops-agent-skills-high-cpu" \
+    --query "MetricAlarms[0].StateValue" --output text \
+    --region $REGION)
+  echo "Alarm state: $STATE"
+  [ "$STATE" = "ALARM" ] && break
+  sleep 60
+done
+```
+
+</details>
+
+### Custom Skill の作成
+
+Operator Web App の Skills ページから、EC2 CPU 高負荷インシデントに特化した Skill を作成した。Operator Web App へは、AWS マネジメントコンソールの DevOps Agent ページから Agent Space を選択し、「Operator access」ボタンで開く。左メニューの「Skills」をクリックすると Skills ページに遷移する。
+
+Skill には以下の3つの要素を含めた:
+
+1. **調査の優先順位**: T系インスタンスの CPU クレジット分析を優先的に実施する手順
+2. **プロセスレベルの原因特定**: SSM コマンド履歴から負荷生成ツールの実行を確認する手順
+3. **報告フォーマット**: 影響範囲 → 根本原因（意図的/非意図的の判定を含む） → 対策（即時/短期/長期）の3部構成
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">SKILL.md の全文（Operator Web App で作成）</summary>
+
+Operator Web App の Skills ページで「Add skill」→「Create skill」を選択し、以下を入力した。
+
+- **Name**: `ec2-cpu-investigation`
+- **Description**: `EC2 インスタンスの CPU 高負荷インシデントの調査手順。CloudWatch アラーム発火時に使用する。T系バースタブルインスタンスの CPU クレジット枯渇、プロセスレベルの原因特定、SSM コマンド履歴の確認を含む。CPU 使用率が高い、CPUUtilization アラーム、バースト性能の問題が疑われる場合に使用すること。`
+- **Agent Type**: Generic（全タイプに適用）
+- **Instructions**:
+
+```markdown title="SKILL.md (Instructions)"
+# EC2 CPU 高負荷インシデント調査手順
+
+## 調査の優先順位
+
+以下の順序で調査を進めること：
+
+### Step 1: インスタンスの基本情報確認
+- インスタンスタイプを確認し、T系（t3, t3a, t4g）の場合は Step 2 を必ず実施
+- インスタンスの起動時刻を確認し、起動直後（5分以内）の場合は初期化処理の可能性を考慮
+
+### Step 2: T系インスタンスの CPU クレジット分析（T系の場合のみ）
+以下の CloudWatch メトリクスを必ず確認すること：
+- `CPUCreditBalance`: 残高が 0 の場合、バースト性能が制限されている
+- `CPUCreditUsage`: クレジット消費速度
+- `CPUSurplusCreditBalance`: サープラスクレジットの使用状況（追加課金の有無）
+- `CPUSurplusCreditsCharged`: 課金されたサープラスクレジット
+
+各インスタンスタイプのベースライン性能：
+| タイプ | vCPU | ベースライン |
+|--------|------|-------------|
+| t3.micro | 2 | 10% |
+| t3.small | 2 | 20% |
+| t3.medium | 2 | 20% |
+| t3.large | 2 | 30% |
+
+### Step 3: プロセスレベルの原因特定
+- SSM RunCommand の履歴を確認し、最近実行されたコマンドを特定
+- 特に `stress-ng`, `stress`, `dd`, `yes` などの負荷生成ツールの実行を確認
+- CloudWatch Agent が導入されている場合は `procstat` メトリクスを確認
+
+### Step 4: インフラストラクチャ変更の確認
+- CloudTrail で直近のインスタンス関連イベントを確認
+- セキュリティグループの変更、IAM ロールの変更を確認
+
+## 報告フォーマット
+
+調査結果は以下のフォーマットで報告すること：
+
+### 1. 影響範囲
+- 影響を受けるリソース（インスタンス ID、関連サービス）
+- 影響の開始時刻と継続時間
+
+### 2. 根本原因
+- 原因の詳細（プロセス名、コマンド、実行者）
+- 原因が意図的か非意図的かの判定
+
+### 3. 対策
+- **即時対策**: 今すぐ実行すべきアクション
+- **短期対策**: 1週間以内に実施すべき改善
+- **長期対策**: アーキテクチャレベルの改善提案
+```
+
+</details>
+
+## 検証: Custom Skill は調査品質をどう変えるか
+
+同一の stress-ng シナリオ（EC2 t3.micro、CPU 100%、CloudWatch アラーム ALARM 状態）で、Skill なし → Skill あり の順に Chat から調査を依頼し、結果を比較した。Chat は Operator Web App の左メニューから「Chat」を選択して開く。
+
+なお、stress-ng は `--timeout 1800`（30分）で自動終了する。Skill の作成に時間がかかる場合は、stress-ng を再実行してから調査を依頼すること。
+
+### ベースライン: Skill なしでの調査
+
+Skill を作成する前に、まず Skill なしの状態で調査を実行した。
+
+Chat への質問: 「ap-northeast-1 リージョンのインスタンス i-0047085f8f68e7513 で CloudWatch アラーム devops-agent-skills-high-cpu が発火中です。現在も CPU 使用率が高い状態が続いています。原因を調査して根本原因を特定してください。」
+
+結果:
+- **調査時間**: 164秒（2分44秒）
+- **ツール呼び出し**: 38回
+- **skill_read**: 2回（built-in skills。Custom Skill は未作成のため読み込まれていない）
+- **根本原因**: stress-ng を正確に特定
+- **報告フォーマット**: 自由形式（サマリー → タイムライン → 発見事項 → リスク評価 → 推奨事項）
+- **対策の分類**: 短期的/中長期的の2段階
+
+DevOps Agent は Chat からの質問に対して、内部で複数の「ツール」を呼び出して情報を収集する。ツールには AWS API の実行（`use_aws`）、CloudTrail イベントの検索（`lookup_cloudtrail_events`）、Skill の読み込み（`skill_read`）などがある。これらの呼び出し回数と種類は、EventStream API のレスポンスから確認できる。
+
+調査は正確だったが、報告フォーマットはエージェントが自由に決定しており、対策も「短期/中長期」という粗い分類だった。
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">Skill なし調査の応答（抜粋）</summary>
+
+> **調査結果：EC2 インスタンス i-0047085f8f68e7513 の高 CPU 使用率の根本原因**
+>
+> **結論**
+> この高 CPU 使用率は**意図的なストレステスト**によるもので、本番環境の障害ではありません。ユーザー "tahshiny" が `stress-ng` ユーティリティを使用して CPU ストレステストを実行しています。
+>
+> **根本原因：CPU ストレステストの実行中**
+> 現在、AWS Systems Manager (SSM) 経由で実行された `stress-ng --cpu 2 --timeout 1800` コマンドが稼働中です。
+>
+> **主な発見事項**
+> 1. **意図的なテスト**：本番障害ではなく、検証目的の計画的なストレステスト
+> 2. **T3.micro の CPU クレジット枯渇**：CPU クレジット残高：0、サープラスクレジットを使用中
+>
+> **推奨アクション**
+>
+> **短期的な対策：**
+> - CloudWatch Agent をインストールしてプロセスレベルの監視を有効化
+>
+> **中長期的な対策：**
+> - **t3.small 以上へのアップグレード**を検討
+
+報告は「結論 → 根本原因 → タイムライン → 発見事項 → 推奨アクション」の自由形式で、対策は「短期/中長期」の2段階だった。
+
+</details>
+
+### Skill を追加して再調査
+
+`ec2-cpu-investigation` Skill を Active にした状態で、同じ質問を新しい Chat セッションから送信した。
+
+結果:
+- **調査時間**: 64秒（1分4秒）
+- **ツール呼び出し**: 11回
+- **skill_read**: 1回（`ec2-cpu-investigation` — 作成した Custom Skill）
+- **根本原因**: stress-ng を正確に特定
+- **報告フォーマット**: Skill の指示に基づく構造化された形式（影響範囲 → 根本原因 → 原因判定 → 対策）
+- **対策の分類**: 即時/短期/長期の3段階（Skill の指示通り）
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">Skill あり調査の応答（抜粋）</summary>
+
+> **🔍 調査結果報告**
+>
+> **1. 影響範囲**
+> - **影響リソース**: EC2 インスタンス `i-0047085f8f68e7513` (devops-agent-skills-test)
+> - **インスタンスタイプ**: t3.micro (vCPU: 2, ベースライン性能: 10%)
+> - **影響開始時刻**: 2026-04-01 03:05:00 UTC 頃
+>
+> **2. 根本原因**
+> **stress-ng による意図的な負荷生成テストが実行中です。**
+>
+> **CPU クレジットの状況**:
+> - **CPUCreditBalance**: 0（クレジット完全枯渇）
+> - **CPUSurplusCreditBalance**: 26.5（追加課金クレジットを使用中）
+>
+> **3. 原因判定**
+> **意図的な負荷テスト**と判断されます。
+>
+> **4. 対策**
+>
+> **即時対策**
+> 1. **stress-ng プロセスの停止**
+>
+> **短期対策（1週間以内）**
+> - **負荷テスト用の別環境を用意**
+>
+> **長期対策**
+> - **負荷テスト自動化の構築**
+
+Skill で指定した「影響範囲 → 根本原因 → 対策」の構造が反映され、「原因判定」が独立セクションとして追加されていた。対策は「即時/短期/長期」の3段階に分類されていた。
+
+</details>
+
+### 比較分析
+
+| 項目 | Skill なし | Skill あり |
+| --- | --- | --- |
+| 調査時間 | 164秒 | 64秒 |
+| ツール呼び出し数 | 38回 | 11回 |
+| 読み込まれた Skill | built-in 2つ | Custom Skill 1つ |
+| 根本原因の特定 | ✅ stress-ng | ✅ stress-ng |
+| CPUCreditBalance の言及 | あり | あり（数値付き: 0） |
+| CPUSurplusCreditBalance の言及 | あり | あり（数値付き: 26.5） |
+| ベースライン性能の説明 | 10% と記載 | 10% と記載（Skill の表を参照） |
+| 報告フォーマット | 自由形式 | Skill の指示に基づく構造化形式 |
+| 対策の分類 | 短期/中長期 | 即時/短期/長期 |
+| 意図的/非意図的の判定 | あり | あり（Skill の指示に従い明示的に記載） |
+
+最も顕著な差は **調査時間の短縮**（164秒 → 64秒、61% 短縮）と **ツール呼び出し数の削減**（38回 → 11回、71% 削減）である。Skill なしの調査では複数リージョンへの `describe_instances` 呼び出しなど広範な探索が行われていたのに対し、Skill ありの調査ではそれらが省略されていた。Skill の優先順位指定が探索範囲の絞り込みに寄与した可能性があるが、2回目の実行であるためエージェントの内部状態の変化も影響している可能性があり、因果関係は断定できない。
+
+報告フォーマットについては、Skill で指定した構造（影響範囲、根本原因、対策）が反映された。エージェントは Skill の3部構成をそのまま使うのではなく、「原因判定」を独立セクションとして追加した4部構成で出力した。ただし、Skill で指定した要素（影響範囲、根本原因、意図的/非意図的の判定、即時/短期/長期の対策）はすべて含まれていた。
+
+ただし、今回の比較は同一シナリオの2回実行であり、サンプル数は1である。調査時間の差にはネットワーク遅延や API レスポンス時間のばらつきも含まれるため、「Skill により常に 61% 短縮される」とは一般化できない。
+
+### 補足: Agent Type ターゲティングの動作確認
+
+Skill の Agent Type を「Incident RCA」のみに変更し、On-demand Chat から同じ質問を送信した。変更は Operator Web App の Skills ページで対象の Skill を開き、「Edit」→ Agent Type を「Generic」から「Incident RCA」に変更 →「Save」で行う。
+
+結果:
+- **skill_read**: 0回（Custom Skill は読み込まれなかった）
+- **ツール呼び出し**: 2回のみ
+- **応答**: 深い調査を実行せず、「調査を開始してよろしいでしょうか？」と確認を求めた
+
+Agent Type を「Generic」に戻すと、Skill が再び利用可能な状態になる。Agent Type ターゲティングにより、Skill の適用範囲を意図通りに制御できることが確認できた。
+
+## まとめ
+
+Custom Skills を1つ追加するだけで、DevOps Agent の調査プロセスに明確な変化が見られた。
+
+- **調査の効率化** — Skill ありの調査ではツール呼び出しが 38回から 11回に減少し、調査時間が 164秒から 64秒に短縮された。比較分析で述べた通り、Skill の優先順位指定とエージェントの内部状態の変化のどちらが主因かは断定できないが、広範なリージョンスキャンが省略された事実は確認できた
+- **報告フォーマットの制御** — Skill で指定した要素（影響範囲/根本原因/意図的・非意図的の判定/即時・短期・長期の対策）がすべて出力に含まれていた。ただし、Skill の3部構成がそのまま使われるのではなく、「原因判定」が独立セクションとして追加された4部構成になっていた
+- **Agent Type ターゲティング** — Skill を「Incident RCA」のみにターゲットすると、On-demand Chat では読み込まれないことを確認した。ドキュメントによると、Agent Type を使い分けることで調査フェーズごとに異なる Skill を適用できるが、今回はその運用パターンまでは検証していない
+- **CLI 未対応の制約** — Skill の作成・管理は Operator Web App からのみで、CLI / SDK からは操作できない。IaC での管理や CI/CD パイプラインへの組み込みは現時点では不可能である
+
+Skill 設計について、今回の検証で効果が確認できた3つのポイント（1つの Skill、1つのシナリオでの観察であり、一般化には追加検証が必要）:
+
+1. **優先的に確認すべきデータソースの指定** — 「T系インスタンスの場合は CPU クレジットメトリクスを必ず確認」のように、条件付きの優先順位を記述する
+2. **報告フォーマットの指定** — 「影響範囲 → 根本原因 → 対策」のように、出力の構造を明示する
+3. **判定基準の提供** — 「意図的か非意図的かを判定する」のように、エージェントに求める判断の軸を記述する
+
+## クリーンアップ
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">リソース削除手順</summary>
+
+```bash title="Terminal"
+REGION=ap-northeast-1
+
+# EC2 インスタンス終了
+aws ec2 terminate-instances --instance-ids $INSTANCE_ID --region $REGION
+
+# CloudWatch アラーム削除
+aws cloudwatch delete-alarms \
+  --alarm-names "devops-agent-skills-high-cpu" --region $REGION
+
+# インスタンス終了後にセキュリティグループ削除
+aws ec2 wait instance-terminated --instance-ids $INSTANCE_ID --region $REGION
+aws ec2 delete-security-group --group-id $SG_ID --region $REGION
+```
+
+Operator Web App で作成した Custom Skill は、Skills ページから削除またはInactive に変更できる。Agent Space と IAM ロールは次回の検証で再利用するため残している。
+
+</details>

@@ -1,0 +1,348 @@
+---
+title: "Verifying AWS DevOps Agent — How Custom Skills Change Investigation Quality"
+description: "Created a Custom Skill for DevOps Agent and compared investigation results with and without it on the same incident scenario. Investigation time dropped from 164s to 64s, and the report followed the Skill's structured format."
+date: "2026-04-01"
+published: true
+featured: false
+categories: [infrastructure]
+tags: ["aws", "devops-agent", "custom-skills", "incident-response", "sre"]
+series: "aws-devops-agent"
+seriesOrder: 2
+---
+
+## Introduction
+
+In the [previous article](/en/blog/2026/04/01/aws-devops-agent-ga-verification), I set up AWS DevOps Agent in a minimal configuration (single account + CloudWatch only) and investigated a stress-ng CPU spike via Chat. The agent identified the root cause (stress-ng command execution) in 4 minutes 25 seconds.
+
+In practice, however, generic investigation isn't always enough. Teams have specific metrics to check first, and organizations have reporting format requirements. **Custom Skills**, added in the GA release, let you teach the agent your organization-specific investigation procedures.
+
+Custom Skills are based on a subset of the [agentskills.io](https://agentskills.io/) open specification, with instructions written in Markdown in a SKILL.md file. Key features:
+
+- **Agent Type targeting**: Choose from Generic (all types) / On-demand / Incident Triage / Incident RCA / Incident Mitigation / Evaluation to control where Skills apply
+- **Two creation methods**: UI creation in the Operator Web App, or zip upload with references/ and assets/ directories
+- **Active/Inactive toggle**: Temporarily disable without deleting
+- **No CLI support**: Skill management is only available through the Operator Web App (no skill-related APIs exist in CLI or SDK)
+
+This article creates a Custom Skill for EC2 CPU spike incidents and compares investigation results with and without the Skill on the same stress-ng scenario, quantifying how Custom Skills affect the investigation process and output.
+
+Prerequisites:
+
+- An active Agent Space from the [previous article](/en/blog/2026/04/01/aws-devops-agent-ga-verification)
+- Operator Web App access
+- AWS CLI v2, EC2/CloudWatch permissions
+
+If you only want the results, skip to [Summary](#summary).
+
+## Setup
+
+### EC2 Environment
+
+I rebuilt the same configuration from the previous article (EC2 t3.micro + stress-ng + CloudWatch alarm).
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">EC2 + CloudWatch alarm + stress-ng setup steps</summary>
+
+```bash title="Terminal"
+REGION=ap-northeast-1
+
+AMI_ID=$(aws ssm get-parameters \
+  --names /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64 \
+  --query "Parameters[0].Value" --output text --region $REGION)
+
+SG_ID=$(aws ec2 create-security-group \
+  --group-name devops-agent-skills-verification \
+  --description "SG for DevOps Agent Skills verification" \
+  --region $REGION --query "GroupId" --output text)
+
+INSTANCE_ID=$(aws ec2 run-instances \
+  --image-id $AMI_ID --instance-type t3.micro \
+  --security-group-ids $SG_ID \
+  --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=devops-agent-skills-test}]" \
+  --region $REGION --query "Instances[0].InstanceId" --output text)
+
+aws ec2 wait instance-running --instance-ids $INSTANCE_ID --region $REGION
+
+# Wait for SSM Agent
+while true; do
+  STATUS=$(aws ssm describe-instance-information \
+    --filters "Key=InstanceIds,Values=${INSTANCE_ID}" \
+    --query "InstanceInformationList[0].PingStatus" \
+    --output text --region $REGION 2>/dev/null)
+  [ "$STATUS" = "Online" ] && break
+  echo "Waiting for SSM Agent..." && sleep 10
+done
+
+# CloudWatch alarm
+aws cloudwatch put-metric-alarm \
+  --alarm-name "devops-agent-skills-high-cpu" \
+  --metric-name CPUUtilization --namespace AWS/EC2 \
+  --statistic Average --period 60 --threshold 80 \
+  --comparison-operator GreaterThanThreshold --evaluation-periods 1 \
+  --dimensions "Name=InstanceId,Value=${INSTANCE_ID}" \
+  --region $REGION
+
+# Run stress-ng (30 minutes)
+aws ssm send-command \
+  --instance-ids $INSTANCE_ID \
+  --document-name "AWS-RunShellScript" \
+  --parameters '{"commands":["sudo dnf install -y stress-ng","nohup stress-ng --cpu 2 --timeout 1800 &"]}' \
+  --region $REGION
+```
+
+```bash title="Terminal (confirm alarm fires)"
+while true; do
+  STATE=$(aws cloudwatch describe-alarms \
+    --alarm-names "devops-agent-skills-high-cpu" \
+    --query "MetricAlarms[0].StateValue" --output text \
+    --region $REGION)
+  echo "Alarm state: $STATE"
+  [ "$STATE" = "ALARM" ] && break
+  sleep 60
+done
+```
+
+</details>
+
+### Creating the Custom Skill
+
+From the Skills page in the Operator Web App, I created a Skill specialized for EC2 CPU spike incidents. To access the Operator Web App, go to the DevOps Agent page in the AWS Management Console, select your Agent Space, and click "Operator access." Then click "Skills" in the left menu.
+
+The Skill contains three elements:
+
+1. **Investigation priority**: Procedures to prioritize CPU credit analysis for T-series instances
+2. **Process-level root cause identification**: Steps to check SSM command history for load-generating tools
+3. **Report format**: A 3-part structure — Impact Scope → Root Cause (including intentional/unintentional determination) → Actions (immediate/short-term/long-term)
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">Full SKILL.md content (created in Operator Web App)</summary>
+
+In the Operator Web App Skills page, select "Add skill" → "Create skill" and enter:
+
+- **Name**: `ec2-cpu-investigation`
+- **Description**: `Investigation procedures for EC2 CPU spike incidents. Use when CloudWatch CPU alarms fire. Covers T-series burstable instance CPU credit exhaustion, process-level root cause identification, and SSM command history analysis. Use when CPU utilization is high, CPUUtilization alarms fire, or burst performance issues are suspected.`
+- **Agent Type**: Generic (all agent types)
+- **Instructions**:
+
+```markdown title="SKILL.md (Instructions)"
+# EC2 CPU Spike Investigation Procedures
+
+## Investigation Priority
+
+Follow this order:
+
+### Step 1: Basic Instance Information
+- Check instance type; if T-series (t3, t3a, t4g), always proceed to Step 2
+- Check instance launch time; if launched within 5 minutes, consider initialization processes
+
+### Step 2: T-Series CPU Credit Analysis (T-series only)
+Always check these CloudWatch metrics:
+- `CPUCreditBalance`: If 0, burst performance is throttled
+- `CPUCreditUsage`: Credit consumption rate
+- `CPUSurplusCreditBalance`: Surplus credit usage (additional charges)
+- `CPUSurplusCreditsCharged`: Charged surplus credits
+
+Baseline performance by instance type:
+| Type | vCPU | Baseline |
+|------|------|----------|
+| t3.micro | 2 | 10% |
+| t3.small | 2 | 20% |
+| t3.medium | 2 | 20% |
+| t3.large | 2 | 30% |
+
+### Step 3: Process-Level Root Cause Identification
+- Check SSM RunCommand history for recently executed commands
+- Look for load-generating tools: `stress-ng`, `stress`, `dd`, `yes`
+- If CloudWatch Agent is installed, check `procstat` metrics
+
+### Step 4: Infrastructure Change Review
+- Check CloudTrail for recent instance-related events
+- Review security group changes, IAM role changes
+
+## Report Format
+
+Report findings in this format:
+
+### 1. Impact Scope
+- Affected resources (instance ID, related services)
+- Impact start time and duration
+
+### 2. Root Cause
+- Cause details (process name, command, executor)
+- Determination: intentional or unintentional
+
+### 3. Actions
+- **Immediate**: Actions to take right now
+- **Short-term**: Improvements within 1 week
+- **Long-term**: Architecture-level improvements
+```
+
+</details>
+
+## Verification: How Custom Skills Change Investigation Quality
+
+Using the same stress-ng scenario (EC2 t3.micro, CPU 100%, CloudWatch alarm in ALARM state), I ran investigations via Chat without and with the Skill, then compared results. Open Chat from the "Chat" option in the Operator Web App's left menu.
+
+Note: stress-ng auto-terminates after `--timeout 1800` (30 minutes). If Skill creation takes a while, re-run stress-ng before starting the investigation.
+
+### Baseline: Investigation Without Skill
+
+Before creating the Skill, I ran the investigation without it.
+
+Chat prompt: "CloudWatch alarm devops-agent-skills-high-cpu is firing for instance i-0047085f8f68e7513 in ap-northeast-1. CPU utilization remains high. Investigate and identify the root cause."
+
+Results:
+- **Investigation time**: 164 seconds (2m 44s)
+- **Tool calls**: 38
+- **skill_read**: 2 (built-in skills; Custom Skill had not been created yet)
+- **Root cause**: Correctly identified stress-ng
+- **Report format**: Free-form (conclusion → root cause → timeline → findings → recommendations)
+- **Action categories**: Short-term / medium-to-long-term (2 tiers)
+
+DevOps Agent internally invokes multiple "tools" to gather information when responding to a Chat query. Tools include AWS API calls (`use_aws`), CloudTrail event lookups (`lookup_cloudtrail_events`), and Skill loading (`skill_read`). The number and types of tool calls can be observed from the EventStream API response.
+
+The investigation was accurate, but the report format was determined by the agent, and actions used a coarse 2-tier classification.
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">Baseline investigation response (excerpt)</summary>
+
+> **Investigation Report: High CPU Utilization on EC2 Instance i-0047085f8f68e7513**
+>
+> **Conclusion**
+> This high CPU utilization is caused by an **intentional stress test**, not a production incident. User "tahshiny" is running the `stress-ng` utility for CPU stress testing.
+>
+> **Root Cause: CPU Stress Test Running**
+> Currently, `stress-ng --cpu 2 --timeout 1800` executed via AWS Systems Manager (SSM) is active.
+>
+> **Key Findings**
+> 1. **Intentional test**: Planned stress test for verification purposes
+> 2. **T3.micro CPU credit exhaustion**: CPU credit balance: 0, surplus credits in use
+>
+> **Recommended Actions**
+>
+> **Short-term:**
+> - Install CloudWatch Agent for process-level monitoring
+>
+> **Medium-to-long-term:**
+> - Consider **upgrading to t3.small or larger**
+
+The report used a free-form structure (conclusion → root cause → timeline → findings → recommendations) with a 2-tier action classification.
+
+</details>
+
+### Investigation With Skill
+
+With `ec2-cpu-investigation` Skill set to Active, I sent the same prompt from a new Chat session.
+
+Results:
+- **Investigation time**: 64 seconds (1m 4s)
+- **Tool calls**: 11
+- **skill_read**: 1 (`ec2-cpu-investigation` — the Custom Skill)
+- **Root cause**: Correctly identified stress-ng
+- **Report format**: Skill-guided structured format (Impact Scope → Root Cause → Determination → Actions)
+- **Action categories**: Immediate / short-term / long-term (3 tiers, as specified in Skill)
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">Skill-enabled investigation response (excerpt)</summary>
+
+> **🔍 Investigation Report**
+>
+> **1. Impact Scope**
+> - **Affected Resource**: EC2 instance `i-0047085f8f68e7513` (devops-agent-skills-test)
+> - **Instance Type**: t3.micro (vCPU: 2, baseline: 10%)
+> - **Impact Start**: 2026-04-01 03:05:00 UTC approx.
+>
+> **2. Root Cause**
+> **Intentional load generation test using stress-ng is running.**
+>
+> **CPU Credit Status**:
+> - **CPUCreditBalance**: 0 (fully exhausted)
+> - **CPUSurplusCreditBalance**: 26.5 (surplus credits in use)
+>
+> **3. Determination**
+> Determined to be an **intentional load test**.
+>
+> **4. Actions**
+>
+> **Immediate**
+> 1. **Stop the stress-ng process**
+>
+> **Short-term (within 1 week)**
+> - **Set up a separate environment for load testing**
+>
+> **Long-term**
+> - **Build load test automation**
+
+The Skill's "Impact Scope → Root Cause → Actions" structure was reflected, with "Determination" added as a separate section. Actions were classified into 3 tiers.
+
+</details>
+
+### Comparison
+
+| Item | Without Skill | With Skill |
+| --- | --- | --- |
+| Investigation time | 164s | 64s |
+| Tool calls | 38 | 11 |
+| Skills loaded | 2 built-in | 1 Custom Skill |
+| Root cause identified | ✅ stress-ng | ✅ stress-ng |
+| CPUCreditBalance mentioned | Yes | Yes (with value: 0) |
+| CPUSurplusCreditBalance mentioned | Yes | Yes (with value: 26.5) |
+| Baseline performance explained | 10% | 10% (referencing Skill's table) |
+| Report format | Free-form | Skill-guided structured format |
+| Action categories | Short-term / medium-to-long-term | Immediate / short-term / long-term |
+| Intentional/unintentional determination | Yes | Yes (explicitly per Skill instructions) |
+
+The most notable differences were **investigation time reduction** (164s → 64s, 61% faster) and **tool call reduction** (38 → 11, 71% fewer). The baseline investigation included broad exploration such as `describe_instances` calls across multiple regions, which were absent in the Skill-enabled investigation. The Skill's priority specification may have contributed to narrowing the search scope, but since this was the second execution, changes in the agent's internal state could also be a factor — the causal relationship cannot be definitively established.
+
+The report format reflected the Skill's structure (Impact Scope, Root Cause, Actions). Rather than using the Skill's 3-part structure as-is, the agent output a 4-part structure with "Determination" added as a separate section. However, all elements specified in the Skill (impact scope, root cause, intentional/unintentional determination, immediate/short-term/long-term actions) were present in the output.
+
+Note that this comparison is based on a single execution of each scenario. The time difference includes network latency and API response time variance, so "Skills always reduce investigation time by 61%" cannot be generalized.
+
+### Agent Type Targeting
+
+I changed the Skill's Agent Type to "Incident RCA" only and sent the same prompt from an On-demand Chat. To change it, open the Skill in the Operator Web App Skills page, click "Edit," change Agent Type from "Generic" to "Incident RCA," and click "Save."
+
+Results:
+- **skill_read**: 0 (Custom Skill was not loaded)
+- **Tool calls**: 2 only
+- **Response**: Did not perform a deep investigation; asked "Shall I start the investigation?"
+
+After reverting Agent Type to "Generic," the Skill becomes available again. Agent Type targeting controls Skill applicability as intended.
+
+## Summary
+
+Adding a single Custom Skill produced clear changes in DevOps Agent's investigation process.
+
+- **Investigation efficiency** — With the Skill, tool calls dropped from 38 to 11 and investigation time from 164s to 64s. As noted in the comparison analysis, whether the Skill's priority specification or changes in the agent's internal state was the primary factor cannot be determined, but the elimination of broad region scanning was confirmed
+- **Report format control** — All elements specified in the Skill (impact scope, root cause, intentional/unintentional determination, immediate/short-term/long-term actions) were present in the output. However, the agent used a 4-part structure with "Determination" as a separate section rather than the Skill's 3-part structure
+- **Agent Type targeting** — Confirmed that targeting a Skill to "Incident RCA" only prevents it from loading in On-demand Chat. According to the documentation, Agent Types can be used to apply different Skills to different investigation phases, but this operational pattern was not tested in this verification
+- **No CLI support** — Skill management is Operator Web App only; no CLI/SDK APIs exist. IaC management and CI/CD pipeline integration are not possible at this time
+
+Observations on Skill design from this verification (based on a single Skill and scenario; additional testing is needed to generalize):
+
+1. **Specify priority data sources** — Write conditional priorities like "if T-series instance, always check CPU credit metrics"
+2. **Specify report format** — Explicitly define output structure like "Impact Scope → Root Cause → Actions"
+3. **Provide judgment criteria** — Describe the decision axes you want the agent to apply, like "determine whether the cause is intentional or unintentional"
+
+## Cleanup
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">Resource deletion steps</summary>
+
+```bash title="Terminal"
+REGION=ap-northeast-1
+
+# Terminate EC2 instance
+aws ec2 terminate-instances --instance-ids $INSTANCE_ID --region $REGION
+
+# Delete CloudWatch alarm
+aws cloudwatch delete-alarms \
+  --alarm-names "devops-agent-skills-high-cpu" --region $REGION
+
+# Delete security group after instance terminates
+aws ec2 wait instance-terminated --instance-ids $INSTANCE_ID --region $REGION
+aws ec2 delete-security-group --group-id $SG_ID --region $REGION
+```
+
+The Custom Skill created in the Operator Web App can be deleted or set to Inactive from the Skills page. The Agent Space and IAM roles are kept for future verification.
+
+</details>
