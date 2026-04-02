@@ -1,0 +1,23 @@
+---
+title: "ECS Managed Instances daemons require a dedicated IAM policy"
+description: "If ECS Managed Daemons won't start, check that the instance profile uses AmazonECSInstanceRolePolicyForManagedInstances. The legacy AmazonEC2ContainerServiceforEC2Role won't work."
+date: "2026-04-02"
+published: true
+tags: ["aws", "ecs", "managed-instances", "iam"]
+---
+
+While verifying ECS Managed Daemons, daemon tasks refused to start — instances stuck in `REGISTERING`, no log streams created, and the circuit breaker returned `ROLLBACK_SUCCESSFUL`. App tasks worked fine without daemons.
+
+The culprit was the instance profile policy. I had attached `AmazonEC2ContainerServiceforEC2Role` (the legacy EC2 launch type policy), but Managed Instances requires the dedicated `AmazonECSInstanceRolePolicyForManagedInstances`.
+
+```bash title="Terminal"
+# ❌ Daemons won't start with this
+aws iam attach-role-policy --role-name ecsInstanceRole \
+  --policy-arn arn:aws:iam::aws:policy/service-role/AmazonEC2ContainerServiceforEC2Role
+
+# ✅ Dedicated Managed Instances policy
+aws iam attach-role-policy --role-name ecsInstanceRole \
+  --policy-arn arn:aws:iam::aws:policy/AmazonECSInstanceRolePolicyForManagedInstances
+```
+
+It's documented in the [instance profile guide](https://docs.aws.amazon.com/AmazonECS/latest/developerguide/managed-instances-instance-profile.html), but if you have existing ECS experience, you'll instinctively reach for the legacy policy.

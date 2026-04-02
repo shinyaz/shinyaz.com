@@ -1,0 +1,23 @@
+---
+title: "ECS Managed Instances のデーモンには専用の IAM ポリシーが必要"
+description: "ECS Managed Daemons が起動しない場合、インスタンスプロファイルに AmazonECSInstanceRolePolicyForManagedInstances をアタッチしているか確認する。従来の AmazonEC2ContainerServiceforEC2Role では動かない。"
+date: "2026-04-02"
+published: true
+tags: ["aws", "ecs", "managed-instances", "iam"]
+---
+
+ECS Managed Daemons の検証中、デーモンタスクが一切起動せずインスタンスが `REGISTERING` のまま停滞する問題に遭遇した。デーモンなしならアプリタスクは正常に起動する。ログストリームも作成されず、サーキットブレーカーが `ROLLBACK_SUCCESSFUL` を返す状態だった。
+
+原因はインスタンスプロファイルにアタッチしたポリシーだった。従来の EC2 起動タイプで使う `AmazonEC2ContainerServiceforEC2Role` をアタッチしていたが、Managed Instances には専用の `AmazonECSInstanceRolePolicyForManagedInstances` が必要である。
+
+```bash title="Terminal"
+# ❌ これではデーモンが起動しない
+aws iam attach-role-policy --role-name ecsInstanceRole \
+  --policy-arn arn:aws:iam::aws:policy/service-role/AmazonEC2ContainerServiceforEC2Role
+
+# ✅ Managed Instances 専用ポリシー
+aws iam attach-role-policy --role-name ecsInstanceRole \
+  --policy-arn arn:aws:iam::aws:policy/AmazonECSInstanceRolePolicyForManagedInstances
+```
+
+[公式ドキュメント](https://docs.aws.amazon.com/AmazonECS/latest/developerguide/managed-instances-instance-profile.html)にも明記されているが、既存の ECS 経験者ほど従来のポリシーを使いがちなハマりポイントだった。
