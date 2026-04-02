@@ -8,7 +8,7 @@ tags: ["aws", "ecs", "managed-instances", "iam"]
 
 While verifying ECS Managed Daemons, daemon tasks refused to start — instances stuck in `REGISTERING`, no log streams created, and the circuit breaker returned `ROLLBACK_SUCCESSFUL`. App tasks worked fine without daemons.
 
-The culprit was the instance profile policy. I had attached `AmazonEC2ContainerServiceforEC2Role` (the legacy EC2 launch type policy), but Managed Instances requires the dedicated `AmazonECSInstanceRolePolicyForManagedInstances`.
+The culprit was the instance profile policy. I had attached `AmazonEC2ContainerServiceforEC2Role` (the legacy EC2 launch type policy), but Managed Instances requires the dedicated `AmazonECSInstanceRolePolicyForManagedInstances`. This was one of the issues — the correct policy is a prerequisite for daemons to start.
 
 ```bash title="Terminal"
 # ❌ Daemons won't start with this

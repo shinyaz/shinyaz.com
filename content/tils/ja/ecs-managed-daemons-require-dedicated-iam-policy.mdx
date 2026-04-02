@@ -8,7 +8,7 @@ tags: ["aws", "ecs", "managed-instances", "iam"]
 
 ECS Managed Daemons の検証中、デーモンタスクが一切起動せずインスタンスが `REGISTERING` のまま停滞する問題に遭遇した。デーモンなしならアプリタスクは正常に起動する。ログストリームも作成されず、サーキットブレーカーが `ROLLBACK_SUCCESSFUL` を返す状態だった。
 
-原因はインスタンスプロファイルにアタッチしたポリシーだった。従来の EC2 起動タイプで使う `AmazonEC2ContainerServiceforEC2Role` をアタッチしていたが、Managed Instances には専用の `AmazonECSInstanceRolePolicyForManagedInstances` が必要である。
+原因の一つはインスタンスプロファイルにアタッチしたポリシーだった。従来の EC2 起動タイプで使う `AmazonEC2ContainerServiceforEC2Role` をアタッチしていたが、Managed Instances には専用の `AmazonECSInstanceRolePolicyForManagedInstances` が必要である。
 
 ```bash title="Terminal"
 # ❌ これではデーモンが起動しない
