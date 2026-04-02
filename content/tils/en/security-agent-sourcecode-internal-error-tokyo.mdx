@@ -1,0 +1,18 @@
+---
+title: "Security Agent sourceCode hits INTERNAL_ERROR in Tokyo but works fine in us-east-1"
+description: "sourceCode pentest failed with INTERNAL_ERROR twice in ap-northeast-1 but worked normally in us-east-1 with the same configuration. documents works fine in Tokyo."
+date: "2026-04-02"
+published: true
+tags: ["aws", "security-agent", "penetration-testing"]
+---
+
+Ran a Security Agent pentest with `assets.sourceCode` pointing to a ZIP file on S3 in the Tokyo region (ap-northeast-1). Setup Testing Environment failed with INTERNAL_ERROR. Tried twice, same result both times.
+
+Isolation steps:
+- S3 Source Access Validation passed (file retrieval was fine)
+- Removing `sourceCode` from the same environment → test completed normally
+- Using `documents` with the same file → test completed normally
+
+Tried the exact same `sourceCode` configuration in us-east-1 — no INTERNAL_ERROR, completed successfully through all four phases. When `sourceCode` is used, CODE SCANNER [BUSINESS LOGIC / IMPORTANT FLOWS / FRAMEWORKS] runs during STATIC_ANALYSIS, and this processing may be unstable in the Tokyo region as of April 2026.
+
+If you need `sourceCode` in Tokyo, consider `documents` as a fallback. `documents` still improved detection by 2.6x over URL-only in our testing.

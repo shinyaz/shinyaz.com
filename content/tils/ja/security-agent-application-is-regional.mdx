@@ -1,0 +1,22 @@
+---
+title: "Security Agent の Application はリージョナルリソース（グローバルではない）"
+description: "Security Agent の Application は1アカウント1つではなく1リージョン1つ。東京で作成した Application は us-east-1 からは見えず、リージョンごとに create-application が必要。"
+date: "2026-04-02"
+published: true
+tags: ["aws", "security-agent", "iam"]
+---
+
+Security Agent のペンテストを us-east-1 で実行するため、東京で作成済みの Application ID を指定して `get-application` を呼んだところ:
+
+```text title="Output"
+ResourceNotFoundException: Application not found: app-f62503eb-...
+```
+
+`list-applications` で確認すると us-east-1 には Application が存在しなかった。東京の Application は us-east-1 からは見えない。
+
+```bash title="Terminal"
+# us-east-1 に新規作成が必要
+aws securityagent create-application --region us-east-1
+```
+
+東京で `create-application` を実行した際に「Only one application per account is allowed」というエラーが出たため、Application はアカウントにつき1つのグローバルリソースだと思い込んでいた。実際には**1リージョン1つのリージョナルリソース**だった。Agent Space、Target Domain、Pentest と同じくリージョンスコープである。

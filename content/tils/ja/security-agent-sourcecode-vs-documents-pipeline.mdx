@@ -1,0 +1,30 @@
+---
+title: "Security Agent の sourceCode と documents は処理パイプラインが根本的に異なる"
+description: "sourceCode は CODE SCANNER（BUSINESS LOGIC / IMPORTANT FLOWS / FRAMEWORKS）で体系的な静的分析を実行し PENTEST 前に脆弱性を検出する。documents は DOCUMENTS タスクで文脈処理するのみ。"
+date: "2026-04-02"
+published: true
+tags: ["aws", "security-agent", "penetration-testing"]
+---
+
+Security Agent のペンテストで `sourceCode` と `documents` の両方を試したところ、STATIC_ANALYSIS フェーズの内部タスクがまったく異なった。
+
+`documents` の場合:
+
+```text title="Output (list-pentest-job-tasks)"
+DOCUMENTS        → COMPLETED
+SCANNER          → COMPLETED
+TLS SCANNER      → COMPLETED
+CRAWLER          → IN_PROGRESS
+```
+
+`sourceCode` の場合:
+
+```text title="Output (list-pentest-job-tasks)"
+CODE SCANNER [BUSINESS LOGIC]      → IN_PROGRESS
+CODE SCANNER [IMPORTANT FLOWS]     → IN_PROGRESS
+CODE SCANNER [FRAMEWORKS]          → IN_PROGRESS
+SCANNER                            → COMPLETED
+TLS SCANNER                        → COMPLETED
+```
+
+`sourceCode` では3つの CODE SCANNER が並列で静的分析を実行し、**PENTEST 開始前に脆弱性を検出する**。VALIDATOR TASK が動的に再現検証してから CRAWLER → PENTEST に進む。結果として `sourceCode` は28件（`documents` の13件の2倍以上）の Finding を報告した。ただし静的分析の網羅性が高い分、FALSE_POSITIVE も4件発生した（VALIDATOR が自動判定）。

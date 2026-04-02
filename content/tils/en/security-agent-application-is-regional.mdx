@@ -1,0 +1,22 @@
+---
+title: "Security Agent Application is a regional resource, not global"
+description: "Security Agent Application is one per region, not one per account. An Application created in Tokyo is invisible from us-east-1. Each region requires its own create-application call."
+date: "2026-04-02"
+published: true
+tags: ["aws", "security-agent", "iam"]
+---
+
+Tried to reference a Tokyo-created Application ID when running a pentest in us-east-1:
+
+```text title="Output"
+ResourceNotFoundException: Application not found: app-f62503eb-...
+```
+
+`list-applications` in us-east-1 returned empty. The Tokyo Application is invisible from other regions.
+
+```bash title="Terminal"
+# Need to create a new one in us-east-1
+aws securityagent create-application --region us-east-1
+```
+
+When I first ran `create-application` in Tokyo and got "Only one application per account is allowed", I assumed Application was a global, account-wide resource. It's actually **one per region** — same scope as Agent Space, Target Domain, and Pentest.

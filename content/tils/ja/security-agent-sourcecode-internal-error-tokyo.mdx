@@ -1,0 +1,18 @@
+---
+title: "Security Agent の sourceCode は東京リージョンで INTERNAL_ERROR、us-east-1 では正常動作"
+description: "sourceCode を使ったペンテストが東京リージョンで2回連続 INTERNAL_ERROR になったが、us-east-1 では同じ設定で正常に動作した。documents は東京でも問題なし。"
+date: "2026-04-02"
+published: true
+tags: ["aws", "security-agent", "penetration-testing"]
+---
+
+Security Agent のペンテストで `assets.sourceCode` に S3 の ZIP ファイルを指定して東京リージョン（ap-northeast-1）で実行したところ、Setup Testing Environment で INTERNAL_ERROR が発生した。2回連続で同じ結果だった。
+
+エラーの切り分け:
+- S3 Source Access Validation は成功（ファイル読み取りは問題なし）
+- `sourceCode` を外して同じ環境でテストすると正常完了
+- `documents` に同じファイルを指定しても正常完了
+
+us-east-1 で同じ `sourceCode` 設定を試したところ、INTERNAL_ERROR は発生せず正常に PREFLIGHT → STATIC_ANALYSIS → PENTEST → FINALIZING と完了した。`sourceCode` 使用時は CODE SCANNER [BUSINESS LOGIC / IMPORTANT FLOWS / FRAMEWORKS] が実行されるが、この処理が東京リージョンでは不安定な可能性がある（2026年4月時点）。
+
+東京リージョンで `sourceCode` を使いたい場合は `documents` をフォールバックとして検討すべきだ。`documents` でも検出率は URL のみの2.6倍に向上した。

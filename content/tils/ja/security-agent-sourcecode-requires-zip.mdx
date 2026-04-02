@@ -1,0 +1,34 @@
+---
+title: "Security Agent の sourceCode は ZIP 必須、documents は生ファイルで指定できる"
+description: "create-pentest の assets.sourceCode に生ファイルを指定すると「Source code S3 URL must point to a ZIP archive」エラーになる。documents は生ファイルを直接指定可能。"
+date: "2026-04-02"
+published: true
+tags: ["aws", "security-agent", "penetration-testing"]
+---
+
+Security Agent のペンテストにソースコードを提供する方法は `sourceCode` と `documents` の2つがあるが、入力フォーマットが異なる。
+
+`sourceCode` に S3 上の .py ファイルを直接指定したところ:
+
+```text title="Output"
+ValidationException: Source code S3 URL must point to a ZIP archive.
+The provided URL appears to be a folder/prefix:
+https://bucket.s3.amazonaws.com/app.py.
+Please compress your code into a ZIP file (e.g., app.py.zip)
+```
+
+ZIP に圧縮してアップロードしたら通った:
+
+```bash title="Terminal"
+zip app.zip app.py
+aws s3 cp app.zip s3://bucket/app.zip
+aws securityagent update-pentest --assets '{"sourceCode": [{"s3Location": "s3://bucket/app.zip"}]}'
+```
+
+一方 `documents` は生ファイルを直接指定できる:
+
+```bash title="Terminal"
+aws securityagent update-pentest --assets '{"documents": [{"s3Location": "s3://bucket/app.py"}]}'
+```
+
+`sourceCode` は静的分析（CODE SCANNER）用、`documents` はテストの文脈情報用と用途が異なるため、入力フォーマットも違うようだ。

@@ -1,0 +1,30 @@
+---
+title: "Security Agent sourceCode and documents use fundamentally different processing pipelines"
+description: "sourceCode triggers CODE SCANNER (BUSINESS LOGIC / IMPORTANT FLOWS / FRAMEWORKS) for systematic static analysis that finds vulnerabilities before PENTEST. documents only runs a DOCUMENTS task for context processing."
+date: "2026-04-02"
+published: true
+tags: ["aws", "security-agent", "penetration-testing"]
+---
+
+Tested both `sourceCode` and `documents` for providing source code to Security Agent pentests. The internal tasks during STATIC_ANALYSIS were completely different.
+
+With `documents`:
+
+```text title="Output (list-pentest-job-tasks)"
+DOCUMENTS        → COMPLETED
+SCANNER          → COMPLETED
+TLS SCANNER      → COMPLETED
+CRAWLER          → IN_PROGRESS
+```
+
+With `sourceCode`:
+
+```text title="Output (list-pentest-job-tasks)"
+CODE SCANNER [BUSINESS LOGIC]      → IN_PROGRESS
+CODE SCANNER [IMPORTANT FLOWS]     → IN_PROGRESS
+CODE SCANNER [FRAMEWORKS]          → IN_PROGRESS
+SCANNER                            → COMPLETED
+TLS SCANNER                        → COMPLETED
+```
+
+`sourceCode` runs three CODE SCANNER tasks in parallel for systematic static analysis, **detecting vulnerabilities before the PENTEST phase even starts**. VALIDATOR TASKs then dynamically verify each finding before proceeding to CRAWLER → PENTEST. Result: `sourceCode` produced 28 findings (more than double `documents`' 13). The broader static analysis did produce 4 FALSE_POSITIVEs (auto-classified by VALIDATOR).

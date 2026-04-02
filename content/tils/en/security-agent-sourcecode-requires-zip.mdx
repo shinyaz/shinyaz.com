@@ -1,0 +1,34 @@
+---
+title: "Security Agent sourceCode requires ZIP archive, documents accepts raw files"
+description: "Specifying a raw file in create-pentest assets.sourceCode returns 'Source code S3 URL must point to a ZIP archive'. documents accepts raw files directly."
+date: "2026-04-02"
+published: true
+tags: ["aws", "security-agent", "penetration-testing"]
+---
+
+Security Agent has two ways to provide source code — `sourceCode` and `documents` — but they have different input format requirements.
+
+Pointing `sourceCode` at a raw .py file on S3:
+
+```text title="Output"
+ValidationException: Source code S3 URL must point to a ZIP archive.
+The provided URL appears to be a folder/prefix:
+https://bucket.s3.amazonaws.com/app.py.
+Please compress your code into a ZIP file (e.g., app.py.zip)
+```
+
+ZIP it first:
+
+```bash title="Terminal"
+zip app.zip app.py
+aws s3 cp app.zip s3://bucket/app.zip
+aws securityagent update-pentest --assets '{"sourceCode": [{"s3Location": "s3://bucket/app.zip"}]}'
+```
+
+Meanwhile `documents` accepts raw files directly:
+
+```bash title="Terminal"
+aws securityagent update-pentest --assets '{"documents": [{"s3Location": "s3://bucket/app.py"}]}'
+```
+
+`sourceCode` is for static analysis (CODE SCANNER), `documents` is for test context — different purposes, different input formats.
