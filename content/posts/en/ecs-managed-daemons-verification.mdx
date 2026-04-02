@@ -366,8 +366,12 @@ A comparison table with measured values:
 
 Managed Daemons provides more than just "lifecycle separation." The startup order guarantee, automatic instance replacement, and auto-repair form a set of operational guarantees that sidecars cannot match. If your team runs monitoring agents as sidecars on ECS, this feature is worth evaluating.
 
+## Cleanup
+
+Delete resources in reverse creation order. Wait for daemon and service deletion to complete before deleting the capacity provider and cluster.
+
 <details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
-<summary className="cursor-pointer font-medium">Cleanup</summary>
+<summary className="cursor-pointer font-medium">Resource deletion steps</summary>
 
 ```bash title="Terminal"
 REGION=us-east-1

@@ -366,8 +366,12 @@ aws ecs describe-daemon-deployments \
 
 Managed Daemons は「ライフサイクル分離」という表面的なメリットだけでなく、起動順序保証・自動入れ替え・自動修復という運用保証を提供する。サイドカーパターンでモニタリングエージェントを運用しているチームにとって、移行を検討する価値がある機能だ。
 
+## クリーンアップ
+
+リソースを作成の逆順で削除する。デーモンとサービスの削除完了を待ってからキャパシティプロバイダー・クラスターを削除する必要がある。
+
 <details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
-<summary className="cursor-pointer font-medium">クリーンアップ</summary>
+<summary className="cursor-pointer font-medium">リソース削除手順</summary>
 
 ```bash title="Terminal"
 REGION=us-east-1
