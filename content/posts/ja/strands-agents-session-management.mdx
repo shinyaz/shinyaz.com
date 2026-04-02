@@ -1,8 +1,8 @@
 ---
 title: "Strands Agents SDK 実践 — セッション管理で会話を永続化する"
 description: "Strands Agents SDK の FileSessionManager で会話をファイルに永続化し、プロセス再起動後も復元できることを確認する。保存されるデータ構造と S3 への切り替え方法もコードで解説する。"
-date: 2026-03-29
-published: false
+date: 2026-04-03
+published: true
 featured: false
 categories: [ai-agents]
 tags: ["strands-agents", "bedrock", "python", "ai-agents", "session-management"]
@@ -27,7 +27,7 @@ seriesOrder: 2
 
 ## セットアップ
 
-[第 1 回](/ja/blog/2026/03/29/strands-agents-structured-output)の環境をそのまま使う。以降の例ではすべて同じモデル設定を使う。各例は独立した `.py` ファイルとして実行できる。共通設定を先頭に書き、その下に各例のコードを追加する形だ。
+[第 1 回](/ja/blog/2026/04/03/strands-agents-structured-output)の環境をそのまま使う。以降の例ではすべて同じモデル設定を使う。各例は独立した `.py` ファイルとして実行できる。共通設定を先頭に書き、その下に各例のコードを追加する形だ。
 
 ```python title="Python (共通設定)"
 from strands import Agent

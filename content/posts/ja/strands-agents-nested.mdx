@@ -148,7 +148,7 @@ Graph の `execution_order` は `['research_team', 'report']` の 2 ステップ
 
 「Graph のどのノードがいつ開始・完了したかをリアルタイムでログに記録する」というシナリオを試す。
 
-[実践第 3 回](/ja/blog/2026/03/29/strands-agents-hooks)で学んだ Hooks は、マルチエージェントシステムにも使える。`BeforeNodeCallEvent` と `AfterNodeCallEvent` で Graph のノード実行を監視できる。以下のコードは前のセクションで作った `graph` に Hooks を追加する例だ（全体コードは折りたたみ内の `02_hooks.py` を参照）。
+[実践第 3 回](/ja/blog/2026/04/03/strands-agents-hooks)で学んだ Hooks は、マルチエージェントシステムにも使える。`BeforeNodeCallEvent` と `AfterNodeCallEvent` で Graph のノード実行を監視できる。以下のコードは前のセクションで作った `graph` に Hooks を追加する例だ（全体コードは折りたたみ内の `02_hooks.py` を参照）。
 
 ```python title="Python"
 from strands.hooks import BeforeNodeCallEvent, AfterNodeCallEvent

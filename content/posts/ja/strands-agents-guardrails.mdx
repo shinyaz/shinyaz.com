@@ -1,8 +1,8 @@
 ---
 title: "Strands Agents SDK 実践 — Guardrails で入出力をフィルタリングする"
 description: "Strands Agents SDK に Bedrock Guardrails を適用し、エージェントの入出力を自動フィルタリングする。ガードレール発動時の挙動と、Hooks を使ったシャドーモード（監視のみ）の実装をコードで確認する。"
-date: 2026-03-29
-published: false
+date: 2026-04-03
+published: true
 featured: false
 categories: [ai-agents]
 tags: ["strands-agents", "bedrock", "python", "ai-agents", "guardrails"]
@@ -12,7 +12,7 @@ seriesOrder: 4
 
 ## はじめに
 
-[前回の記事](/ja/blog/2026/03/29/strands-agents-hooks)では Hooks でエージェントの動作を制御する方法を学んだ。ツール呼び出しの制限や結果の加工ができるようになったが、もう 1 つ重要な制御がある。エージェントの入出力そのものの安全性だ。
+[前回の記事](/ja/blog/2026/04/03/strands-agents-hooks)では Hooks でエージェントの動作を制御する方法を学んだ。ツール呼び出しの制限や結果の加工ができるようになったが、もう 1 つ重要な制御がある。エージェントの入出力そのものの安全性だ。
 
 `guardrail_id` を 1 つ追加するだけで、エージェントの入出力が自動フィルタリングされる。
 
@@ -27,7 +27,7 @@ seriesOrder: 4
 
 ## セットアップ
 
-[第 1 回](/ja/blog/2026/03/29/strands-agents-structured-output)の環境をそのまま使う。以降の例ではすべて同じモデル設定を使う。各例は独立した `.py` ファイルとして実行できる。共通設定を先頭に書き、その下に各例のコードを追加する形だ。
+[第 1 回](/ja/blog/2026/04/03/strands-agents-structured-output)の環境をそのまま使う。以降の例ではすべて同じモデル設定を使う。各例は独立した `.py` ファイルとして実行できる。共通設定を先頭に書き、その下に各例のコードを追加する形だ。
 
 ```python title="Python (共通設定)"
 from strands import Agent
@@ -196,7 +196,7 @@ Messages after block: 2
 
 ## Hooks でシャドーモード — 監視のみの実装
 
-本番環境にガードレールを導入する前に、「ブロックはしないが、ブロックされるはずの入出力を記録する」シャドーモードで検証したい場面がある。[前回の記事](/ja/blog/2026/03/29/strands-agents-hooks)で学んだ Hooks を使って実装する。
+本番環境にガードレールを導入する前に、「ブロックはしないが、ブロックされるはずの入出力を記録する」シャドーモードで検証したい場面がある。[前回の記事](/ja/blog/2026/04/03/strands-agents-hooks)で学んだ Hooks を使って実装する。
 
 ポイントは、`BedrockModel` にはガードレールを設定せず、Hooks 内で `ApplyGuardrail` API を直接呼び出すことだ。
 

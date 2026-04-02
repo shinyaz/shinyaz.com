@@ -1,8 +1,8 @@
 ---
 title: "Strands Agents SDK 実践 — メトリクスでエージェントを最適化する"
 description: "Strands Agents SDK の result.metrics を深掘りし、サイクル数・トークン量・ツール実行時間を分析する。ツール設計の違いがパフォーマンスに与える影響をメトリクスで比較し、エージェントの最適化ポイントを特定する。"
-date: 2026-03-29
-published: false
+date: 2026-04-03
+published: true
 featured: false
 categories: [ai-agents]
 tags: ["strands-agents", "bedrock", "python", "ai-agents", "metrics"]
@@ -26,7 +26,7 @@ seriesOrder: 5
 
 ## セットアップ
 
-[第 1 回](/ja/blog/2026/03/29/strands-agents-structured-output)の環境をそのまま使う。以降の例ではすべて同じモデル設定を使う。各例は独立した `.py` ファイルとして実行できる。共通設定を先頭に書き、その下に各例のコードを追加する形だ。
+[第 1 回](/ja/blog/2026/04/03/strands-agents-structured-output)の環境をそのまま使う。以降の例ではすべて同じモデル設定を使う。各例は独立した `.py` ファイルとして実行できる。共通設定を先頭に書き、その下に各例のコードを追加する形だ。
 
 ```python title="Python (共通設定)"
 from strands import Agent, tool
@@ -333,10 +333,10 @@ Duration: 7.31s vs 4.33s
 
 | 回 | テーマ | 学んだこと |
 |---|---|---|
-| [第 1 回](/ja/blog/2026/03/29/strands-agents-structured-output) | Structured Output | Pydantic モデルで型安全な出力、バリデーション自動リトライ |
-| [第 2 回](/ja/blog/2026/03/29/strands-agents-session-management) | セッション管理 | FileSessionManager で会話の永続化と復元 |
-| [第 3 回](/ja/blog/2026/03/29/strands-agents-hooks) | Hooks | ツール呼び出しの監視・制限・結果加工 |
-| [第 4 回](/ja/blog/2026/03/29/strands-agents-guardrails) | Guardrails | 入出力フィルタリングとシャドーモード |
+| [第 1 回](/ja/blog/2026/04/03/strands-agents-structured-output) | Structured Output | Pydantic モデルで型安全な出力、バリデーション自動リトライ |
+| [第 2 回](/ja/blog/2026/04/03/strands-agents-session-management) | セッション管理 | FileSessionManager で会話の永続化と復元 |
+| [第 3 回](/ja/blog/2026/04/03/strands-agents-hooks) | Hooks | ツール呼び出しの監視・制限・結果加工 |
+| [第 4 回](/ja/blog/2026/04/03/strands-agents-guardrails) | Guardrails | 入出力フィルタリングとシャドーモード |
 | 第 5 回（本記事） | メトリクス | ツール別パフォーマンス分析、サイクル数の最適化 |
 
 入門シリーズが「エージェントの基本概念を理解する」フェーズだったのに対し、実践編は「出力を予測可能にし、会話を永続化し、動作を制御し、安全性を確保し、パフォーマンスを最適化する」フェーズだ。

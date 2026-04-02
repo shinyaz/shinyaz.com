@@ -12,7 +12,7 @@ seriesOrder: 3
 
 ## Introduction
 
-In the [previous article](/en/blog/2026/04/12/strands-agents-lambda), we deployed to Lambda serverlessly. Lambda is convenient but stateless — conversations can't continue across requests. In [practical part 2](/en/blog/2026/03/29/strands-agents-session-management), we manually persisted conversations with `FileSessionManager`, but in production you want the infrastructure to handle session management.
+In the [previous article](/en/blog/2026/04/12/strands-agents-lambda), we deployed to Lambda serverlessly. Lambda is convenient but stateless — conversations can't continue across requests. In [practical part 2](/en/blog/2026/04/03/strands-agents-session-management), we manually persisted conversations with `FileSessionManager`, but in production you want the infrastructure to handle session management.
 
 [Amazon Bedrock AgentCore Runtime](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/what-is-bedrock-agentcore.html) is a managed runtime purpose-built for AI agents. It includes session isolation (dedicated microVMs), auto-scaling, and built-in observability. With the [AgentCore CLI](https://github.com/aws/agentcore-cli), `create` + `deploy` completes the deployment with no CDK knowledge required.
 
@@ -149,14 +149,14 @@ I don't know your name - you haven't told me yet!
 
 With a different session ID, the agent has no access to the previous session's information. This is session isolation — each session runs on a dedicated microVM, so different users' conversations never mix.
 
-In [practical part 2](/en/blog/2026/03/29/strands-agents-session-management), we used `FileSessionManager` with a `session_id` to persist conversations. AgentCore has this mechanism built into the infrastructure — no code changes needed.
+In [practical part 2](/en/blog/2026/04/03/strands-agents-session-management), we used `FileSessionManager` with a `session_id` to persist conversations. AgentCore has this mechanism built into the infrastructure — no code changes needed.
 
 Note that session IDs must be 33 characters or longer. Shorter session IDs result in a validation error.
 
 ## Summary
 
 - **`agentcore create` + `agentcore deploy` completes the deployment** — Agent code, IAM roles, and CloudFormation stack are all auto-generated. No CDK knowledge required.
-- **Session isolation is built in** — Same session ID continues the conversation; different session IDs are isolated. The `FileSessionManager` from [practical part 2](/en/blog/2026/03/29/strands-agents-session-management) is no longer needed.
+- **Session isolation is built in** — Same session ID continues the conversation; different session IDs are isolated. The `FileSessionManager` from [practical part 2](/en/blog/2026/04/03/strands-agents-session-management) is no longer needed.
 - **Session IDs must be 33+ characters** — Shorter IDs cause a validation error. UUID format is recommended.
 - **See the AgentCore CLI series for details** — Local development (`agentcore dev`), Memory, Gateway, and Evaluations are covered in the [AgentCore CLI series](/en/blog/2026/03/24/agentcore-cli-create-dev-deploy).
 

@@ -14,7 +14,7 @@ seriesOrder: 4
 
 From [part 1](/en/blog/2026/04/12/strands-agents-docker) through [part 3](/en/blog/2026/04/12/strands-agents-agentcore), we deployed agents to Docker, Lambda, and AgentCore. The deployment target is set, but production operation needs one more thing: a way to monitor agent behavior.
 
-In [practical part 5](/en/blog/2026/03/29/strands-agents-metrics), we used `result.metrics.get_summary()` to check cycle counts and token usage. But that was post-hoc analysis of a single request. In production, you need to analyze across multiple requests, identify bottlenecks, and detect anomalies.
+In [practical part 5](/en/blog/2026/04/03/strands-agents-metrics), we used `result.metrics.get_summary()` to check cycle counts and token usage. But that was post-hoc analysis of a single request. In production, you need to analyze across multiple requests, identify bottlenecks, and detect anomalies.
 
 The Strands Agents SDK has built-in [OpenTelemetry](https://opentelemetry.io/) support. Just set an environment variable and the agent's reasoning and tool calls are recorded as traces.
 
@@ -139,7 +139,7 @@ invoke_agent Strands Agents (5511ms)     ← Entire agent
     └── chat (1191ms)                    ← Model call (final answer)
 ```
 
-The "2 cycles" and "1 calculator call" we confirmed with `result.metrics` in [practical part 5](/en/blog/2026/03/29/strands-agents-metrics) are now visualized as trace spans. While `result.metrics` provided post-hoc numerical data, traces show a timeline with duration and parent-child relationships for each step.
+The "2 cycles" and "1 calculator call" we confirmed with `result.metrics` in [practical part 5](/en/blog/2026/04/03/strands-agents-metrics) are now visualized as trace spans. While `result.metrics` provided post-hoc numerical data, traces show a timeline with duration and parent-child relationships for each step.
 
 ## Inspecting Span Details with the Console Exporter
 
@@ -208,7 +208,7 @@ python -u console_trace.py
 }
 ```
 
-The `inputTokens`, `outputTokens`, and `totalTokens` from `result.metrics` in [practical part 5](/en/blog/2026/03/29/strands-agents-metrics) appear as `gen_ai.usage.*` attributes in traces. Traces also include information not available in `result.metrics`, such as `gen_ai.server.time_to_first_token` (time until the first token is returned).
+The `inputTokens`, `outputTokens`, and `totalTokens` from `result.metrics` in [practical part 5](/en/blog/2026/04/03/strands-agents-metrics) appear as `gen_ai.usage.*` attributes in traces. Traces also include information not available in `result.metrics`, such as `gen_ai.server.time_to_first_token` (time until the first token is returned).
 
 ## Making Traces Searchable with Custom Attributes
 
@@ -272,7 +272,7 @@ In the Jaeger UI, entering `user.id=taro` in the Tags filter searches for only t
 
 - **Only 2 lines of code change** — Add `StrandsTelemetry()` and `setup_otlp_exporter()`, and the SDK automatically sends traces. Agent behavior is unchanged.
 - **Span structure mirrors the agent loop** — `invoke_agent` → `execute_event_loop_cycle` → `chat` / `execute_tool` maps directly to the "reasoning → tool selection → tool execution → reasoning" loop from [introductory part 1](/en/blog/2026/03/03/strands-agents-quickstart).
-- **Extends `result.metrics`** — Cycle counts and tool execution times from [practical part 5](/en/blog/2026/03/29/strands-agents-metrics) are visualized as timeline spans. The transition from post-hoc analysis to real-time monitoring.
+- **Extends `result.metrics`** — Cycle counts and tool execution times from [practical part 5](/en/blog/2026/04/03/strands-agents-metrics) are visualized as timeline spans. The transition from post-hoc analysis to real-time monitoring.
 - **Works with any OTEL-compatible backend** — Since it uses the OpenTelemetry standard, you can switch to [AWS X-Ray](https://strandsagents.com/docs/user-guide/observability-evaluation/traces/#sending-traces-to-cloudwatch-x-ray), Grafana Tempo, Datadog, or any other backend.
 - **`trace_attributes` adds custom attributes to spans** — Record session IDs and user IDs on spans, then search by tag in Jaeger. Useful for tracking specific requests in production.
 

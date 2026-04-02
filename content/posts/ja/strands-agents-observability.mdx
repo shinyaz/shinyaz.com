@@ -14,7 +14,7 @@ seriesOrder: 4
 
 [第 1 回](/ja/blog/2026/04/12/strands-agents-docker)から[第 3 回](/ja/blog/2026/04/12/strands-agents-agentcore)まで、エージェントを Docker、Lambda、AgentCore にデプロイした。デプロイ先は決まったが、本番運用にはもう 1 つ必要なものがある。エージェントの動作を監視する仕組みだ。
 
-[実践第 5 回](/ja/blog/2026/03/29/strands-agents-metrics)では `result.metrics.get_summary()` でサイクル数やトークン量を確認した。しかし、あれは 1 回のリクエストの事後分析だった。本番環境では、複数リクエストを横断的に分析し、ボトルネックを特定し、異常を検知する必要がある。
+[実践第 5 回](/ja/blog/2026/04/03/strands-agents-metrics)では `result.metrics.get_summary()` でサイクル数やトークン量を確認した。しかし、あれは 1 回のリクエストの事後分析だった。本番環境では、複数リクエストを横断的に分析し、ボトルネックを特定し、異常を検知する必要がある。
 
 Strands Agents SDK は [OpenTelemetry](https://opentelemetry.io/) を組み込みサポートしている。環境変数を設定するだけで、エージェントの推論とツール呼び出しがトレースとして記録される。
 
@@ -139,7 +139,7 @@ invoke_agent Strands Agents (5511ms)     ← エージェント全体
     └── chat (1191ms)                    ← モデル呼び出し（最終回答生成）
 ```
 
-[実践第 5 回](/ja/blog/2026/03/29/strands-agents-metrics)の `result.metrics` で確認した「2 サイクル」「calculator 1 回呼び出し」が、トレースのスパンとして可視化されている。`result.metrics` が事後の数値データだったのに対し、トレースは時系列のタイムラインとして各ステップの所要時間と親子関係を示す。
+[実践第 5 回](/ja/blog/2026/04/03/strands-agents-metrics)の `result.metrics` で確認した「2 サイクル」「calculator 1 回呼び出し」が、トレースのスパンとして可視化されている。`result.metrics` が事後の数値データだったのに対し、トレースは時系列のタイムラインとして各ステップの所要時間と親子関係を示す。
 
 ## コンソールエクスポーターでスパンの中身を見る
 
@@ -208,7 +208,7 @@ python -u console_trace.py
 }
 ```
 
-[実践第 5 回](/ja/blog/2026/03/29/strands-agents-metrics)の `result.metrics` で確認した `inputTokens`、`outputTokens`、`totalTokens` が、トレースでは `gen_ai.usage.*` 属性として記録されている。さらに `gen_ai.server.time_to_first_token`（最初のトークンが返るまでの時間）など、`result.metrics` にはない情報も含まれている。
+[実践第 5 回](/ja/blog/2026/04/03/strands-agents-metrics)の `result.metrics` で確認した `inputTokens`、`outputTokens`、`totalTokens` が、トレースでは `gen_ai.usage.*` 属性として記録されている。さらに `gen_ai.server.time_to_first_token`（最初のトークンが返るまでの時間）など、`result.metrics` にはない情報も含まれている。
 
 ## カスタム属性でトレースを検索可能にする
 
@@ -272,7 +272,7 @@ Jaeger UI では Tags フィルタに `user.id=taro` と入力すると、その
 
 - **エージェントコードの変更は 2 行だけ** — `StrandsTelemetry()` と `setup_otlp_exporter()` を追加するだけで、SDK が自動的にトレースを送信する。エージェントの動作は変わらない。
 - **スパン構造がエージェントループを反映する** — `invoke_agent` → `execute_event_loop_cycle` → `chat` / `execute_tool` の階層が、[入門第 1 回](/ja/blog/2026/03/03/strands-agents-quickstart)で学んだエージェントループの「推論 → ツール選択 → ツール実行 → 推論」に対応する。
-- **`result.metrics` の延長線上にある** — [実践第 5 回](/ja/blog/2026/03/29/strands-agents-metrics)のサイクル数やツール実行時間が、トレースのスパンとして時系列で可視化される。事後分析からリアルタイム監視への移行。
+- **`result.metrics` の延長線上にある** — [実践第 5 回](/ja/blog/2026/04/03/strands-agents-metrics)のサイクル数やツール実行時間が、トレースのスパンとして時系列で可視化される。事後分析からリアルタイム監視への移行。
 - **Jaeger 以外のツールにも送信できる** — OpenTelemetry 標準なので、[AWS X-Ray](https://strandsagents.com/docs/user-guide/observability-evaluation/traces/#sending-traces-to-cloudwatch-x-ray)、Grafana Tempo、Datadog など任意のバックエンドに切り替え可能。
 - **`trace_attributes` でカスタム属性を付与できる** — セッション ID やユーザー ID をスパンに記録し、Jaeger でタグ検索できる。本番環境での特定リクエストの追跡に有用。
 

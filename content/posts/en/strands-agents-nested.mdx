@@ -148,7 +148,7 @@ Graph's `execution_order` shows 2 steps `['research_team', 'report']`, but insid
 
 Let's try logging "which Graph node starts and completes, in real time."
 
-Hooks from [Part 3 of the practical series](/en/blog/2026/03/29/strands-agents-hooks) also work with multi-agent systems. `BeforeNodeCallEvent` and `AfterNodeCallEvent` monitor Graph node execution. The code below adds Hooks to the `graph` from the previous section (see `02_hooks.py` in the collapsible for the full standalone code).
+Hooks from [Part 3 of the practical series](/en/blog/2026/04/03/strands-agents-hooks) also work with multi-agent systems. `BeforeNodeCallEvent` and `AfterNodeCallEvent` monitor Graph node execution. The code below adds Hooks to the `graph` from the previous section (see `02_hooks.py` in the collapsible for the full standalone code).
 
 ```python title="Python"
 from strands.hooks import BeforeNodeCallEvent, AfterNodeCallEvent

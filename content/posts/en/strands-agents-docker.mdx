@@ -74,7 +74,7 @@ def invoke(request: InvokeRequest):
         raise HTTPException(status_code=500, detail=str(e))
 ```
 
-`InvokeRequest` and `InvokeResponse` are Pydantic models that define the JSON structure for requests and responses. In [practical part 1](/en/blog/2026/03/29/strands-agents-structured-output), we used Pydantic to structure LLM output — here it's used for FastAPI input/output validation.
+`InvokeRequest` and `InvokeResponse` are Pydantic models that define the JSON structure for requests and responses. In [practical part 1](/en/blog/2026/04/03/strands-agents-structured-output), we used Pydantic to structure LLM output — here it's used for FastAPI input/output validation.
 
 Three key points:
 

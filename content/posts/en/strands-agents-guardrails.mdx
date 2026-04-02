@@ -1,8 +1,8 @@
 ---
 title: "Strands Agents SDK Practical — Filter Agent I/O with Guardrails"
 description: "Apply Bedrock Guardrails to Strands Agents SDK for automatic input/output filtering. Verify guardrail intervention behavior and implement shadow mode (monitor-only) using Hooks."
-date: 2026-03-29
-published: false
+date: 2026-04-03
+published: true
 featured: false
 categories: [ai-agents]
 tags: ["strands-agents", "bedrock", "python", "ai-agents", "guardrails"]
@@ -12,7 +12,7 @@ seriesOrder: 4
 
 ## Introduction
 
-In the [previous article](/en/blog/2026/03/29/strands-agents-hooks), we learned to control agent behavior with Hooks — limiting tool calls and modifying results. But there's another critical control: the safety of agent inputs and outputs themselves.
+In the [previous article](/en/blog/2026/04/03/strands-agents-hooks), we learned to control agent behavior with Hooks — limiting tool calls and modifying results. But there's another critical control: the safety of agent inputs and outputs themselves.
 
 Adding a single `guardrail_id` automatically filters agent inputs and outputs.
 
@@ -27,7 +27,7 @@ See the official documentation at [Guardrails](https://strandsagents.com/docs/us
 
 ## Setup
 
-Use the same environment from [Part 1](/en/blog/2026/03/29/strands-agents-structured-output). All examples use the same model configuration and can be run as independent `.py` files. Write the common setup at the top, then add each example's code below.
+Use the same environment from [Part 1](/en/blog/2026/04/03/strands-agents-structured-output). All examples use the same model configuration and can be run as independent `.py` files. Write the common setup at the top, then add each example's code below.
 
 ```python title="Python (common setup)"
 from strands import Agent
@@ -195,7 +195,7 @@ The user's input was automatically rewritten to `[User input redacted.]`. This p
 
 ## Shadow Mode with Hooks — Monitor-Only Implementation
 
-Before deploying guardrails to production, you may want to verify with a "shadow mode" that logs what would be blocked without actually blocking. We'll use Hooks from the [previous article](/en/blog/2026/03/29/strands-agents-hooks) to implement this.
+Before deploying guardrails to production, you may want to verify with a "shadow mode" that logs what would be blocked without actually blocking. We'll use Hooks from the [previous article](/en/blog/2026/04/03/strands-agents-hooks) to implement this.
 
 The key is not setting guardrails on `BedrockModel`, and instead calling the `ApplyGuardrail` API directly within Hooks.
 

@@ -12,7 +12,7 @@ seriesOrder: 3
 
 ## はじめに
 
-[前回の記事](/ja/blog/2026/04/12/strands-agents-lambda)では Lambda にサーバーレスデプロイした。Lambda は手軽だが、ステートレスなのでリクエスト間で会話を継続できない。[実践第 2 回](/ja/blog/2026/03/29/strands-agents-session-management)では `FileSessionManager` で会話を手動で永続化したが、本番環境ではインフラ側でセッションを管理したい。
+[前回の記事](/ja/blog/2026/04/12/strands-agents-lambda)では Lambda にサーバーレスデプロイした。Lambda は手軽だが、ステートレスなのでリクエスト間で会話を継続できない。[実践第 2 回](/ja/blog/2026/04/03/strands-agents-session-management)では `FileSessionManager` で会話を手動で永続化したが、本番環境ではインフラ側でセッションを管理したい。
 
 [Amazon Bedrock AgentCore Runtime](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/what-is-bedrock-agentcore.html) は、AI エージェント向けに設計されたマネージドランタイムだ。セッション分離（専用 microVM）、オートスケーリング、オブザーバビリティが組み込まれている。[AgentCore CLI](https://github.com/aws/agentcore-cli) を使えば、`create` + `deploy` の 2 コマンドで CDK の知識なしにデプロイが完了する。
 
@@ -149,14 +149,14 @@ I don't know your name - you haven't told me yet!
 
 別のセッション ID では、前のセッションの情報にアクセスできない。これがセッション分離だ。各セッションは専用の microVM で実行されるため、異なるユーザーの会話が混ざることはない。
 
-[実践第 2 回](/ja/blog/2026/03/29/strands-agents-session-management)では `FileSessionManager` で `session_id` を指定して会話を永続化した。AgentCore ではこの仕組みがインフラレベルで組み込まれており、コードの変更は不要だ。
+[実践第 2 回](/ja/blog/2026/04/03/strands-agents-session-management)では `FileSessionManager` で `session_id` を指定して会話を永続化した。AgentCore ではこの仕組みがインフラレベルで組み込まれており、コードの変更は不要だ。
 
 なお、セッション ID は 33 文字以上である必要がある。短いセッション ID を指定するとバリデーションエラーになる。
 
 ## まとめ
 
 - **`agentcore create` + `agentcore deploy` の 2 コマンドでデプロイが完了する** — エージェントコード、IAM ロール、CloudFormation スタックがすべて自動生成される。CDK の知識は不要。
-- **セッション分離が組み込まれている** — 同じセッション ID で呼び出すと会話が継続し、別セッション ID では分離される。[実践第 2 回](/ja/blog/2026/03/29/strands-agents-session-management)の `FileSessionManager` が不要になる。
+- **セッション分離が組み込まれている** — 同じセッション ID で呼び出すと会話が継続し、別セッション ID では分離される。[実践第 2 回](/ja/blog/2026/04/03/strands-agents-session-management)の `FileSessionManager` が不要になる。
 - **セッション ID は 33 文字以上** — 短いセッション ID はバリデーションエラーになる。UUID 形式が推奨。
 - **詳細は AgentCore CLI シリーズを参照** — ローカル開発（`agentcore dev`）、Memory、Gateway、Evaluations については [AgentCore CLI シリーズ](/ja/blog/2026/03/24/agentcore-cli-create-dev-deploy)で詳しく扱っている。
 
