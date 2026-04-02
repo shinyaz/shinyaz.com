@@ -1,0 +1,406 @@
+---
+title: "ECS Managed Daemons 検証 — 起動順序保証とローリングデプロイの実測"
+description: "ECS Managed Instances の新機能 Managed Daemons を検証した。デーモンはアプリの18〜21秒前に起動し、ローリングデプロイは約5分でダウンタイムなしに完了する。"
+date: "2026-04-02"
+published: true
+featured: false
+categories: [infrastructure]
+tags: ["aws", "ecs", "managed-instances", "managed-daemons"]
+---
+
+## はじめに
+
+2026年4月1日、AWS は [Amazon ECS Managed Instances 向けの Managed Daemons](https://aws.amazon.com/about-aws/whats-new/2026/04/amazon-ecs-managed-daemons/) を発表した。モニタリング・ロギング・トレーシングなどのソフトウェアエージェントを、アプリケーションのデプロイとは独立して一元管理できる仕組みである。
+
+ECS Managed Instances は 2025年9月に発表された機能で、EC2 のカスタマイズ性を維持しつつ、インスタンスのプロビジョニングやスケーリングを ECS に委任できる。Fargate と従来の EC2 起動タイプの中間的な位置づけだ。Managed Daemons はこの Managed Instances に対して、デーモンのライフサイクルをアプリケーションから分離する機能を追加する。
+
+従来、ECS でモニタリングエージェントを動かすにはサイドカーパターンが一般的だった。タスク定義にエージェントコンテナを追加し、アプリと一緒にデプロイする。この方式の問題は、エージェント更新のたびにタスク定義を変更してサービスを再デプロイする必要があること、そしてタスクごとにエージェントが1つ起動するためリソース効率が悪いことだ。
+
+Managed Daemons はこれを解決する。主な特徴は以下の通りである。
+
+- **専用のデーモンタスク定義** — 通常のタスク定義とは別リソース。`daemon_bridge` ネットワークモードで静的 IP `169.254.172.2` を通じてアプリからアクセス可能
+- **起動順序保証** — デーモンはアプリタスクより先に起動し、最後にドレインされる
+- **インスタンス単位の自動入れ替え** — デーモン更新時、新インスタンスを起動してデーモン→アプリの順で配置し、旧インスタンスを終了する
+- **自動修復** — デーモンタスクが停止するとインスタンスを自動ドレイン・置換
+
+本記事では Managed Daemons をゼロから構築し、起動順序保証とローリングデプロイの実挙動を確認する。公式ドキュメントは [Amazon ECS Managed Daemons](https://docs.aws.amazon.com/AmazonECS/latest/developerguide/managed-daemons.html)。
+
+前提条件:
+
+- AWS CLI v2.34.22 以上（v2.34.21 では `register-daemon-task-definition` 等の新 API 未対応）
+- IAM ロール作成権限、ECS / EC2 / CloudWatch Logs の操作権限
+- 検証リージョン: us-east-1
+
+追加コストは発生しない。デーモンタスクが消費するコンピュートリソースの標準料金のみ。
+
+結果だけ見たい場合は[まとめ](#まとめ)に進んでほしい。
+
+## 検証 1: デーモンのデプロイと起動順序保証
+
+### 環境構築
+
+Managed Daemons を動かすには、以下のリソースが必要である。
+
+1. ECS クラスター
+2. Managed Instances キャパシティプロバイダー（インフラストラクチャロール + インスタンスプロファイル付き）
+3. デーモンタスク定義
+4. デーモン
+5. アプリケーションタスク定義 + サービス
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">環境構築手順（IAM ロール・クラスター・デーモン・サービス作成）</summary>
+
+IAM ロールを3つ作成する。インフラストラクチャロール（ECS がインスタンスを管理するため）、インスタンスプロファイル（ECS エージェント用）、タスクロール（ECS Exec 用）である。
+
+**重要:** インスタンスプロファイルには `AmazonECSInstanceRolePolicyForManagedInstances` をアタッチする。従来の EC2 起動タイプ用の `AmazonEC2ContainerServiceforEC2Role` ではデーモンが起動しない。
+
+なお、以下の手順では `ecsTaskExecutionRole`（タスク実行ロール）が既に存在する前提である。未作成の場合は [AWS ドキュメント](https://docs.aws.amazon.com/AmazonECS/latest/developerguide/task_execution_IAM_role.html)を参照して作成する。
+
+```bash title="Terminal (IAM ロール作成)"
+# インフラストラクチャロール
+aws iam create-role \
+  --role-name ecsInfrastructureRole \
+  --assume-role-policy-document '{
+    "Version":"2012-10-17",
+    "Statement":[{
+      "Effect":"Allow",
+      "Principal":{"Service":"ecs.amazonaws.com"},
+      "Action":"sts:AssumeRole"
+    }]
+  }'
+
+aws iam attach-role-policy \
+  --role-name ecsInfrastructureRole \
+  --policy-arn arn:aws:iam::aws:policy/AmazonECSInfrastructureRolePolicyForManagedInstances
+
+# インスタンスプロファイル
+aws iam create-role \
+  --role-name ecsInstanceRole \
+  --assume-role-policy-document '{
+    "Version":"2012-10-17",
+    "Statement":[{
+      "Effect":"Allow",
+      "Principal":{"Service":"ec2.amazonaws.com"},
+      "Action":"sts:AssumeRole"
+    }]
+  }'
+
+aws iam attach-role-policy \
+  --role-name ecsInstanceRole \
+  --policy-arn arn:aws:iam::aws:policy/AmazonECSInstanceRolePolicyForManagedInstances
+
+aws iam create-instance-profile --instance-profile-name ecsInstanceRole
+aws iam add-role-to-instance-profile \
+  --instance-profile-name ecsInstanceRole --role-name ecsInstanceRole
+
+# タスクロール（ECS Exec 用）
+aws iam create-role \
+  --role-name ecsExecTaskRole \
+  --assume-role-policy-document '{
+    "Version":"2012-10-17",
+    "Statement":[{
+      "Effect":"Allow",
+      "Principal":{"Service":"ecs-tasks.amazonaws.com"},
+      "Action":"sts:AssumeRole"
+    }]
+  }'
+
+aws iam attach-role-policy \
+  --role-name ecsExecTaskRole \
+  --policy-arn arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+```
+
+```bash title="Terminal (クラスター・キャパシティプロバイダー作成)"
+ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+REGION=us-east-1
+
+aws ecs create-cluster --cluster-name daemon-test --region $REGION
+
+aws logs create-log-group --log-group-name /ecs/daemon-test --region $REGION
+
+# サブネット・セキュリティグループは環境に合わせて変更
+aws ecs create-capacity-provider \
+  --name daemon-test-mi \
+  --cluster daemon-test \
+  --managed-instances-provider '{
+    "infrastructureRoleArn": "arn:aws:iam::'$ACCOUNT_ID':role/ecsInfrastructureRole",
+    "instanceLaunchTemplate": {
+      "ec2InstanceProfileArn": "arn:aws:iam::'$ACCOUNT_ID':instance-profile/ecsInstanceRole",
+      "networkConfiguration": {
+        "subnets": ["<your-subnet-id>"],
+        "securityGroups": ["<your-sg-id>"]
+      },
+      "instanceRequirements": {
+        "vCpuCount": {"min": 2, "max": 4},
+        "memoryMiB": {"min": 4096, "max": 8192}
+      }
+    }
+  }' --region $REGION
+
+aws ecs put-cluster-capacity-providers \
+  --cluster daemon-test \
+  --capacity-providers daemon-test-mi \
+  --default-capacity-provider-strategy capacityProvider=daemon-test-mi,weight=1 \
+  --region $REGION
+```
+
+```bash title="Terminal (デーモンタスク定義・デーモン作成)"
+aws ecs register-daemon-task-definition \
+  --cli-input-json '{
+    "family": "monitoring-agent",
+    "executionRoleArn": "arn:aws:iam::'$ACCOUNT_ID':role/ecsTaskExecutionRole",
+    "cpu": "256", "memory": "512",
+    "containerDefinitions": [{
+      "name": "agent",
+      "image": "public.ecr.aws/docker/library/nginx:alpine",
+      "essential": true, "memoryReservation": 256,
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/daemon-test",
+          "awslogs-region": "'$REGION'",
+          "awslogs-stream-prefix": "daemon"
+        }
+      }
+    }]
+  }' --region $REGION
+
+aws ecs create-daemon \
+  --cli-input-json '{
+    "clusterArn": "arn:aws:ecs:'$REGION':'$ACCOUNT_ID':cluster/daemon-test",
+    "daemonName": "monitoring-agent",
+    "daemonTaskDefinitionArn": "arn:aws:ecs:'$REGION':'$ACCOUNT_ID':daemon-task-definition/monitoring-agent:1",
+    "capacityProviderArns": ["arn:aws:ecs:'$REGION':'$ACCOUNT_ID':capacity-provider/daemon-test-mi"],
+    "enableExecuteCommand": true
+  }' --region $REGION
+```
+
+```bash title="Terminal (アプリタスク定義・サービス作成)"
+aws ecs register-task-definition \
+  --cli-input-json '{
+    "family": "test-app",
+    "networkMode": "awsvpc",
+    "taskRoleArn": "arn:aws:iam::'$ACCOUNT_ID':role/ecsExecTaskRole",
+    "executionRoleArn": "arn:aws:iam::'$ACCOUNT_ID':role/ecsTaskExecutionRole",
+    "requiresCompatibilities": ["MANAGED_INSTANCES"],
+    "cpu": "512", "memory": "1024",
+    "containerDefinitions": [{
+      "name": "nginx",
+      "image": "public.ecr.aws/docker/library/nginx:alpine",
+      "essential": true,
+      "portMappings": [{"containerPort": 80, "protocol": "tcp"}],
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/daemon-test",
+          "awslogs-region": "'$REGION'",
+          "awslogs-stream-prefix": "app"
+        }
+      }
+    }]
+  }' --region $REGION
+
+aws ecs create-service \
+  --cluster daemon-test --service-name app-svc \
+  --task-definition test-app:1 --desired-count 1 \
+  --capacity-provider-strategy capacityProvider=daemon-test-mi,weight=1 \
+  --network-configuration 'awsvpcConfiguration={subnets=[<your-subnet-id>],securityGroups=[<your-sg-id>]}' \
+  --enable-execute-command --region $REGION
+```
+
+</details>
+
+### 起動順序の確認
+
+サービス作成から約5分後、デーモンとアプリの両方が RUNNING になった。`describe-tasks` で各タスクの `startedAt` を比較する。
+
+```bash title="Terminal"
+aws ecs describe-tasks --cluster daemon-test \
+  --tasks $(aws ecs list-tasks --cluster daemon-test \
+    --query 'taskArns' --output text --region us-east-1) \
+  --query 'tasks[].{group:group,startedAt:startedAt}' \
+  --output table --region us-east-1
+```
+
+```text title="Output"
+-----------------------------------------------------------------
+|                        DescribeTasks                          |
++--------------------------+------------------------------------+
+|          group           |             startedAt              |
++--------------------------+------------------------------------+
+|  daemon:monitoring-agent |  2026-04-02T16:56:19.055000+09:00  |
+|  service:app-svc         |  2026-04-02T16:56:37.368000+09:00  |
++--------------------------+------------------------------------+
+```
+
+**デーモンが 16:56:19 に起動し、アプリが 16:56:37 に起動した。デーモンが18秒先に RUNNING になっている。** アプリの `createdAt`（16:55:38）はデーモンの `createdAt`（16:56:05）より早いが、ECS はデーモンが RUNNING になるまでアプリの起動を保留している。
+
+コンテナインスタンスの状態遷移も確認した。デーモンが起動するまでインスタンスは `REGISTERING` 状態のままで、デーモン起動後に `ACTIVE` に遷移する。つまり、デーモンが起動しない限りアプリタスクは配置されない。これはドキュメントの「starts the daemon task first, and only then transitions the application task to RUNNING」と完全に一致する。
+
+## 検証 2: ローリングデプロイの挙動
+
+デーモンタスク定義の新リビジョンを登録し、`update-daemon` でローリングデプロイを実行した。
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">ローリングデプロイ実行手順</summary>
+
+```bash title="Terminal (新リビジョン登録)"
+# イメージを httpd:alpine に変更した新リビジョンを登録
+aws ecs register-daemon-task-definition \
+  --cli-input-json '{
+    "family": "monitoring-agent",
+    "executionRoleArn": "arn:aws:iam::<account-id>:role/ecsTaskExecutionRole",
+    "cpu": "256", "memory": "512",
+    "containerDefinitions": [{
+      "name": "agent",
+      "image": "public.ecr.aws/docker/library/httpd:alpine",
+      "essential": true, "memoryReservation": 256,
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/daemon-test",
+          "awslogs-region": "us-east-1",
+          "awslogs-stream-prefix": "daemon-v2"
+        }
+      }
+    }]
+  }' --region us-east-1
+```
+
+```bash title="Terminal (ローリングデプロイ実行)"
+aws ecs update-daemon \
+  --daemon-arn arn:aws:ecs:us-east-1:<account-id>:daemon/daemon-test/monitoring-agent \
+  --daemon-task-definition-arn arn:aws:ecs:us-east-1:<account-id>:daemon-task-definition/monitoring-agent:2 \
+  --capacity-provider-arns arn:aws:ecs:us-east-1:<account-id>:capacity-provider/daemon-test-mi \
+  --region us-east-1
+```
+
+```bash title="Terminal (モニタリング)"
+# デプロイ状態の確認
+aws ecs list-daemon-deployments \
+  --daemon-arn arn:aws:ecs:us-east-1:<account-id>:daemon/daemon-test/monitoring-agent \
+  --query 'daemonDeployments[0].status' --output text --region us-east-1
+
+# アプリの稼働数
+aws ecs describe-services --cluster daemon-test --services app-svc \
+  --query 'services[0].runningCount' --output text --region us-east-1
+
+# コンテナインスタンスの状態
+aws ecs describe-container-instances --cluster daemon-test \
+  --container-instances $(aws ecs list-container-instances --cluster daemon-test \
+    --query 'containerInstanceArns' --output text --region us-east-1) \
+  --query 'containerInstances[].{id:ec2InstanceId,status:status,tasks:runningTasksCount}' \
+  --output table --region us-east-1
+```
+
+</details>
+
+30秒間隔でモニタリングした結果が以下である。インスタンスの tasks 数はデーモンタスクとアプリタスクの合計（各1つずつで計2）を示す。
+
+| 経過時間 | デプロイ状態 | アプリ running | インスタンス状態 |
+|---|---|---|---|
+| 0:00 | 開始 | 1 | i-01aa: ACTIVE (2 tasks) |
+| 0:40 | IN_PROGRESS | 1 | i-01aa: DRAINING (2 tasks) |
+| 1:53 | IN_PROGRESS | 1 | i-01aa: DRAINING, i-0ca1: REGISTERING (1 task) |
+| 2:29 | IN_PROGRESS | **2** | i-01aa: DRAINING, i-0ca1: **ACTIVE** (2 tasks) |
+| 3:42 | IN_PROGRESS | 2→1 | i-01aa: DEREGISTERING, i-0ca1: ACTIVE |
+| **4:54** | **SUCCESSFUL** | 1 | i-0ca1: ACTIVE (2 tasks) |
+
+**所要時間は約4分50秒、アプリのダウンタイムはゼロだった。**
+
+デプロイの流れを整理する。
+
+1. 旧インスタンスが DRAINING に遷移（アプリはまだ稼働中）
+2. 新インスタンスがプロビジョニングされ、新デーモンが起動（REGISTERING → ACTIVE）
+3. 新インスタンスでアプリタスクが起動（この時点で新旧両方でアプリが稼働 = running: 2）
+4. 旧インスタンスのタスクが停止し、インスタンスが DEREGISTERING → 終了
+
+新インスタンスでも起動順序保証は維持されていた。デーモン v2 の `startedAt` は 17:03:23、アプリの `startedAt` は 17:03:44 で、デーモンが21秒先に起動している。
+
+`describe-daemon-deployments` で確認すると、サーキットブレーカーの `failureCount` は 0 で、問題なくデプロイが完了している。
+
+```bash title="Terminal"
+aws ecs describe-daemon-deployments \
+  --daemon-deployment-arns <deployment-arn> \
+  --region us-east-1
+```
+
+```json title="Output (デプロイメント詳細)"
+{
+  "status": "SUCCESSFUL",
+  "circuitBreaker": {
+    "failureCount": 0,
+    "status": "MONITORING_COMPLETE",
+    "threshold": 3
+  },
+  "deploymentConfiguration": {
+    "drainPercent": 25.0,
+    "bakeTimeInMinutes": 0
+  }
+}
+```
+
+`drainPercent` は同時にドレインするインスタンスの割合（デフォルト 25%）で、大規模クラスターでの入れ替え速度を制御する。`bakeTimeInMinutes` はデプロイ完了後に CloudWatch アラームを監視する待機時間で、0 の場合は即座に完了扱いとなる。
+
+サイドカーパターンでのエージェント更新と比較すると、アプローチが根本的に異なる。サイドカーではタスク定義を変更してサービスを再デプロイするが、Managed Daemons ではインスタンスごと入れ替える。検証 1 で確認した通り、デーモン更新時は新インスタンスのプロビジョニングから始まり、デーモン→アプリの順で起動した後に旧インスタンスが終了する。結果として、アプリのタスク定義には一切触れない。プラットフォームチームがアプリチームと調整せずにエージェントを更新できるのは、大規模環境で大きなメリットになる。
+
+## サイドカーパターンとの比較
+
+検証結果を踏まえた比較表を以下に示す。
+
+| 観点 | サイドカーパターン | Managed Daemons |
+|---|---|---|
+| エージェント更新時のアプリ再デプロイ | 必要 | **不要**（実測） |
+| 起動順序保証 | `dependsOn` で制御可能 | **ECS が保証（18〜21秒先行）**（実測） |
+| インスタンスあたりのエージェント数 | タスクごとに1つ | **インスタンスごとに1つ**（実測） |
+| エージェント更新の所要時間 | サービス再デプロイ時間に依存 | **約5分（インスタンス入れ替え）**（実測） |
+| 更新中のダウンタイム | デプロイ戦略に依存 | **なし（新旧並行稼働）**（実測） |
+| 障害時の自動修復 | なし | **あり（インスタンス自動置換）**（公式ドキュメント） |
+| ネットワーク | 同一タスク内で共有 | **`daemon_bridge` で分離**（公式ドキュメント） |
+
+## まとめ
+
+- **起動順序保証は厳密に機能する** — デーモンが RUNNING にならない限りインスタンスは ACTIVE にならず、アプリタスクは配置されない。実測でデーモンが18〜21秒先に起動することを確認した
+- **ローリングデプロイはインスタンス単位の入れ替え方式** — 約5分で完了し、新旧インスタンスの並行稼働によりダウンタイムはゼロ。サイドカーパターンの「タスク定義変更→再デプロイ」とは根本的に異なるアプローチである
+- **サーキットブレーカーが組み込まれている** — デーモン起動に失敗すると自動ロールバックが発動する。`bakeTime` と CloudWatch アラームを組み合わせることで、より慎重なデプロイも可能
+
+Managed Daemons は「ライフサイクル分離」という表面的なメリットだけでなく、起動順序保証・自動入れ替え・自動修復という運用保証を提供する。サイドカーパターンでモニタリングエージェントを運用しているチームにとって、移行を検討する価値がある機能だ。
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">クリーンアップ</summary>
+
+```bash title="Terminal"
+REGION=us-east-1
+
+aws ecs update-service --cluster daemon-test --service app-svc \
+  --desired-count 0 --region $REGION
+aws ecs delete-service --cluster daemon-test --service app-svc --region $REGION
+
+aws ecs delete-daemon \
+  --daemon-arn arn:aws:ecs:$REGION:<account-id>:daemon/daemon-test/monitoring-agent \
+  --region $REGION
+
+sleep 60
+aws ecs delete-capacity-provider --capacity-provider daemon-test-mi --region $REGION
+sleep 60
+aws ecs delete-cluster --cluster daemon-test --region $REGION
+
+aws logs delete-log-group --log-group-name /ecs/daemon-test --region $REGION
+
+aws iam detach-role-policy --role-name ecsInfrastructureRole \
+  --policy-arn arn:aws:iam::aws:policy/AmazonECSInfrastructureRolePolicyForManagedInstances
+aws iam delete-role --role-name ecsInfrastructureRole
+
+aws iam remove-role-from-instance-profile \
+  --instance-profile-name ecsInstanceRole --role-name ecsInstanceRole
+aws iam delete-instance-profile --instance-profile-name ecsInstanceRole
+aws iam detach-role-policy --role-name ecsInstanceRole \
+  --policy-arn arn:aws:iam::aws:policy/AmazonECSInstanceRolePolicyForManagedInstances
+aws iam delete-role --role-name ecsInstanceRole
+
+aws iam detach-role-policy --role-name ecsExecTaskRole \
+  --policy-arn arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+aws iam delete-role --role-name ecsExecTaskRole
+```
+
+</details>

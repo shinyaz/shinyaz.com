@@ -1,0 +1,406 @@
+---
+title: "ECS Managed Daemons — Verifying Startup Order Guarantees and Rolling Deployments"
+description: "Verified ECS Managed Daemons on Managed Instances. Daemons start 18-21 seconds before app tasks, and rolling deployments complete in ~5 minutes with zero downtime."
+date: "2026-04-02"
+published: true
+featured: false
+categories: [infrastructure]
+tags: ["aws", "ecs", "managed-instances", "managed-daemons"]
+---
+
+## Introduction
+
+On April 1, 2026, AWS [announced Managed Daemons for Amazon ECS Managed Instances](https://aws.amazon.com/about-aws/whats-new/2026/04/amazon-ecs-managed-daemons/). This feature lets platform engineers centrally manage software agents like monitoring, logging, and tracing tools independently from application deployments.
+
+ECS Managed Instances, introduced in September 2025, sits between Fargate and the traditional EC2 launch type — you get EC2-level customization while ECS handles instance provisioning and scaling. Managed Daemons adds daemon lifecycle separation on top of this.
+
+Previously, running monitoring agents on ECS meant the sidecar pattern: add an agent container to your task definition and deploy it alongside your app. The downsides are well-known — updating an agent requires modifying the task definition and redeploying the service, and each task runs its own agent copy, wasting resources.
+
+Managed Daemons solves this with:
+
+- **Dedicated daemon task definitions** — A separate resource from standard task definitions. Uses `daemon_bridge` network mode with a static IP (`169.254.172.2`) for app-to-daemon communication
+- **Startup order guarantee** — Daemons start before app tasks and drain last
+- **Instance-level replacement** — During daemon updates, ECS provisions new instances, starts the daemon, migrates app tasks, then terminates old instances
+- **Auto-repair** — If a daemon task stops, ECS automatically drains and replaces the instance
+
+This article builds Managed Daemons from scratch and measures startup order guarantees and rolling deployment behavior. Official docs: [Amazon ECS Managed Daemons](https://docs.aws.amazon.com/AmazonECS/latest/developerguide/managed-daemons.html).
+
+Prerequisites:
+
+- AWS CLI v2.34.22+ (v2.34.21 lacks `register-daemon-task-definition` and other new APIs)
+- IAM permissions for ECS, EC2, and CloudWatch Logs
+- Test region: us-east-1
+
+No additional cost — you only pay for standard compute resources consumed by daemon tasks.
+
+Jump to [Summary](#summary) for just the results.
+
+## Verification 1: Daemon Deployment and Startup Order
+
+### Environment Setup
+
+Running Managed Daemons requires:
+
+1. An ECS cluster
+2. A Managed Instances capacity provider (with infrastructure role + instance profile)
+3. A daemon task definition
+4. A daemon
+5. An application task definition + service
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">Setup steps (IAM roles, cluster, daemon, and service creation)</summary>
+
+Three IAM roles are needed: an infrastructure role (for ECS to manage instances), an instance profile (for the ECS agent), and a task role (for ECS Exec).
+
+**Important:** Attach `AmazonECSInstanceRolePolicyForManagedInstances` to the instance profile. The legacy `AmazonEC2ContainerServiceforEC2Role` policy will prevent daemons from starting.
+
+The steps below assume `ecsTaskExecutionRole` (task execution role) already exists. If not, see the [AWS documentation](https://docs.aws.amazon.com/AmazonECS/latest/developerguide/task_execution_IAM_role.html) to create it.
+
+```bash title="Terminal (IAM roles)"
+# Infrastructure role
+aws iam create-role \
+  --role-name ecsInfrastructureRole \
+  --assume-role-policy-document '{
+    "Version":"2012-10-17",
+    "Statement":[{
+      "Effect":"Allow",
+      "Principal":{"Service":"ecs.amazonaws.com"},
+      "Action":"sts:AssumeRole"
+    }]
+  }'
+
+aws iam attach-role-policy \
+  --role-name ecsInfrastructureRole \
+  --policy-arn arn:aws:iam::aws:policy/AmazonECSInfrastructureRolePolicyForManagedInstances
+
+# Instance profile
+aws iam create-role \
+  --role-name ecsInstanceRole \
+  --assume-role-policy-document '{
+    "Version":"2012-10-17",
+    "Statement":[{
+      "Effect":"Allow",
+      "Principal":{"Service":"ec2.amazonaws.com"},
+      "Action":"sts:AssumeRole"
+    }]
+  }'
+
+aws iam attach-role-policy \
+  --role-name ecsInstanceRole \
+  --policy-arn arn:aws:iam::aws:policy/AmazonECSInstanceRolePolicyForManagedInstances
+
+aws iam create-instance-profile --instance-profile-name ecsInstanceRole
+aws iam add-role-to-instance-profile \
+  --instance-profile-name ecsInstanceRole --role-name ecsInstanceRole
+
+# Task role (for ECS Exec)
+aws iam create-role \
+  --role-name ecsExecTaskRole \
+  --assume-role-policy-document '{
+    "Version":"2012-10-17",
+    "Statement":[{
+      "Effect":"Allow",
+      "Principal":{"Service":"ecs-tasks.amazonaws.com"},
+      "Action":"sts:AssumeRole"
+    }]
+  }'
+
+aws iam attach-role-policy \
+  --role-name ecsExecTaskRole \
+  --policy-arn arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+```
+
+```bash title="Terminal (cluster and capacity provider)"
+ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+REGION=us-east-1
+
+aws ecs create-cluster --cluster-name daemon-test --region $REGION
+
+aws logs create-log-group --log-group-name /ecs/daemon-test --region $REGION
+
+# Replace subnet and security group IDs with your own
+aws ecs create-capacity-provider \
+  --name daemon-test-mi \
+  --cluster daemon-test \
+  --managed-instances-provider '{
+    "infrastructureRoleArn": "arn:aws:iam::'$ACCOUNT_ID':role/ecsInfrastructureRole",
+    "instanceLaunchTemplate": {
+      "ec2InstanceProfileArn": "arn:aws:iam::'$ACCOUNT_ID':instance-profile/ecsInstanceRole",
+      "networkConfiguration": {
+        "subnets": ["<your-subnet-id>"],
+        "securityGroups": ["<your-sg-id>"]
+      },
+      "instanceRequirements": {
+        "vCpuCount": {"min": 2, "max": 4},
+        "memoryMiB": {"min": 4096, "max": 8192}
+      }
+    }
+  }' --region $REGION
+
+aws ecs put-cluster-capacity-providers \
+  --cluster daemon-test \
+  --capacity-providers daemon-test-mi \
+  --default-capacity-provider-strategy capacityProvider=daemon-test-mi,weight=1 \
+  --region $REGION
+```
+
+```bash title="Terminal (daemon task definition and daemon)"
+aws ecs register-daemon-task-definition \
+  --cli-input-json '{
+    "family": "monitoring-agent",
+    "executionRoleArn": "arn:aws:iam::'$ACCOUNT_ID':role/ecsTaskExecutionRole",
+    "cpu": "256", "memory": "512",
+    "containerDefinitions": [{
+      "name": "agent",
+      "image": "public.ecr.aws/docker/library/nginx:alpine",
+      "essential": true, "memoryReservation": 256,
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/daemon-test",
+          "awslogs-region": "'$REGION'",
+          "awslogs-stream-prefix": "daemon"
+        }
+      }
+    }]
+  }' --region $REGION
+
+aws ecs create-daemon \
+  --cli-input-json '{
+    "clusterArn": "arn:aws:ecs:'$REGION':'$ACCOUNT_ID':cluster/daemon-test",
+    "daemonName": "monitoring-agent",
+    "daemonTaskDefinitionArn": "arn:aws:ecs:'$REGION':'$ACCOUNT_ID':daemon-task-definition/monitoring-agent:1",
+    "capacityProviderArns": ["arn:aws:ecs:'$REGION':'$ACCOUNT_ID':capacity-provider/daemon-test-mi"],
+    "enableExecuteCommand": true
+  }' --region $REGION
+```
+
+```bash title="Terminal (app task definition and service)"
+aws ecs register-task-definition \
+  --cli-input-json '{
+    "family": "test-app",
+    "networkMode": "awsvpc",
+    "taskRoleArn": "arn:aws:iam::'$ACCOUNT_ID':role/ecsExecTaskRole",
+    "executionRoleArn": "arn:aws:iam::'$ACCOUNT_ID':role/ecsTaskExecutionRole",
+    "requiresCompatibilities": ["MANAGED_INSTANCES"],
+    "cpu": "512", "memory": "1024",
+    "containerDefinitions": [{
+      "name": "nginx",
+      "image": "public.ecr.aws/docker/library/nginx:alpine",
+      "essential": true,
+      "portMappings": [{"containerPort": 80, "protocol": "tcp"}],
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/daemon-test",
+          "awslogs-region": "'$REGION'",
+          "awslogs-stream-prefix": "app"
+        }
+      }
+    }]
+  }' --region $REGION
+
+aws ecs create-service \
+  --cluster daemon-test --service-name app-svc \
+  --task-definition test-app:1 --desired-count 1 \
+  --capacity-provider-strategy capacityProvider=daemon-test-mi,weight=1 \
+  --network-configuration 'awsvpcConfiguration={subnets=[<your-subnet-id>],securityGroups=[<your-sg-id>]}' \
+  --enable-execute-command --region $REGION
+```
+
+</details>
+
+### Confirming Startup Order
+
+About 5 minutes after creating the service, both daemon and app tasks reached RUNNING. Comparing `startedAt` timestamps with `describe-tasks`:
+
+```bash title="Terminal"
+aws ecs describe-tasks --cluster daemon-test \
+  --tasks $(aws ecs list-tasks --cluster daemon-test \
+    --query 'taskArns' --output text --region us-east-1) \
+  --query 'tasks[].{group:group,startedAt:startedAt}' \
+  --output table --region us-east-1
+```
+
+```text title="Output"
+-----------------------------------------------------------------
+|                        DescribeTasks                          |
++--------------------------+------------------------------------+
+|          group           |             startedAt              |
++--------------------------+------------------------------------+
+|  daemon:monitoring-agent |  2026-04-02T16:56:19.055000+09:00  |
+|  service:app-svc         |  2026-04-02T16:56:37.368000+09:00  |
++--------------------------+------------------------------------+
+```
+
+**The daemon started at 16:56:19, the app at 16:56:37 — the daemon was RUNNING 18 seconds earlier.** The app's `createdAt` (16:55:38) is actually earlier than the daemon's `createdAt` (16:56:05), but ECS held the app from starting until the daemon was RUNNING.
+
+I also observed the container instance state transitions. Until the daemon starts, the instance stays in `REGISTERING` state and only transitions to `ACTIVE` after the daemon is running. No daemon, no app placement. This matches the documentation exactly: "starts the daemon task first, and only then transitions the application task to RUNNING."
+
+## Verification 2: Rolling Deployment Behavior
+
+I registered a new daemon task definition revision and triggered a rolling deployment with `update-daemon`.
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">Rolling deployment steps</summary>
+
+```bash title="Terminal (register new revision)"
+# Switch image to httpd:alpine
+aws ecs register-daemon-task-definition \
+  --cli-input-json '{
+    "family": "monitoring-agent",
+    "executionRoleArn": "arn:aws:iam::<account-id>:role/ecsTaskExecutionRole",
+    "cpu": "256", "memory": "512",
+    "containerDefinitions": [{
+      "name": "agent",
+      "image": "public.ecr.aws/docker/library/httpd:alpine",
+      "essential": true, "memoryReservation": 256,
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/daemon-test",
+          "awslogs-region": "us-east-1",
+          "awslogs-stream-prefix": "daemon-v2"
+        }
+      }
+    }]
+  }' --region us-east-1
+```
+
+```bash title="Terminal (trigger rolling deployment)"
+aws ecs update-daemon \
+  --daemon-arn arn:aws:ecs:us-east-1:<account-id>:daemon/daemon-test/monitoring-agent \
+  --daemon-task-definition-arn arn:aws:ecs:us-east-1:<account-id>:daemon-task-definition/monitoring-agent:2 \
+  --capacity-provider-arns arn:aws:ecs:us-east-1:<account-id>:capacity-provider/daemon-test-mi \
+  --region us-east-1
+```
+
+```bash title="Terminal (monitoring)"
+# Deployment status
+aws ecs list-daemon-deployments \
+  --daemon-arn arn:aws:ecs:us-east-1:<account-id>:daemon/daemon-test/monitoring-agent \
+  --query 'daemonDeployments[0].status' --output text --region us-east-1
+
+# App running count
+aws ecs describe-services --cluster daemon-test --services app-svc \
+  --query 'services[0].runningCount' --output text --region us-east-1
+
+# Container instance states
+aws ecs describe-container-instances --cluster daemon-test \
+  --container-instances $(aws ecs list-container-instances --cluster daemon-test \
+    --query 'containerInstanceArns' --output text --region us-east-1) \
+  --query 'containerInstances[].{id:ec2InstanceId,status:status,tasks:runningTasksCount}' \
+  --output table --region us-east-1
+```
+
+</details>
+
+Monitoring at 30-second intervals. The "tasks" count per instance is the sum of daemon task + app task (1 each = 2 total).
+
+| Elapsed | Deploy Status | App Running | Instance State |
+|---|---|---|---|
+| 0:00 | Started | 1 | i-01aa: ACTIVE (2 tasks) |
+| 0:40 | IN_PROGRESS | 1 | i-01aa: DRAINING (2 tasks) |
+| 1:53 | IN_PROGRESS | 1 | i-01aa: DRAINING, i-0ca1: REGISTERING (1 task) |
+| 2:29 | IN_PROGRESS | **2** | i-01aa: DRAINING, i-0ca1: **ACTIVE** (2 tasks) |
+| 3:42 | IN_PROGRESS | 2→1 | i-01aa: DEREGISTERING, i-0ca1: ACTIVE |
+| **4:54** | **SUCCESSFUL** | 1 | i-0ca1: ACTIVE (2 tasks) |
+
+**Total time: ~4 minutes 50 seconds. Zero app downtime.**
+
+The deployment flow:
+
+1. Old instance transitions to DRAINING (app still running)
+2. New instance provisioned, new daemon starts (REGISTERING → ACTIVE)
+3. App task starts on new instance (both old and new running simultaneously = running: 2)
+4. Old instance tasks stop, instance moves to DEREGISTERING → terminated
+
+Startup order was maintained on the new instance too. Daemon v2 `startedAt` was 17:03:23, app `startedAt` was 17:03:44 — daemon started 21 seconds earlier.
+
+The `describe-daemon-deployments` output confirms the circuit breaker had zero failures:
+
+```bash title="Terminal"
+aws ecs describe-daemon-deployments \
+  --daemon-deployment-arns <deployment-arn> \
+  --region us-east-1
+```
+
+```json title="Output (deployment details)"
+{
+  "status": "SUCCESSFUL",
+  "circuitBreaker": {
+    "failureCount": 0,
+    "status": "MONITORING_COMPLETE",
+    "threshold": 3
+  },
+  "deploymentConfiguration": {
+    "drainPercent": 25.0,
+    "bakeTimeInMinutes": 0
+  }
+}
+```
+
+`drainPercent` controls the percentage of instances drained simultaneously (default 25%), governing replacement speed in large clusters. `bakeTimeInMinutes` is the post-deployment monitoring window for CloudWatch alarms — 0 means the deployment completes immediately.
+
+This is fundamentally different from updating sidecars. With sidecars, you modify the task definition and redeploy the service. With Managed Daemons, ECS replaces the entire instance. As observed in Verification 1, the update starts by provisioning a new instance, starting the daemon first, then the app, before terminating the old instance. The app task definition is never touched. Platform teams can update agents without coordinating with application teams — a significant advantage at scale.
+
+## Sidecar Pattern Comparison
+
+A comparison table with measured values:
+
+| Aspect | Sidecar Pattern | Managed Daemons |
+|---|---|---|
+| App redeploy on agent update | Required | **Not required** (measured) |
+| Startup order guarantee | `dependsOn` available | **ECS-guaranteed (18-21s ahead)** (measured) |
+| Agents per instance | One per task | **One per instance** (measured) |
+| Agent update time | Depends on service redeploy | **~5 min (instance replacement)** (measured) |
+| Downtime during update | Depends on deploy strategy | **None (old/new run in parallel)** (measured) |
+| Auto-repair on failure | None | **Yes (automatic instance replacement)** (docs) |
+| Network | Shared within task | **`daemon_bridge` isolated** (docs) |
+
+## Summary
+
+- **Startup order guarantee works strictly** — Instances stay in REGISTERING until the daemon is RUNNING, blocking app task placement. Measured 18-21 seconds of daemon lead time
+- **Rolling deployments replace entire instances** — Completed in ~5 minutes with zero downtime thanks to parallel old/new instance operation. A fundamentally different approach from the sidecar pattern's "modify task definition → redeploy service" workflow
+- **Built-in circuit breaker** — Failed daemon starts trigger automatic rollback. Combine `bakeTime` with CloudWatch alarms for more cautious deployments
+
+Managed Daemons provides more than just "lifecycle separation." The startup order guarantee, automatic instance replacement, and auto-repair form a set of operational guarantees that sidecars cannot match. If your team runs monitoring agents as sidecars on ECS, this feature is worth evaluating.
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">Cleanup</summary>
+
+```bash title="Terminal"
+REGION=us-east-1
+
+aws ecs update-service --cluster daemon-test --service app-svc \
+  --desired-count 0 --region $REGION
+aws ecs delete-service --cluster daemon-test --service app-svc --region $REGION
+
+aws ecs delete-daemon \
+  --daemon-arn arn:aws:ecs:$REGION:<account-id>:daemon/daemon-test/monitoring-agent \
+  --region $REGION
+
+sleep 60
+aws ecs delete-capacity-provider --capacity-provider daemon-test-mi --region $REGION
+sleep 60
+aws ecs delete-cluster --cluster daemon-test --region $REGION
+
+aws logs delete-log-group --log-group-name /ecs/daemon-test --region $REGION
+
+aws iam detach-role-policy --role-name ecsInfrastructureRole \
+  --policy-arn arn:aws:iam::aws:policy/AmazonECSInfrastructureRolePolicyForManagedInstances
+aws iam delete-role --role-name ecsInfrastructureRole
+
+aws iam remove-role-from-instance-profile \
+  --instance-profile-name ecsInstanceRole --role-name ecsInstanceRole
+aws iam delete-instance-profile --instance-profile-name ecsInstanceRole
+aws iam detach-role-policy --role-name ecsInstanceRole \
+  --policy-arn arn:aws:iam::aws:policy/AmazonECSInstanceRolePolicyForManagedInstances
+aws iam delete-role --role-name ecsInstanceRole
+
+aws iam detach-role-policy --role-name ecsExecTaskRole \
+  --policy-arn arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+aws iam delete-role --role-name ecsExecTaskRole
+```
+
+</details>
