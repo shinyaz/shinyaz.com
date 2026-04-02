@@ -1,0 +1,306 @@
+---
+title: "AWS Security Agent 検証 — ソースコード提供で検出率はどう変わるか"
+description: "AWS Security Agent にソースコードを提供するとペンテストの検出数が5件→13件（documents）/28件（sourceCode）に増加。documents と sourceCode で処理パイプラインが根本的に異なることも判明した。"
+date: "2026-04-02"
+published: true
+featured: false
+categories: [infrastructure]
+tags: ["aws", "security-agent", "penetration-testing", "security", "devsecops"]
+series: "aws-security-agent"
+seriesOrder: 2
+---
+
+## はじめに
+
+[前回の記事](/ja/blog/2026/04/02/aws-security-agent-pentest-verification)では、AWS Security Agent のペネトレーションテストを URL のみで実行し、5つの既知脆弱性のうち4つを検出した（偽陽性0件、コスト約{'$'}136）。唯一未検出だった Path Traversal は、HTML にリンクのないエンドポイント（`/api/files/download`）であり、CRAWLER がエンドポイント自体を発見できなかったことが原因と推測した。
+
+本記事では同じアプリに対して**ソースコードを提供**した場合に検出率がどう変わるかを検証する。Security Agent にはソースコードの提供方法が2種類ある:
+
+- **`sourceCode`** — S3 に ZIP でアップロード。CLI の説明に「for static analysis」と明記
+- **`documents`** — S3 またはアーティファクト経由でアップロード。「providing context for testing」と説明
+
+この2つの方法で処理が異なるかを含め、前回の URL のみとの3条件 A/B 比較を行った。ソースコードは脆弱性コメント（`# VULN:` 等）を除去したクリーン版を使用し、AI がコード構造の分析から脆弱性を発見できるかを評価している。
+
+前提条件:
+
+- 前回記事の環境（Agent Space、EC2、Flask アプリ）をそのまま再利用
+- 検証リージョン: ap-northeast-1（documents）、us-east-1（sourceCode）
+
+## ソースコードの準備
+
+前回記事の app.py から脆弱性を示すコメント（`# VULN:`、`# --- Vulnerability N:`、`# No sanitization` 等）と WARNING docstring を除去したクリーン版を使用する。AI がコメントではなくコード構造から脆弱性を発見できるかを評価するためである。
+
+## ソースコードの登録
+
+### documents（東京リージョン）
+
+S3 バケットにソースコードをアップロードし、`update-pentest` の `assets.documents` で参照する。ZIP 不要で生ファイルを直接指定できる。
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">documents の登録手順</summary>
+
+前回記事で作成した `$ACCOUNT_ID`、`$REGION`、`$AGENT_SPACE_ID`、`$PENTEST_ID`、`$SERVICE_ROLE_ARN`、`$PRIVATE_DNS` をそのまま使用する。
+
+```bash title="Terminal"
+S3_BUCKET="security-agent-pentest-source-${ACCOUNT_ID}"
+
+# S3 バケット作成・アップロード
+aws s3 mb s3://${S3_BUCKET} --region $REGION
+aws s3 cp app-clean.py s3://${S3_BUCKET}/app.py
+
+# サービスロールに S3 読み取り権限を追加
+aws iam put-role-policy \
+  --role-name SecurityAgentPentestRole \
+  --policy-name SecurityAgentS3ReadAccess \
+  --policy-document "{
+    \"Version\": \"2012-10-17\",
+    \"Statement\": [{
+      \"Effect\": \"Allow\",
+      \"Action\": [\"s3:GetObject\", \"s3:ListBucket\"],
+      \"Resource\": [\"arn:aws:s3:::${S3_BUCKET}\", \"arn:aws:s3:::${S3_BUCKET}/*\"]
+    }]
+  }"
+
+# Agent Space に S3 バケットを追加（既存の vpcs・iamRoles を保持しつつ s3Buckets を追加）
+aws securityagent update-agent-space \
+  --agent-space-id $AGENT_SPACE_ID \
+  --name "pentest-verification" \
+  --aws-resources "{
+    \"vpcs\": [{
+      \"vpcArn\": \"$VPC_ID\",
+      \"securityGroupArns\": [\"$SG_ID\"],
+      \"subnetArns\": [\"$SUBNET_ID\"]
+    }],
+    \"iamRoles\": [\"$SERVICE_ROLE_ARN\"],
+    \"s3Buckets\": [\"arn:aws:s3:::${S3_BUCKET}\"]
+  }" \
+  --target-domain-ids "$TARGET_DOMAIN_ID" \
+  --region $REGION
+
+# ペンテストに documents として登録
+aws securityagent update-pentest \
+  --pentest-id $PENTEST_ID \
+  --agent-space-id $AGENT_SPACE_ID \
+  --service-role $SERVICE_ROLE_ARN \
+  --assets "{
+    \"endpoints\": [{\"uri\": \"http://${PRIVATE_DNS}\"}],
+    \"documents\": [{\"s3Location\": \"s3://${S3_BUCKET}/app.py\"}]
+  }" --region $REGION
+```
+
+</details>
+
+### sourceCode（us-east-1）
+
+S3 に **ZIP アーカイブ**でアップロードし、`assets.sourceCode` で参照する。生ファイルを指定すると「Source code S3 URL must point to a ZIP archive」エラーになる。
+
+なお、東京リージョンで `sourceCode` を使ったペンテストを2回試みたが、どちらも Setup Testing Environment で INTERNAL_ERROR が発生した。S3 Source Access Validation は成功しており、ソースコードの読み取り自体は問題ない。`sourceCode` を外すと同じ環境で正常に動作したため、`sourceCode` の処理が原因と判断した。us-east-1 では INTERNAL_ERROR は発生しなかったため、東京リージョンでの `sourceCode` 利用は 2026年4月時点で不安定な可能性がある。
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">sourceCode の登録手順（us-east-1 に環境を新規構築）</summary>
+
+`sourceCode` を東京で使えなかったため、us-east-1 に EC2 + Agent Space を新規構築して実行した。EC2 と Flask アプリのデプロイ手順は[前回記事](/ja/blog/2026/04/02/aws-security-agent-pentest-verification)の「EC2 デプロイ手順」と同じ（リージョンを us-east-1 に変更するのみ）。以下は Security Agent 固有の設定のみ記載する。
+
+```bash title="Terminal (us-east-1)"
+REGION=us-east-1
+S3_BUCKET="security-agent-pentest-source-use1-${ACCOUNT_ID}"
+
+# Agent Space 作成
+AGENT_SPACE_ID=$(aws securityagent create-agent-space \
+  --name "pentest-verification-use1" \
+  --region $REGION --query "agentSpaceId" --output text)
+
+# Target Domain 登録・検証（UNREACHABLE でも VPC Config で動作する）
+TARGET_DOMAIN_ID=$(aws securityagent create-target-domain \
+  --target-domain-name "$PRIVATE_DNS" \
+  --verification-method HTTP_ROUTE \
+  --region $REGION --query "targetDomainId" --output text)
+aws securityagent verify-target-domain \
+  --target-domain-id $TARGET_DOMAIN_ID --region $REGION
+
+# S3 バケット作成・ZIP アップロード
+aws s3 mb s3://${S3_BUCKET} --region $REGION
+zip app-clean.zip app-clean.py
+aws s3 cp app-clean.zip s3://${S3_BUCKET}/app.zip --region $REGION
+
+# サービスロールに S3 読み取り権限・CloudWatch Logs 権限を追加
+# (IAM ロールはグローバルだが、ポリシーは us-east-1 リソース用に追加)
+aws iam put-role-policy --role-name SecurityAgentPentestRole \
+  --policy-name SecurityAgentS3ReadAccessUSE1 \
+  --policy-document "{...}"  # S3 バケット ARN を指定
+aws iam put-role-policy --role-name SecurityAgentPentestRole \
+  --policy-name SecurityAgentLogsAccessUSE1 \
+  --policy-document "{...}"  # us-east-1 の /aws/securityagent/* を指定
+
+# Agent Space に VPC・IAM・S3・Target Domain を登録
+aws securityagent update-agent-space \
+  --agent-space-id $AGENT_SPACE_ID \
+  --name "pentest-verification-use1" \
+  --aws-resources "{
+    \"vpcs\": [{\"vpcArn\": \"$VPC_ID\", \"securityGroupArns\": [\"$SG_ID\"], \"subnetArns\": [\"$SUBNET_ID\"]}],
+    \"iamRoles\": [\"$SERVICE_ROLE_ARN\"],
+    \"s3Buckets\": [\"arn:aws:s3:::${S3_BUCKET}\"]
+  }" \
+  --target-domain-ids "$TARGET_DOMAIN_ID" \
+  --region $REGION
+
+# ペンテスト作成（sourceCode として登録）
+PENTEST_ID=$(aws securityagent create-pentest \
+  --title "vulnerable-flask-app-pentest-sourcecode" \
+  --agent-space-id $AGENT_SPACE_ID \
+  --service-role $SERVICE_ROLE_ARN \
+  --assets "{
+    \"endpoints\": [{\"uri\": \"http://${PRIVATE_DNS}\"}],
+    \"sourceCode\": [{\"s3Location\": \"s3://${S3_BUCKET}/app.zip\"}]
+  }" \
+  --vpc-config "{
+    \"vpcArn\": \"$VPC_ID\",
+    \"securityGroupArns\": [\"$SG_ID\"],
+    \"subnetArns\": [\"$SUBNET_ID\"]
+  }" \
+  --region $REGION --query "pentestId" --output text)
+
+# テスト実行
+aws securityagent start-pentest-job \
+  --pentest-id $PENTEST_ID \
+  --agent-space-id $AGENT_SPACE_ID \
+  --region $REGION
+```
+
+</details>
+
+## 検証結果: documents（東京リージョン）
+
+テスト全体の結果:
+
+| # | Finding | confidence | riskLevel |
+| --- | --- | --- | --- |
+| 1 | SQL Injection in Login — Complete Auth Bypass | HIGH | CRITICAL |
+| 2 | JWT Token Forgery — Missing Signature Verification | HIGH | CRITICAL |
+| 3 | **JWT + XSS チェーン攻撃 — Admin Context での Stored XSS** | HIGH | CRITICAL |
+| 4 | Path Traversal in File Download — Arbitrary File Read | HIGH | HIGH |
+| 5 | Complete Auth Bypass on File Download | HIGH | HIGH |
+| 6 | Unauthorized File Download — No Access Control | HIGH | HIGH |
+| 7 | Arbitrary File Write via Path Traversal in Upload | HIGH | HIGH |
+| 8 | Unrestricted File Type Upload | HIGH | HIGH |
+| 9 | IDOR — Unauthorized User Profile Access | HIGH | MEDIUM |
+| 10 | Stored XSS in Comments | HIGH | MEDIUM |
+| 11 | SQLite Error Messages Expose DB Structure | HIGH | MEDIUM |
+| 12 | Server Crash on Upload to Non-Existent Subdirectories | HIGH | MEDIUM |
+| 13 | Internal Server Error on File Download Without Param | HIGH | MEDIUM |
+
+**13件、全て HIGH confidence。** 前回（URL のみ）の 5件から 2.6倍に増加した。
+
+前回との差分:
+- **Path Traversal を新規検出** — 前回は未検出だったが、ソースコードの文脈から `/api/files/download` エンドポイントを発見し、`../../etc/passwd` で任意ファイル読み取りを再現。これにより **5/5 の脆弱性を全て検出**
+- **チェーン攻撃を新規発見** — JWT トークン偽造 + Stored XSS を組み合わせた管理者コンテキストでの攻撃（#3）。前回にはなかった多段階攻撃の Finding
+- **ファイルアップロード関連の脆弱性を新規発見** — Path Traversal を経由した任意ファイル書き込み（#7）、ファイルタイプ制限なし（#8）
+- **エラー情報漏洩を新規発見** — SQLite エラーメッセージによる DB 構造の露出（#11）、パラメータなしアクセス時のサーバーエラー（#13）
+- 前回と同じ脆弱性（SQLi、JWT、IDOR、XSS）は引き続き検出。confidence は全て HIGH に向上（前回は XSS が LOW だった）
+
+## 検証結果: sourceCode（us-east-1）
+
+28件の Finding が報告された（HIGH confidence 24件、FALSE_POSITIVE 4件）。
+
+注目すべきは **FALSE_POSITIVE の存在**である。`sourceCode` の CODE SCANNER は静的分析で多数の候補を検出し、VALIDATOR TASK が動的に再現検証した結果、4件を偽陽性と判定した。`documents` と前回の URL のみでは FALSE_POSITIVE は0件だった。これは静的分析の網羅性と動的検証の精度が組み合わさった結果である。
+
+主要な Finding（HIGH confidence、CRITICAL/HIGH のみ抜粋）:
+
+| # | Finding | riskLevel | カテゴリ |
+| --- | --- | --- | --- |
+| 1 | SQL Injection — Complete Auth Bypass | CRITICAL | 脆弱性1 ✅ |
+| 2 | JWT Authentication Bypass — No Signature Verification | CRITICAL | 脆弱性4 ✅ |
+| 3 | JWT Accepts Invalid Signature + Identity Spoofing | CRITICAL | 脆弱性4 関連 |
+| 4 | JWT Temporal Claims Not Validated | CRITICAL | 脆弱性4 関連 |
+| 5 | **Multi-Stage Privilege Escalation Chain** | CRITICAL | **チェーン攻撃** |
+| 6 | MD5 Password Hashing Without Salt | CRITICAL | 想定外 |
+| 7 | Missing Rate Limiting — Brute Force | CRITICAL | 想定外 |
+| 8 | Lack of Input Validation Framework | CRITICAL | 想定外 |
+| 9 | Path Traversal in File Download | HIGH | 脆弱性5 ✅ |
+| 10 | File Overwrite via Filename Collision | HIGH | 想定外 |
+| 11 | Auth Bypass on File Download | HIGH | 脆弱性5 関連 |
+| 12 | Unrestricted File Upload with Path Traversal | HIGH | 想定外 |
+| 13 | JWT Token Validation Failures — Type Confusion | HIGH | 脆弱性4 関連 |
+| 14 | Complete JWT Authentication Bypass | CRITICAL | 脆弱性4 関連 |
+
+このほか MEDIUM（XSS、IDOR、セキュリティヘッダー不足、GDPR、DB 外部キー制約、JWT null値等）が8件、INFORMATIONAL（Flask 開発サーバー設定、SQLite 一時ディレクトリ）が2件。
+
+**5/5 の脆弱性を全て検出。** さらに `documents` では検出されなかった MD5 ハッシュ、レート制限不在、入力バリデーション不在、JWT の型混同・期限切れトークン受入など、CODE SCANNER の静的分析でのみ報告された脆弱性が多数あった。これらが `documents` で検出されなかった理由が静的分析の有無によるものか、テスト実行の非決定性によるものかは本検証からは区別できない。
+
+## 3条件比較
+
+### documents と sourceCode の処理パイプラインの違い
+
+検証中に観測した内部タスクの比較:
+
+| フェーズ | documents（東京） | sourceCode（us-east-1） |
+| --- | --- | --- |
+| PREFLIGHT | S3 Source Access Validation → Setup Testing Env | S3 Source Access Validation → Setup Testing Env |
+| STATIC_ANALYSIS | **DOCUMENTS** → SCANNER → TLS SCANNER → CRAWLER | **CODE SCANNER [BUSINESS LOGIC / IMPORTANT FLOWS / FRAMEWORKS]** → SCANNER → TLS SCANNER → CRAWLER |
+| PENTEST | 13カテゴリの攻撃タスク + VALIDATOR | 13カテゴリの攻撃タスク + VALIDATOR |
+
+決定的な違いは STATIC_ANALYSIS フェーズにある:
+- **documents**: DOCUMENTS タスクでソースコードを処理した後、通常の CRAWLER が実行される。ソースコードは AI エージェントが参照する文脈情報として扱われ、Finding は PENTEST フェーズの動的攻撃で初めて報告される
+- **sourceCode**: 3つの **CODE SCANNER**（BUSINESS LOGIC、IMPORTANT FLOWS、FRAMEWORKS）が並列で体系的な静的分析を実行し、**PENTEST 開始前に脆弱性を検出する**。VALIDATOR TASK が動的に再現検証した後、CRAWLER → PENTEST に進む
+
+### 検出結果の比較
+
+| 観点 | URL のみ（前回） | documents（東京） | sourceCode（us-east-1） |
+| --- | --- | --- | --- |
+| Finding 数 | 5 | **13** | **28** |
+| HIGH confidence | 4 | **13** | **24** |
+| FALSE_POSITIVE | 0 | 0 | **4** |
+| 5つの脆弱性 | 4/5 | **5/5** | **5/5** |
+| Path Traversal | ❌ | **✅** | **✅** |
+| チェーン攻撃 | ❌ | **✅ JWT+XSS** | **✅ Multi-Stage Escalation** |
+| 静的分析 Finding | なし | なし | **あり（PENTEST 前に検出）** |
+| JWT 関連 Finding | 1 | 2 | **6** |
+| コード品質系の指摘 | なし | なし | **あり（MD5、レート制限、CSRF、セキュリティヘッダー等）** |
+
+## まとめ
+
+今回の検証では、ソースコードの提供により検出数が大幅に増加した。URL のみでは 5件・4/5 だった検出が、`documents` で 13件・5/5、`sourceCode` で 28件・5/5 になった。特に `sourceCode` は CODE SCANNER による体系的な静的分析が実行され、他の2条件では検出されなかったコード品質系の脆弱性（MD5 ハッシュ、レート制限不在、入力バリデーション不在等）が報告された。
+
+| 観点 | URL のみ | documents | sourceCode |
+| --- | --- | --- | --- |
+| 登録の手間 | なし | S3 アップロード + update-pentest（数分） | S3 ZIP アップロード + update-pentest（数分） |
+| 検出数 | 5 | 13（2.6倍） | 28（5.6倍） |
+| 処理パイプライン | CRAWLER → PENTEST | DOCUMENTS → CRAWLER → PENTEST | CODE SCANNER x3 → CRAWLER → PENTEST |
+| 静的分析 | なし | なし | BUSINESS LOGIC / IMPORTANT FLOWS / FRAMEWORKS |
+| 東京リージョン | ✅ | ✅ | ❌ INTERNAL_ERROR |
+
+- **今回の検証では、ソースコード提供で検出数が2.6〜5.6倍に増加した** — 特に HTML 上にリンクのないエンドポイント（API エンドポイント等）の検出率が向上した。ソースコード提供は数分の手間で済むため、費用対効果が高い
+- **`sourceCode` が使えるなら `sourceCode` を選ぶ** — CODE SCANNER による静的分析は `documents` にはない独自の価値を持つ。コード品質系の指摘（MD5、レート制限、セキュリティヘッダー等）はセキュリティレビューとして実用的
+- **東京リージョンでは `documents` をフォールバックとして使う** — `sourceCode` は東京リージョンで INTERNAL_ERROR が発生した（2026年4月時点）。`documents` でも今回の検証では 5/5 の検出率を達成しており、十分実用的
+- **FALSE_POSITIVE は `sourceCode` のみで発生** — 静的分析の網羅性が高い分、動的検証で再現できない候補も出る。VALIDATOR TASK が自動で偽陽性を判定するため、手動での選別は不要
+
+## クリーンアップ
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">リソース削除手順</summary>
+
+```bash title="Terminal"
+# 東京リージョン
+aws s3 rb s3://security-agent-pentest-source-${ACCOUNT_ID} --force --region ap-northeast-1
+aws iam delete-role-policy --role-name SecurityAgentPentestRole \
+  --policy-name SecurityAgentS3ReadAccess 2>/dev/null
+
+# us-east-1
+aws securityagent batch-delete-pentests \
+  --agent-space-id $AGENT_SPACE_ID_USE1 \
+  --pentest-ids $PENTEST_ID_USE1 --region us-east-1
+aws securityagent delete-target-domain \
+  --target-domain-id $TARGET_DOMAIN_ID_USE1 --region us-east-1
+aws securityagent delete-agent-space \
+  --agent-space-id $AGENT_SPACE_ID_USE1 --region us-east-1
+aws ec2 terminate-instances --instance-ids $INSTANCE_ID_USE1 --region us-east-1
+aws ec2 delete-security-group --group-id $SG_ID_USE1 --region us-east-1
+aws s3 rb s3://security-agent-pentest-source-use1-${ACCOUNT_ID} --force --region us-east-1
+aws iam delete-role-policy --role-name SecurityAgentPentestRole \
+  --policy-name SecurityAgentS3ReadAccessUSE1 2>/dev/null
+aws iam delete-role-policy --role-name SecurityAgentPentestRole \
+  --policy-name SecurityAgentLogsAccessUSE1 2>/dev/null
+aws securityagent delete-application --application-id $APP_ID_USE1 --region us-east-1
+```
+
+</details>
