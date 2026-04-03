@@ -1,6 +1,6 @@
 ---
 title: "AgentCore CLI in Practice — Persist Conversation Memory Across Sessions"
-description: "Hands-on verification of AgentCore CLI Memory with SEMANTIC, USER_PREFERENCE, and SUMMARIZATION strategies. Covers async extraction timing, session ID constraints, and the gap between local dev and deployed behavior."
+description: "Hands-on verification of AgentCore CLI Memory with SEMANTIC, USER_PREFERENCE, SUMMARIZATION, and EPISODIC strategies. Covers async extraction timing, session ID constraints, and the gap between local dev and deployed behavior."
 date: "2026-03-24"
 published: true
 featured: false
@@ -14,15 +14,15 @@ tags: ["bedrock", "agentcore", "agentcore-cli", "agentcore-memory", "strands-age
 
 In the [previous article](/en/blog/2026/03/24/agentcore-cli-create-dev-deploy), we verified the basic AgentCore CLI lifecycle (`create → dev → deploy → invoke`). The default configuration creates a stateless agent — switch sessions and all context is lost.
 
-AgentCore Memory solves this by automatically extracting and persisting information from conversations across sessions. It has a two-layer architecture: short-term memory (conversation history within a session) and long-term memory (knowledge extraction across sessions). Long-term memory offers three [built-in strategies](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/built-in-strategies.html): SEMANTIC (factual information), USER_PREFERENCE (user settings), and SUMMARIZATION (conversation summaries).
+AgentCore Memory solves this by automatically extracting and persisting information from conversations across sessions. It has a two-layer architecture: short-term memory (conversation history within a session) and long-term memory (knowledge extraction across sessions). Long-term memory offers four [built-in strategies](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/built-in-strategies.html): SEMANTIC (factual information), USER_PREFERENCE (user settings), SUMMARIZATION (conversation summaries), and EPISODIC (episode memories).
 
 This article walks through creating a Memory-enabled agent with the AgentCore CLI, deploying it, and verifying that memories persist across sessions. See the [CLI Memory docs](https://github.com/aws/agentcore-cli/blob/main/docs/memory.md) and [configuration reference](https://github.com/aws/agentcore-cli/blob/main/docs/configuration.md) for the full spec.
 
-**AgentCore CLI is in Public Preview (v0.3.0-preview). Commands, options, and generated templates may change before GA. This article reflects behavior as of March 2026.**
+**This article was originally written using AgentCore CLI v0.3.0-preview and has been updated and re-verified with v0.6.0 (April 2026).**
 
 ## Prerequisites
 
-- Environment from [Part 1](/en/blog/2026/03/24/agentcore-cli-create-dev-deploy) (Node.js 20+, uv, AWS CLI, AgentCore CLI v0.3.0-preview)
+- Environment from [Part 1](/en/blog/2026/03/24/agentcore-cli-create-dev-deploy) (Node.js 20+, uv, AWS CLI, AgentCore CLI v0.6.0)
 - An AWS account in a supported AgentCore region
 
 ## The Three Memory Options
@@ -33,11 +33,11 @@ The `--memory` flag in `agentcore create` accepts three values:
 |--------|-----------|---------------------|
 | `none` | No | None |
 | `shortTerm` | Yes | None |
-| `longAndShortTerm` | Yes | SEMANTIC + USER_PREFERENCE + SUMMARIZATION |
+| `longAndShortTerm` | Yes | SEMANTIC + USER_PREFERENCE + SUMMARIZATION + EPISODIC |
 
 `shortTerm` keeps conversation history within a session only. `longAndShortTerm` adds automatic extraction of facts, preferences, and summaries that persist across sessions.
 
-This article uses `longAndShortTerm` to test all three long-term strategies.
+This article uses `longAndShortTerm` to test all four long-term strategies.
 
 ## Project Creation
 
@@ -55,13 +55,12 @@ cd AgentCoreMemTest
 
 ### Generated agentcore.json
 
-The `memories` array is populated with three strategies. Each strategy has `namespaces` with `{actorId}` and `{sessionId}` placeholders that are resolved at runtime.
+The `memories` array is populated with four strategies. Each strategy has `namespaces` with `{actorId}` and `{sessionId}` placeholders that are resolved at runtime.
 
 ```json title="agentcore/agentcore.json (memories section)"
 {
   "memories": [
     {
-      "type": "AgentCoreMemory",
       "name": "AgentCoreMemTestMemory",
       "eventExpiryDuration": 30,
       "strategies": [
@@ -76,6 +75,11 @@ The `memories` array is populated with three strategies. Each strategy has `name
         {
           "type": "SUMMARIZATION",
           "namespaces": ["/summaries/{actorId}/{sessionId}"]
+        },
+        {
+          "type": "EPISODIC",
+          "namespaces": ["/episodes/{actorId}/{sessionId}"],
+          "reflectionNamespaces": ["/episodes/{actorId}"]
         }
       ]
     }
@@ -92,8 +96,9 @@ The `memories` array is populated with three strategies. Each strategy has `name
 | SEMANTIC | Facts (name, job, project names) | `/users/{actorId}/facts` | Build a knowledge base about the user |
 | USER_PREFERENCE | Settings (editor, theme, language) | `/users/{actorId}/preferences` | Personalized responses |
 | SUMMARIZATION | Conversation summaries | `/summaries/{actorId}/{sessionId}` | Compress long conversation context |
+| EPISODIC | Episode memories (specific events, experiences) | `/episodes/{actorId}/{sessionId}` | Reasoning based on past experiences |
 
-SEMANTIC and USER_PREFERENCE accumulate per `actorId` (user ID) and are referenced across sessions. SUMMARIZATION is per `sessionId`, summarizing conversations within a single session.
+SEMANTIC and USER_PREFERENCE accumulate per `actorId` (user ID) and are referenced across sessions. SUMMARIZATION and EPISODIC are per `sessionId`, summarizing and recording conversations within a single session. EPISODIC also has `reflectionNamespaces` for cross-session episode reflection.
 
 ## Generated Agent Code
 
@@ -368,7 +373,7 @@ For new projects, `agentcore create --memory longAndShortTerm` is the simpler pa
 
 ## Summary
 
-- **`--memory longAndShortTerm` auto-configures three strategies** — SEMANTIC (facts), USER_PREFERENCE (settings), and SUMMARIZATION (summaries) are set up in `agentcore.json`, and integration code is generated in `memory/session.py` and `main.py`. No manual wiring needed.
+- **`--memory longAndShortTerm` auto-configures four strategies** — SEMANTIC (facts), USER_PREFERENCE (settings), SUMMARIZATION (summaries), and EPISODIC (episode memories) are set up in `agentcore.json`, and integration code is generated in `memory/session.py` and `main.py`. No manual wiring needed.
 - **Long-term memory extraction is asynchronous** — After conversation data is saved, background extraction takes 1–2 minutes. For use cases requiring immediate context, combine short-term memory (in-session history) with long-term memory.
 - **Memory requires deployment** — `agentcore dev` does not support Memory. Testing Memory behavior requires a full deploy, which lengthens the development cycle.
 - **Session IDs must be 33+ characters** — Short session IDs cause a validation error. Use UUIDs or sufficiently long identifiers.
@@ -379,7 +384,7 @@ Next up: connecting external MCP servers to agents using the Gateway feature.
 
 ```bash title="Terminal"
 # Remove all resource definitions
-agentcore remove all --force
+agentcore remove all -y
 
 # Delete AWS resources
 agentcore deploy -y

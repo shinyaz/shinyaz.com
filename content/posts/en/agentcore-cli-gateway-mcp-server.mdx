@@ -18,11 +18,11 @@ AgentCore Gateway acts as an MCP-compatible proxy that handles request routing, 
 
 This article registers an external MCP server ([Exa AI](https://exa.ai/) web search) as a Gateway target and verifies that the agent can call tools through the Gateway. See the [CLI Gateway docs](https://github.com/aws/agentcore-cli/blob/main/docs/gateway.md) and [configuration reference](https://github.com/aws/agentcore-cli/blob/main/docs/configuration.md#mcpjson) for the full spec.
 
-**AgentCore CLI is in Public Preview (v0.3.0-preview). Commands, options, and generated templates may change before GA. This article reflects behavior as of March 2026.**
+**This article was originally written using AgentCore CLI v0.3.0-preview and has been updated and re-verified with v0.6.0 (April 2026).**
 
 ## Prerequisites
 
-- Environment from [Part 1](/en/blog/2026/03/24/agentcore-cli-create-dev-deploy) (Node.js 20+, uv, AWS CLI, AgentCore CLI v0.3.0-preview)
+- Environment from [Part 1](/en/blog/2026/03/24/agentcore-cli-create-dev-deploy) (Node.js 20+, uv, AWS CLI, AgentCore CLI v0.6.0)
 - An AWS account in a supported AgentCore region
 
 ## Gateway Overview
@@ -245,7 +245,7 @@ Based on my web search, I found information about two different "AgentCore CLI" 
 
 ## 1. AWS AgentCore CLI (Primary Result)
 
-**Latest Version:** v0.3.0-preview.5.1 (Released March 12, 2026)
+**Latest Version:** v0.6.0 (Released April 2, 2026)
 - **Status:** Preview/Prerelease
 - **Repository:** https://github.com/aws/agentcore-cli
 - **Language:** TypeScript (97.3%)
@@ -285,7 +285,7 @@ Next up: measuring agent quality with LLM-as-a-Judge using the Evaluations featu
 
 ```bash title="Terminal"
 # Remove all resource definitions
-agentcore remove all --force
+agentcore remove all -y
 
 # Delete AWS resources
 agentcore deploy -y

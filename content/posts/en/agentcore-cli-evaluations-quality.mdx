@@ -18,11 +18,11 @@ AgentCore Evaluations uses the LLM-as-a-Judge pattern to assess agent quality. Y
 
 This article defines a custom evaluator, runs an on-demand evaluation, and examines the quality scores. See the [CLI Evaluations docs](https://github.com/aws/agentcore-cli/blob/main/docs/evals.md) for the full spec.
 
-**AgentCore CLI is in Public Preview (v0.3.0-preview). Commands, options, and generated templates may change before GA. This article reflects behavior as of March 2026.**
+**This article was originally written using AgentCore CLI v0.3.0-preview and has been updated and re-verified with v0.6.0 (April 2026).**
 
 ## Prerequisites
 
-- Environment from [Part 1](/en/blog/2026/03/24/agentcore-cli-create-dev-deploy) (Node.js 20+, uv, AWS CLI, AgentCore CLI v0.3.0-preview)
+- Environment from [Part 1](/en/blog/2026/03/24/agentcore-cli-create-dev-deploy) (Node.js 20+, uv, AWS CLI, AgentCore CLI v0.6.0)
 - **us-east-1 region** — The Evaluator CloudFormation resource (`AWS::BedrockAgentCore::Evaluator`) is only supported in certain regions. As of this writing, ap-northeast-1 is not supported, so we use us-east-1
 
 If `AWS_REGION` is set in your environment, it may override the region in `aws-targets.json`. If it's set to something other than us-east-1, run `export AWS_REGION=us-east-1` or `unset AWS_REGION` before proceeding.
@@ -169,8 +169,8 @@ agentcore status --json
 After traces are indexed (~10 minutes after invoke), run the evaluation.
 
 ```bash title="Terminal"
-agentcore run evals \
-  --agent AgentCoreEvalTest \
+agentcore run eval \
+  --runtime AgentCoreEvalTest \
   --evaluator ResponseQuality \
   --days 1
 ```
@@ -224,7 +224,7 @@ Each session gets a score with a detailed rationale from the judge LLM analyzing
 ### Viewing Evaluation History
 
 ```bash title="Terminal"
-agentcore evals history --agent AgentCoreEvalTest
+agentcore evals history --runtime AgentCoreEvalTest
 ```
 
 ```text title="Output"
@@ -244,7 +244,7 @@ Automatically sample and evaluate a percentage of live traffic.
 ```bash title="Terminal"
 agentcore add online-eval \
   --name QualityMonitor \
-  --agent AgentCoreEvalTest \
+  --runtime AgentCoreEvalTest \
   --evaluator ResponseQuality \
   --sampling-rate 10
 agentcore deploy -y
@@ -257,8 +257,8 @@ agentcore deploy -y
 Pre-built evaluators can be used alongside custom ones.
 
 ```bash title="Terminal"
-agentcore run evals \
-  --agent AgentCoreEvalTest \
+agentcore run eval \
+  --runtime AgentCoreEvalTest \
   --evaluator ResponseQuality Builtin.Faithfulness \
   --days 7
 ```
@@ -266,17 +266,17 @@ agentcore run evals \
 ## Summary
 
 - **Custom evaluators are declaratively defined in `agentcore.json`** — Evaluation prompt, model, and scoring criteria are configured with `add evaluator` and deployed with `deploy`. No code needed — the evaluation pipeline is built entirely from configuration.
-- **Trace indexing takes time** — About 10 minutes after invoke for traces to appear in `run evals`. First-time deployments also need Transaction Search activation time. Plan accordingly.
+- **Trace indexing takes time** — About 10 minutes after invoke for traces to appear in `run eval`. First-time deployments also need Transaction Search activation time. Plan accordingly.
 - **Evaluation results include detailed rationale** — Beyond scores, the judge LLM provides per-session analysis of accuracy, helpfulness, and clarity. Useful as feedback for quality improvement.
 - **Evaluator CloudFormation support is region-limited** — `AWS::BedrockAgentCore::Evaluator` is not supported in all regions (e.g., not in ap-northeast-1 as of this writing). Use us-east-1 or check regional availability.
 
-This series covered the four main AgentCore CLI features: Runtime, Memory, Gateway, and Evaluations. While the CLI is still in preview, its declarative design centered on `agentcore.json` and the unified `create → add → deploy → invoke` workflow enable consistent agent development through quality management. In the next bonus article, we combine all four features into a single project to build a practical agent.
+This series covered the four main AgentCore CLI features: Runtime, Memory, Gateway, and Evaluations. While the CLI is still at v0.x, its declarative design centered on `agentcore.json` and the unified `create → add → deploy → invoke` workflow enable consistent agent development through quality management. In the next bonus article, we combine all four features into a single project to build a practical agent.
 
 ## Cleanup
 
 ```bash title="Terminal"
 # Remove all resource definitions
-agentcore remove all --force
+agentcore remove all -y
 
 # Delete AWS resources
 agentcore deploy -y

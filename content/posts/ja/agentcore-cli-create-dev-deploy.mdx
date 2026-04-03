@@ -14,9 +14,9 @@ tags: ["bedrock", "agentcore", "agentcore-cli", "strands-agents", "ai-agents"]
 
 Amazon Bedrock AgentCore は、任意のフレームワークとモデルを使って AI エージェントをセキュアにデプロイ・運用するためのサービスだ。2025年7月に[プレビューとして発表](https://aws.amazon.com/about-aws/whats-new/2025/07/amazon-bedrock-agentcore-preview/)され、2025年10月に[一般提供が開始](https://aws.amazon.com/about-aws/whats-new/2025/10/amazon-bedrock-agentcore-available/)された。Runtime、Memory、Gateway、Identity などのコンポーネントが提供されており、現在は9リージョンで利用可能だ。
 
-AgentCore のプロジェクト作成・デプロイを支援する CLI ツールとして、Python ベースの [Bedrock AgentCore Starter Toolkit](https://github.com/aws/bedrock-agentcore-starter-toolkit) と、Node.js ベースの [AgentCore CLI](https://github.com/aws/agentcore-cli) の2つが公開されている。メンテナーによると [AgentCore CLI は Starter Toolkit の後継であり、Starter Toolkit は非推奨化が進められている](https://github.com/aws/agentcore-cli/issues/317#issuecomment-3936726654)。新規プロジェクトには AgentCore CLI が推奨されている。両者は `agentcore` という同名のコマンドを提供するため、[AgentCore CLI の README](https://github.com/aws/agentcore-cli#installation) では Starter Toolkit を先にアンインストールするよう案内されている。AgentCore CLI 自体はまだ Preview 段階（v0.3.0-preview）で、GA に向けて開発中とのことだ。
+AgentCore のプロジェクト作成・デプロイを支援する CLI ツールとして、Node.js ベースの [AgentCore CLI](https://github.com/aws/agentcore-cli) が公開されている。以前は Python ベースの [Bedrock AgentCore Starter Toolkit](https://github.com/aws/bedrock-agentcore-starter-toolkit) も存在したが、AgentCore CLI がその後継であり、Starter Toolkit は非推奨となっている。両者は `agentcore` という同名のコマンドを提供するため、Starter Toolkit がインストールされている場合は先にアンインストールが必要だ。
 
-**AgentCore CLI は Public Preview（v0.3.0-preview）段階であり、コマンド体系や生成テンプレートは GA までに変更される可能性がある。本記事の内容は 2026年3月時点の動作に基づいている。本番ワークロードへの適用は GA を待つことを推奨する。**
+**本記事は当初 AgentCore CLI v0.3.0-preview で検証した内容を、v0.6.0（2026年4月時点）で再検証し更新したものである。v0.4.0 で Preview サフィックスが外れ、コマンド体系にいくつかの破壊的変更が入っている。**
 
 本記事では、AgentCore CLI を使って `create → dev → deploy → invoke` の一連のライフサイクルを実際に検証した。CDK を意識せずにエージェントをデプロイできるか、ローカル開発の体験はどうか、デプロイ後のオブザーバビリティはどうなっているか、といった点を確認した結果を共有する。公式ドキュメントは [GitHub リポジトリの docs/](https://github.com/aws/agentcore-cli/tree/main/docs) を参照。
 
@@ -45,10 +45,10 @@ agentcore --version
 ```
 
 ```text title="Output"
-0.3.0-preview.6.1
+0.6.0
 ```
 
-Starter Toolkit がインストールされている場合は、コマンド名が競合するため先にアンインストールが必要だ。
+Starter Toolkit がインストールされている場合は、コマンド名が競合するため先にアンインストールが必要だ（`pip uninstall bedrock-agentcore-starter-toolkit` など）。
 
 ### プロジェクト作成
 
@@ -88,25 +88,31 @@ AgentCoreTest/
 
 ```json title="agentcore/agentcore.json"
 {
+  "$schema": "https://schema.agentcore.aws.dev/v1/agentcore.json",
   "name": "AgentCoreTest",
   "version": 1,
-  "agents": [
+  "managedBy": "CDK",
+  "tags": {
+    "agentcore:created-by": "agentcore-cli",
+    "agentcore:project-name": "AgentCoreTest"
+  },
+  "runtimes": [
     {
-      "type": "AgentCoreRuntime",
       "name": "AgentCoreTest",
       "build": "CodeZip",
       "entrypoint": "main.py",
       "codeLocation": "app/AgentCoreTest/",
-      "runtimeVersion": "PYTHON_3_12",
+      "runtimeVersion": "PYTHON_3_13",
       "networkMode": "PUBLIC",
-      "modelProvider": "Bedrock",
       "protocol": "HTTP"
     }
   ],
   "memories": [],
   "credentials": [],
   "evaluators": [],
-  "onlineEvalConfigs": []
+  "onlineEvalConfigs": [],
+  "agentCoreGateways": [],
+  "policyEngines": []
 }
 ```
 
@@ -245,22 +251,21 @@ Server: http://localhost:8080/invocations
 
 ### エージェントの呼び出し
 
-dev サーバーを起動したまま、別のターミナルを開いてプロジェクトディレクトリに移動し、`agentcore dev --invoke` でローカルエージェントに質問を送信する。
+dev サーバーを起動したまま、別のターミナルを開いてプロジェクトディレクトリに移動し、`agentcore dev` に位置引数でプロンプトを渡してローカルエージェントに質問を送信する。
 
 ```bash title="Terminal（別ターミナル）"
 cd AgentCoreTest
-agentcore dev --invoke "What is 3 + 5?" --stream
+agentcore dev "What is 3 + 5?" --stream
 ```
 
 ```text title="Output"
-Provider: Bedrock
-The answer is **8**.
+8
 ```
 
 ツール呼び出しを明示的に指示してみる。
 
 ```bash title="Terminal"
-agentcore dev --invoke "Please use the add_numbers tool to calculate 42 + 58" --stream
+agentcore dev "Please use the add_numbers tool to calculate 42 + 58" --stream
 ```
 
 ```text title="Output"
@@ -318,10 +323,10 @@ EOF
 
 ### デプロイの実行
 
-まず `--plan` でプレビューを確認できる。
+まず `--dry-run` でプレビューを確認できる。
 
 ```bash title="Terminal"
-agentcore deploy --plan --json
+agentcore deploy --dry-run --json
 ```
 
 ```json title="Output"
@@ -419,7 +424,7 @@ agentcore logs --agent AgentCoreTest --since 10m
 
 特に設定をしなくても、デプロイしたエージェントには OpenTelemetry ベースのオブザーバビリティが自動で組み込まれる。これは `pyproject.toml` に含まれる `aws-opentelemetry-distro` によるもので、AgentCore Runtime が自動的にトレースとログを収集する仕組みだ。
 
-なお、ログの中に `Failed to export span batch code: 400, reason: Bad Request` というエラーが出力されていた。エージェントの動作自体には影響しなかったが、トレースデータの一部が欠損する可能性がある。CLI が Preview 段階であることに起因する問題と思われる。
+なお、ログの中に `Failed to export span batch code: 400, reason: Bad Request` というエラーが出力されていた。エージェントの動作自体には影響しなかったが、トレースデータの一部が欠損する可能性がある。CLI がまだ v0.x 段階であることに起因する問題と思われる。
 
 ## まとめ
 
@@ -430,15 +435,15 @@ AgentCore CLI を使って、プロジェクト作成からデプロイ、動作
 - **構造化ログが標準装備** — デプロイ後のエージェントは OpenTelemetry ベースの構造化ログが自動で有効になり、トレース ID 付きでモデル呼び出しやツール実行の全過程が記録される。`agentcore logs` で手軽に確認できる。
 - **設定ファイル中心の宣言的な設計** — `agentcore.json` にエージェント、メモリ、クレデンシャル、評価器をすべて宣言的に定義し、`agentcore deploy` で反映する。リソースの追加・削除も `agentcore add` / `agentcore remove` → `agentcore deploy` のパターンで統一されている。
 
-今回はシンプルな構成での検証だったが、CLI は Memory（SEMANTIC / SUMMARIZATION / USER_PREFERENCE）、Gateway（MCP サーバー連携）、Evaluations（LLM-as-a-Judge による品質評価）などの機能もサポートしている。本シリーズの続編でこれらの機能を順に検証していく。
+今回はシンプルな構成での検証だったが、CLI は Memory（SEMANTIC / SUMMARIZATION / USER_PREFERENCE / EPISODIC）、Gateway（MCP サーバー連携）、Evaluations（LLM-as-a-Judge による品質評価）などの機能もサポートしている。本シリーズの続編でこれらの機能を順に検証していく。
 
-**繰り返しになるが、AgentCore CLI は Preview 段階のツールだ。** 開発体験は良好だが、CLI のコマンドやオプション、生成されるコードのテンプレートは今後変更される可能性がある。最新の仕様は [GitHub リポジトリ](https://github.com/aws/agentcore-cli)で確認してほしい。
+**繰り返しになるが、AgentCore CLI はまだ v0.x 段階のツールだ。** 開発体験は良好だが、CLI のコマンドやオプション、生成されるコードのテンプレートは今後変更される可能性がある。最新の仕様は [GitHub リポジトリ](https://github.com/aws/agentcore-cli)で確認してほしい。
 
 ## クリーンアップ
 
 ```bash title="Terminal"
 # プロジェクト内のリソース定義をすべて削除
-agentcore remove all --force
+agentcore remove all -y
 
 # AWS リソースを削除（空の状態をデプロイして CloudFormation スタックを削除）
 agentcore deploy -y
