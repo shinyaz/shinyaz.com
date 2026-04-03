@@ -1,0 +1,19 @@
+---
+title: "ApplicationSet Git Generator is slow to detect new directories"
+description: "Adding a new directory to a Git Directory Generator-based ApplicationSet took about 8 minutes to auto-generate the Application. Use hard refresh for existing Applications or webhooks for faster feedback."
+date: "2026-04-04"
+published: true
+tags: ["argocd", "applicationset", "eks", "gitops"]
+---
+
+After pushing a new `envs/staging/` directory for an ApplicationSet with a Git Directory Generator, it took about 8 minutes for the `nginx-staging` Application to be auto-generated. In the same environment, a single Application's manifest change was picked up in about 5 minutes, though the difference could be due to polling timing rather than a fundamental difference.
+
+For existing Applications, hard refresh triggers an immediate sync. But the timing of ApplicationSet generating a new Application depends on the Git Generator's polling cycle — there's no way to force it.
+
+```bash title="Terminal"
+# Immediately sync an existing Application
+kubectl annotate application <app-name> -n argocd \
+  argocd.argoproj.io/refresh=hard --overwrite
+```
+
+If you need faster feedback from CI/CD pipelines, consider configuring webhooks. [Full verification details here](/en/blog/2026/04/04/eks-argocd-capability-applicationset).

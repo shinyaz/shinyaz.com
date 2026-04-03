@@ -353,8 +353,7 @@ This is a key property of ApplicationSet. Because environments are isolated by d
 - **Watch out for the Git Generator's polling interval** — In this test, adding a new environment took about 8 minutes to reflect. Use hard refresh on individual Applications for immediate sync
 - **Be careful with ApplicationSet deletion** — According to the [official documentation](https://docs.aws.amazon.com/eks/latest/userguide/argocd-applicationsets.html), deleting an ApplicationSet deletes all generated Applications. With `prune: true`, deployed resources are also deleted. Use [preserveResourcesOnDeletion](https://argo-cd.readthedocs.io/en/stable/operator-manual/applicationset/Application-Deletion/) to keep resources when deleting the ApplicationSet
 
-<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
-<summary className="cursor-pointer font-medium">Cleanup</summary>
+## Cleanup
 
 ```bash title="Terminal"
 # Delete ApplicationSet (cascades to all generated Applications and resources)
@@ -373,5 +372,3 @@ aws codecommit delete-repository \
   --repository-name argocd-multi-env \
   --region ap-northeast-1
 ```
-
-</details>

@@ -1,0 +1,18 @@
+---
+title: "CodeCommit は存在しないリポジトリでも AccessDeniedException を返す"
+description: "IAM ポリシーの Resource を特定リポジトリにスコープしている場合、存在しないリポジトリへのアクセスも「リポジトリが見つからない」ではなく AccessDeniedException になる。"
+date: "2026-04-04"
+published: true
+tags: ["codecommit", "iam", "argocd", "troubleshooting"]
+---
+
+ArgoCD で CodeCommit 連携を試していたとき、Application の `repoURL` にリポジトリ名を間違えて入力した。「リポジトリが見つからない」というエラーを予想していたが、返ってきたのは IAM ポリシーが未設定のときとまったく同じ `AccessDeniedException` だった。
+
+```text title="Output"
+is not authorized to perform: codecommit:GitPull on resource:
+arn:aws:codecommit:ap-northeast-1:111122223333:argocd-demo-typo
+```
+
+IAM ポリシーの `Resource` を特定のリポジトリ ARN にスコープしていると、スコープ外のリポジトリ名はすべて権限エラーとして処理される。存在しないリポジトリかどうかは区別されない。
+
+`AccessDeniedException` が出たら、まず IAM ポリシーの `Resource` ARN と `repoURL` のリポジトリ名を突き合わせるのが最初のデバッグステップだ。typo で IAM 権限を疑って時間を浪費するのを防げる。[検証の詳細はこちら](/ja/blog/2026/04/04/eks-argocd-capability-codecommit)。

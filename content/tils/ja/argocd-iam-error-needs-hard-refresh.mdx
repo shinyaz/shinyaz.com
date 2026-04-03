@@ -1,0 +1,18 @@
+---
+title: "ArgoCD の IAM エラーは手動 refresh しないとリカバリが遅い"
+description: "IAM ポリシーを修正しても ArgoCD のバックオフにより自動リカバリに時間がかかる。argocd.argoproj.io/refresh=hard アノテーションで即座にリトライできる。"
+date: "2026-04-04"
+published: true
+tags: ["argocd", "eks", "iam", "troubleshooting"]
+---
+
+EKS ArgoCD Capability で CodeCommit 連携を試していたとき、`codecommit:GitPull` を付与し忘れた状態で Application を作成してしまった。`AccessDeniedException` が `status.conditions` に表示されたので、IAM ポリシーを追加して待ったが、約90秒経っても同じエラーが出続けた。
+
+ArgoCD はエラー発生時にリトライ間隔をバックオフする仕組みがあるため、ポリシー修正後もすぐには再試行されない。手動で hard refresh を実行したら約15秒でデプロイが始まった。
+
+```bash title="Terminal"
+kubectl annotate application <app-name> -n argocd \
+  argocd.argoproj.io/refresh=hard --overwrite
+```
+
+IAM 周りのエラーを修正したら、ポーリングを待たずにこのアノテーションで即座にリトライするのが確実だ。[検証の詳細はこちら](/ja/blog/2026/04/04/eks-argocd-capability-codecommit)。

@@ -384,8 +384,7 @@ done
 - **Git Generator のポーリング間隔に注意** — 今回の検証では、新環境追加の反映に約8分かかった。即座に反映したい場合は Application への hard refresh が有効だ
 - **ApplicationSet 削除時はカスケード削除に注意** — [公式ドキュメント](https://docs.aws.amazon.com/eks/latest/userguide/argocd-applicationsets.html)によると、ApplicationSet を削除すると生成された全 Application が削除される。`prune: true` が設定されている場合、デプロイ済みリソースも削除される。リソースを残したい場合は [preserveResourcesOnDeletion](https://argo-cd.readthedocs.io/en/stable/operator-manual/applicationset/Application-Deletion/) を設定する
 
-<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
-<summary className="cursor-pointer font-medium">クリーンアップ</summary>
+## クリーンアップ
 
 ```bash title="Terminal"
 # ApplicationSet の削除（生成された全 Application とリソースもカスケード削除される）
@@ -404,5 +403,3 @@ aws codecommit delete-repository \
   --repository-name argocd-multi-env \
   --region ap-northeast-1
 ```
-
-</details>

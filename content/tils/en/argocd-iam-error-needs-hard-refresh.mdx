@@ -1,0 +1,18 @@
+---
+title: "ArgoCD doesn't auto-recover from IAM errors — use hard refresh"
+description: "After fixing an IAM policy, ArgoCD's error backoff delays automatic retry. The argocd.argoproj.io/refresh=hard annotation triggers an immediate retry."
+date: "2026-04-04"
+published: true
+tags: ["argocd", "eks", "iam", "troubleshooting"]
+---
+
+While testing CodeCommit integration with EKS ArgoCD Capability, I forgot to attach `codecommit:GitPull` before creating the Application. The `AccessDeniedException` showed up in `status.conditions`, so I added the IAM policy and waited — but the same error persisted for over 90 seconds.
+
+ArgoCD backs off its retry interval on errors, so fixing the policy doesn't trigger an immediate retry. A manual hard refresh got the deployment going in about 15 seconds.
+
+```bash title="Terminal"
+kubectl annotate application <app-name> -n argocd \
+  argocd.argoproj.io/refresh=hard --overwrite
+```
+
+After fixing IAM-related errors, don't wait for polling — use this annotation for an immediate retry. [Full verification details here](/en/blog/2026/04/04/eks-argocd-capability-codecommit).

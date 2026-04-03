@@ -284,8 +284,7 @@ In both cases, authentication is handled by the Capability Role's IAM policy. Th
 - **URL typos and missing permissions produce the same error** — In this test, with the IAM policy scoped to a specific repository ARN, non-existent repositories also returned `AccessDeniedException`. When debugging, always cross-check the IAM policy's `Resource` ARN against the Application's `repoURL` first
 - **Manual refresh is recommended after fixing permissions** — In this test, the Application didn't auto-recover even after waiting about 90 seconds post-policy attachment. Use `argocd.argoproj.io/refresh=hard` to trigger an immediate retry
 
-<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
-<summary className="cursor-pointer font-medium">Cleanup</summary>
+## Cleanup
 
 ```bash title="Terminal"
 # Delete the Application (finalizer ensures cascading deletion)
@@ -301,5 +300,3 @@ aws codecommit delete-repository \
   --repository-name argocd-demo \
   --region ap-northeast-1
 ```
-
-</details>

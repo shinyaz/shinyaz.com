@@ -1,0 +1,18 @@
+---
+title: "CodeCommit returns AccessDeniedException for non-existent repositories"
+description: "When the IAM policy is scoped to a specific repository ARN, accessing a non-existent repo returns AccessDeniedException, not 'repository not found'. Compare the IAM Resource ARN with the repoURL to debug."
+date: "2026-04-04"
+published: true
+tags: ["codecommit", "iam", "argocd", "troubleshooting"]
+---
+
+While testing ArgoCD with CodeCommit, I accidentally used a wrong repository name in the Application's `repoURL`. I expected a "repository not found" error, but got the exact same `AccessDeniedException` as when the IAM policy was missing entirely.
+
+```text title="Output"
+is not authorized to perform: codecommit:GitPull on resource:
+arn:aws:codecommit:ap-northeast-1:111122223333:argocd-demo-typo
+```
+
+This happens because the IAM policy's `Resource` is scoped to a specific repository ARN. Any repository name outside that scope — whether it exists or not — is treated as a permission error.
+
+When you see `AccessDeniedException`, the first debugging step is to compare the `Resource` ARN in the IAM policy with the repository name in the `repoURL`. A simple typo can waste time chasing IAM permissions that are actually correct. [Full verification details here](/en/blog/2026/04/04/eks-argocd-capability-codecommit).

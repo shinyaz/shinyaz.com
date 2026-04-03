@@ -1,0 +1,19 @@
+---
+title: "ApplicationSet の Git Generator はディレクトリ変更の検知に時間がかかる"
+description: "ApplicationSet の Git Directory Generator で新ディレクトリを追加した場合、Application の自動生成に約8分かかった。即座に反映したい場合は hard refresh が有効。"
+date: "2026-04-04"
+published: true
+tags: ["argocd", "applicationset", "eks", "gitops"]
+---
+
+ApplicationSet の Git Directory Generator で `envs/staging/` を追加して push したところ、`nginx-staging` の Application が自動生成されるまでに約8分かかった。同じ環境で単一 Application のマニフェスト変更は約5分で反映されていたが、ポーリングタイミングのずれもあるため、単純な比較はできない。
+
+生成済みの Application に対しては hard refresh で即座に同期をトリガーできるが、ApplicationSet が新しい Application を生成するタイミング自体は Git Generator のポーリングサイクルに依存する。
+
+```bash title="Terminal"
+# 生成済みの Application を即座に同期する場合
+kubectl annotate application <app-name> -n argocd \
+  argocd.argoproj.io/refresh=hard --overwrite
+```
+
+CI/CD パイプラインから即座に反映したい場合は、Webhook の設定を検討するとよい。[検証の詳細はこちら](/ja/blog/2026/04/04/eks-argocd-capability-applicationset)。
