@@ -1,7 +1,7 @@
 ---
 title: "EKS ArgoCD Capability — Deploy from a CodeCommit Private Repository via GitOps"
-description: "Just one IAM policy addition to the Capability Role enables CodeCommit private repo deployments. Watch out: URL typos and missing permissions produce the same error, and manual refresh is needed after fixing permissions."
-date: "2026-04-03"
+description: "Just one IAM policy addition to the Capability Role enables CodeCommit private repo deployments. Watch out: URL typos and missing permissions produce the same error, and manual refresh is recommended after fixing permissions."
+date: "2026-04-04"
 published: true
 featured: false
 series: "eks-argocd-capability"
@@ -14,7 +14,7 @@ tags: ["aws", "eks", "kubernetes", "argocd", "gitops", "codecommit", "devops"]
 
 In the [previous](/en/blog/2026/03/21/eks-argocd-capability-eksctl) [two posts](/en/blog/2026/03/21/eks-argocd-capability), I set up EKS ArgoCD Capability and deployed from a public GitHub repository (the guestbook sample). In real projects, however, deployment manifests live in private repositories.
 
-EKS ArgoCD Capability supports "direct integration" with CodeCommit. By adding `codecommit:GitPull` to the Capability Role, you can deploy from a private repository without creating a Repository Secret. Unlike self-hosted ArgoCD, which requires managing Git credentials as Kubernetes Secrets, the Capability version handles authentication entirely through IAM.
+EKS ArgoCD Capability supports "direct integration" with CodeCommit. Direct integration means specifying the CodeCommit URL directly in the Application's `repoURL` without creating a Repository Secret (a Kubernetes Secret that stores repository authentication information). By adding `codecommit:GitPull` to the Capability Role, authentication is handled transparently through IAM. Unlike self-hosted ArgoCD, which requires managing Git credentials as Kubernetes Secrets, the Capability version handles authentication entirely through IAM.
 
 This post walks through building a GitOps deployment from a CodeCommit private repository using direct integration, and examines error behavior when things go wrong. See the official documentation at [Configure repository access](https://docs.aws.amazon.com/eks/latest/userguide/argocd-configure-repositories.html).
 
@@ -95,7 +95,7 @@ git push -u origin main
 
 ### Add Permissions to the Capability Role
 
-Add a `codecommit:GitPull` inline policy to the Capability Role.
+Add a `codecommit:GitPull` inline policy to the Capability Role. Replace `111122223333` with your AWS account ID.
 
 ```bash title="Terminal"
 aws iam put-role-policy \
@@ -117,7 +117,7 @@ Note that `Resource` is scoped to the specific repository ARN. You could use `*`
 
 ### Create the Application and Deploy
 
-Create an Application with the CodeCommit HTTPS URL as `repoURL`. No Repository Secret is needed.
+Create an Application with the CodeCommit HTTPS URL as `repoURL`. No Repository Secret is needed. The `destination.name` should match the target cluster name registered in [series part 1](/en/blog/2026/03/21/eks-argocd-capability) (`local-cluster`).
 
 ```yaml title="nginx-codecommit.yaml"
 apiVersion: argoproj.io/v1alpha1
@@ -147,6 +147,8 @@ spec:
 ```bash title="Terminal"
 kubectl apply -f nginx-codecommit.yaml
 ```
+
+The `finalizers` field ensures deployed resources are cascade-deleted when the Application is removed (a lesson from [series part 2](/en/blog/2026/03/21/eks-argocd-capability-eksctl)). `syncPolicy.automated` enables automatic sync on Git changes: `prune: true` removes resources from the cluster when they're deleted from Git, and `selfHeal: true` reverts manual cluster changes to match Git state. These are convenient for testing, but in production, enable `prune` carefully to avoid unintended deletions.
 
 After about a minute, the Application reached `Synced` / `Healthy`.
 
@@ -178,6 +180,17 @@ git commit -am "Scale nginx to 2 replicas" && git push
 
 ArgoCD's default polling interval is about 3 minutes. Monitoring every 30 seconds, **the new revision was picked up about 5 minutes 15 seconds after the push**, and pods scaled to 2.
 
+```bash title="Terminal (monitor auto-sync)"
+# Check revision and pod count every 30 seconds
+while true; do
+  rev=$(kubectl get application nginx-codecommit -n argocd \
+    -o jsonpath='{.status.sync.revision}' 2>/dev/null)
+  pods=$(kubectl get pods -n default --no-headers 2>/dev/null | wc -l)
+  echo "$(date +%H:%M:%S) revision=${rev:0:8} pods=$pods"
+  sleep 30
+done
+```
+
 ```text title="Output (monitored every 30s)"
 20:54:12 revision=d3bd890b pods=1
 20:54:44 revision=d3bd890b pods=1
@@ -186,11 +199,11 @@ ArgoCD's default polling interval is about 3 minutes. Monitoring every 30 second
 20:58:56 revision=c03946cd pods=2  ← synced here
 ```
 
-Considering the polling interval (~3 min) plus IAM authentication overhead, ~5 minutes is within expectations. For faster feedback, consider configuring [webhooks](https://docs.aws.amazon.com/eks/latest/userguide/argocd-considerations.html).
+Considering the polling interval (~3 min), ~5 minutes is within expectations. The exact time varies depending on when the push lands relative to the polling cycle. For faster feedback, consider configuring [webhooks](https://docs.aws.amazon.com/eks/latest/userguide/argocd-considerations.html).
 
 ## Verification 2: Error Behavior and Debugging on Misconfiguration
 
-With direct integration, the repository doesn't appear in ArgoCD UI's Settings → Repositories. Since no Repository Secret exists, ArgoCD doesn't "know" about the repository. Connection testing from the UI isn't possible either.
+With direct integration, the repository doesn't appear in ArgoCD UI's Settings → Repositories. The Repositories screen is built from Kubernetes Secrets labeled `argocd.argoproj.io/secret-type: repository`, so without a Repository Secret, ArgoCD has no record of the repository. Connection testing from the UI isn't possible either.
 
 So where do you look when something goes wrong? I reproduced two common mistakes to find out.
 
@@ -216,7 +229,7 @@ rpc error: code = Unknown desc = failed to list refs: authorization failed:
 
 The error message is highly specific — it clearly states which role, which action, and which resource was denied. IAM errors propagate directly into ArgoCD conditions, providing sufficient information for debugging.
 
-However, **the Application doesn't automatically recover after adding the permission**. Even after attaching the IAM policy, the same error persisted through ArgoCD's next polling cycle. A manual hard refresh was required:
+However, **the Application doesn't recover immediately after adding the permission**. In this test, the same error persisted even after attaching the IAM policy and waiting about 90 seconds. ArgoCD has a backoff mechanism for retry intervals on errors, which likely explains the delay. A manual hard refresh triggers an immediate retry:
 
 ```bash title="Terminal"
 kubectl annotate application nginx-codecommit -n argocd \
@@ -227,20 +240,14 @@ Deployment started about 15 seconds after the hard refresh.
 
 ### Case 2: Typo in the Repository URL
 
-I tested with a non-existent repository name (`argocd-demo-typo`):
+I created an Application with a non-existent repository name (`argocd-demo-typo`) in the `repoURL` to test the error. The same `AccessDeniedException` was returned — only the resource ARN in the error message changed to `argocd-demo-typo`.
 
-```text title="Output"
-Failed to load target state: failed to generate manifest for source 1 of 1:
-rpc error: code = Unknown desc = failed to list refs: authorization failed:
-<AccessDeniedException>
-  <Message>User: arn:aws:sts::111122223333:assumed-role/ArgoCDCapabilityRole/...
+```text title="Output (diff from Case 1)"
   is not authorized to perform: codecommit:GitPull on resource:
   arn:aws:codecommit:ap-northeast-1:111122223333:argocd-demo-typo
-  because no identity-based policy allows the codecommit:GitPull action</Message>
-</AccessDeniedException>
 ```
 
-**Both URL typos and missing permissions produce the same `AccessDeniedException`.** Because the IAM policy is scoped to a specific repository ARN, accessing a non-existent repository is also treated as "not authorized" rather than "not found."
+**Both URL typos and missing permissions produce the same `AccessDeniedException`.** In this test, the IAM policy's `Resource` was scoped to a specific repository ARN, so any repository name outside that scope was treated as a permission error. You won't see a "repository not found" error.
 
 This can be confusing during debugging. When you see `AccessDeniedException`, the first step should be comparing the `Resource` ARN in your IAM policy against the `repoURL` in your Application to verify the repository name matches.
 
@@ -262,7 +269,7 @@ stringData:
   project: default
 ```
 
-With a Repository Secret, the repository appears in ArgoCD UI's Settings → Repositories, where you can check connection status.
+With a Repository Secret, the repository appears in ArgoCD UI's Settings → Repositories. According to the [official documentation](https://docs.aws.amazon.com/eks/latest/userguide/argocd-configure-repositories.html), the UI shows connection status and any authentication errors.
 
 **When to choose which:**
 
@@ -274,8 +281,8 @@ In both cases, authentication is handled by the Capability Role's IAM policy. Th
 ## Summary
 
 - **One IAM policy is all you need for CodeCommit integration** — Adding `codecommit:GitPull` to the Capability Role enables private repository deployments without Repository Secrets. The Git credential management required by self-hosted ArgoCD is eliminated entirely
-- **URL typos and missing permissions produce the same error** — Because the IAM policy is scoped to a specific repository ARN, non-existent repositories also return `AccessDeniedException`. When debugging, always cross-check the IAM policy's `Resource` ARN against the Application's `repoURL` first
-- **Manual refresh is needed after fixing permissions** — ArgoCD doesn't automatically recover from IAM errors. After adding the missing policy, run `argocd.argoproj.io/refresh=hard` to trigger an immediate retry
+- **URL typos and missing permissions produce the same error** — In this test, with the IAM policy scoped to a specific repository ARN, non-existent repositories also returned `AccessDeniedException`. When debugging, always cross-check the IAM policy's `Resource` ARN against the Application's `repoURL` first
+- **Manual refresh is recommended after fixing permissions** — In this test, the Application didn't auto-recover even after waiting about 90 seconds post-policy attachment. Use `argocd.argoproj.io/refresh=hard` to trigger an immediate retry
 
 <details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
 <summary className="cursor-pointer font-medium">Cleanup</summary>

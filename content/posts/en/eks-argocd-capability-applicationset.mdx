@@ -1,0 +1,377 @@
+---
+title: "EKS ArgoCD Capability — Auto-Deploy to Multiple Environments with ApplicationSet"
+description: "Git Directory Generator auto-creates dev/staging/prod Applications from directory structure. Adding an environment is just a directory push, and per-environment changes don't affect others. Watch out for the longer polling interval."
+date: "2026-04-04"
+published: true
+featured: false
+series: "eks-argocd-capability"
+seriesOrder: 4
+categories: [infrastructure]
+tags: ["aws", "eks", "kubernetes", "argocd", "gitops", "codecommit", "applicationset", "devops"]
+---
+
+## Introduction
+
+In the [previous post](/en/blog/2026/04/04/eks-argocd-capability-codecommit), I deployed a single Application from a CodeCommit private repository. In real projects, however, you need to deploy to multiple environments like dev/staging/prod. Manually creating an Application for each environment leads to configuration drift and management overhead.
+
+ArgoCD's [ApplicationSet](https://docs.aws.amazon.com/eks/latest/userguide/argocd-applicationsets.html) auto-generates multiple Applications from a template and generator combination. With the Git Directory Generator, each directory in your repository becomes an environment, and adding a directory automatically creates a new Application — a "directory structure = environment configuration" GitOps pattern.
+
+This post adds an ApplicationSet on top of the CodeCommit direct integration from the previous post, building auto-deployment to multiple environments. I verify that adding new environments and making per-environment changes work as expected.
+
+Prerequisites:
+
+- EKS cluster with ArgoCD Capability set up ([series part 1](/en/blog/2026/03/21/eks-argocd-capability))
+- Target cluster registered
+- Capability Role with `codecommit:GitPull` experience ([previous post](/en/blog/2026/04/04/eks-argocd-capability-codecommit) — a new policy for the new repository is added in this post)
+- AWS CLI, kubectl, and git configured
+- Test region: ap-northeast-1
+
+## Verification 1: Auto-Deploy to Multiple Environments with Git Directory Generator
+
+### Prepare the CodeCommit Repository
+
+Create a CodeCommit repository with per-environment directories containing manifests.
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">CodeCommit repository setup steps</summary>
+
+```bash title="Terminal"
+aws codecommit create-repository \
+  --repository-name argocd-multi-env \
+  --repository-description "Multi-environment demo for ArgoCD ApplicationSet"
+```
+
+```bash title="Terminal"
+git clone https://git-codecommit.ap-northeast-1.amazonaws.com/v1/repos/argocd-multi-env
+cd argocd-multi-env
+git config credential.helper '!aws codecommit credential-helper $@'
+git config credential.UseHttpPath true
+```
+
+Add the repository permission to the Capability Role. Replace `111122223333` with your AWS account ID.
+
+```bash title="Terminal"
+aws iam put-role-policy \
+  --role-name ArgoCDCapabilityRole \
+  --policy-name CodeCommitGitPullMultiEnv \
+  --policy-document '{
+    "Version": "2012-10-17",
+    "Statement": [
+      {
+        "Effect": "Allow",
+        "Action": "codecommit:GitPull",
+        "Resource": "arn:aws:codecommit:ap-northeast-1:111122223333:argocd-multi-env"
+      }
+    ]
+  }'
+```
+
+</details>
+
+The directory structure looks like this. Each directory under `envs/` represents an environment with its own manifests.
+
+```text title="Directory structure"
+envs/
+  dev/
+    deployment.yaml    # replicas: 1
+  prod/
+    deployment.yaml    # replicas: 3
+```
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">Manifest content (dev)</summary>
+
+```yaml title="envs/dev/deployment.yaml"
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nginx
+  labels:
+    app: nginx
+    env: dev
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: nginx
+  template:
+    metadata:
+      labels:
+        app: nginx
+        env: dev
+    spec:
+      containers:
+        - name: nginx
+          image: nginx:1.27
+          ports:
+            - containerPort: 80
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: nginx
+spec:
+  selector:
+    app: nginx
+  ports:
+    - port: 80
+      targetPort: 80
+```
+
+The prod version uses `replicas: 3` and `env: prod`.
+
+```yaml title="envs/prod/deployment.yaml"
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nginx
+  labels:
+    app: nginx
+    env: prod
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: nginx
+  template:
+    metadata:
+      labels:
+        app: nginx
+        env: prod
+    spec:
+      containers:
+        - name: nginx
+          image: nginx:1.27
+          ports:
+            - containerPort: 80
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: nginx
+spec:
+  selector:
+    app: nginx
+  ports:
+    - port: 80
+      targetPort: 80
+```
+
+</details>
+
+```bash title="Terminal"
+git add . && git commit -m "Initial commit: dev and prod environments"
+git push -u origin main
+```
+
+### Create the ApplicationSet
+
+Create an ApplicationSet with a Git Directory Generator that matches directories under `envs/*`.
+
+```yaml title="nginx-multi-env.yaml"
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: nginx-multi-env
+  namespace: argocd
+spec:
+  generators:
+  - git:
+      repoURL: https://git-codecommit.ap-northeast-1.amazonaws.com/v1/repos/argocd-multi-env
+      revision: main
+      directories:
+      - path: envs/*
+  template:
+    metadata:
+      name: 'nginx-{{path.basename}}'
+      namespace: argocd
+      finalizers:
+        - resources-finalizer.argocd.argoproj.io
+    spec:
+      project: default
+      source:
+        repoURL: https://git-codecommit.ap-northeast-1.amazonaws.com/v1/repos/argocd-multi-env
+        targetRevision: main
+        path: '{{path}}'
+      destination:
+        name: local-cluster
+        namespace: '{{path.basename}}'
+      syncPolicy:
+        automated:
+          prune: true
+          selfHeal: true
+        syncOptions:
+          - CreateNamespace=true
+```
+
+The key is how `{{path.basename}}` is used. An ApplicationSet generates parameters from `generators` and applies them to the `template` to create Applications. With the Git Directory Generator, `path` and `path.basename` are generated for each directory matching `envs/*`. For `envs/dev`, `path.basename` resolves to `dev`. This is used for both the Application name (`nginx-dev`) and the target namespace (`dev`). The directory name directly becomes the environment name.
+
+```bash title="Terminal"
+kubectl apply -f nginx-multi-env.yaml
+```
+
+After about a minute, two Applications were auto-generated.
+
+```text title="Output"
+NAME         SYNC STATUS   HEALTH STATUS   REVISION                                   PROJECT
+nginx-dev    Synced        Healthy         dbecbdf2e1d8610355b38bf8328a346d1d88ea53   default
+nginx-prod   Synced        Healthy         dbecbdf2e1d8610355b38bf8328a346d1d88ea53   default
+```
+
+Pod counts match the expected values.
+
+```text title="Output"
+=== dev ===
+NAME                    READY   STATUS    RESTARTS   AGE
+nginx-c89f94576-4llrw   1/1     Running   0          53s
+
+=== prod ===
+NAME                     READY   STATUS    RESTARTS   AGE
+nginx-7bd6c6d75b-4qpxb   1/1     Running   0          54s
+nginx-7bd6c6d75b-dnqcr   1/1     Running   0          54s
+nginx-7bd6c6d75b-lcd8n   1/1     Running   0          54s
+```
+
+**A single ApplicationSet auto-generated two Applications based on the directory structure.** Namespaces were also auto-created via `CreateNamespace=true`.
+
+### Adding a New Environment
+
+To add a staging environment, just create the `envs/staging/` directory and push. No changes to the ApplicationSet definition are needed.
+
+```bash title="Terminal"
+# Create envs/staging/deployment.yaml (replicas: 2)
+git add . && git commit -m "Add staging environment"
+git push
+```
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">Staging manifest content</summary>
+
+```yaml title="envs/staging/deployment.yaml"
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nginx
+  labels:
+    app: nginx
+    env: staging
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: nginx
+  template:
+    metadata:
+      labels:
+        app: nginx
+        env: staging
+    spec:
+      containers:
+        - name: nginx
+          image: nginx:1.27
+          ports:
+            - containerPort: 80
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: nginx
+spec:
+  selector:
+    app: nginx
+  ports:
+    - port: 80
+      targetPort: 80
+```
+
+</details>
+
+In this test, **`nginx-staging` was auto-generated about 8 minutes after the push**.
+
+```text title="Output"
+NAME            SYNC STATUS   HEALTH STATUS   REVISION                                   PROJECT
+nginx-dev       Synced        Healthy         f6d2a1cc107ab6a13c9ac72831a4f8fe7bb5a6c2   default
+nginx-prod      Synced        Healthy         f6d2a1cc107ab6a13c9ac72831a4f8fe7bb5a6c2   default
+nginx-staging   Synced        Healthy         f6d2a1cc107ab6a13c9ac72831a4f8fe7bb5a6c2   default
+```
+
+Staging pods were running correctly with 2 replicas.
+
+```text title="Output"
+=== staging ===
+NAME                    READY   STATUS    RESTARTS   AGE
+nginx-d7dcb7974-4rdtl   1/1     Running   0          24s
+nginx-d7dcb7974-6n6kp   1/1     Running   0          24s
+```
+
+**Adding a directory and pushing was all it took — the ApplicationSet definition didn't need to change.** However, the Git Generator's polling interval meant it took about 8 minutes to reflect. In the previous post, a single Application's auto-sync took about 5 minutes, so depending on polling timing, expect a similar or longer wait.
+
+## Verification 2: Do Per-Environment Manifest Changes Affect Other Environments?
+
+With ApplicationSet, template changes are expected to affect all generated Applications, while per-environment manifest changes should affect only that environment. I verified the latter — per-environment isolation — in practice.
+
+I changed dev's replicas from 1 to 2 and pushed.
+
+```bash title="Terminal"
+# Change envs/dev/deployment.yaml replicas: 1 → 2
+git commit -am "Scale dev to 2 replicas" && git push
+```
+
+Instead of waiting for polling, I triggered a hard refresh on the dev Application.
+
+```bash title="Terminal"
+kubectl annotate application nginx-dev -n argocd \
+  argocd.argoproj.io/refresh=hard --overwrite
+```
+
+Checking pod counts per environment:
+
+```bash title="Terminal"
+for ns in dev staging prod; do
+  echo "=== $ns ==="
+  kubectl get pods -n $ns --no-headers | wc -l
+done
+```
+
+```text title="Output"
+=== dev ===
+2
+=== staging ===
+2
+=== prod ===
+3
+```
+
+**Only dev scaled from 1 to 2 pods. Staging (2 pods) and prod (3 pods) remained unchanged.** Per-environment manifest changes are reflected only in that environment's Application and don't affect others.
+
+This is a key property of ApplicationSet. Because environments are isolated by directory structure, changes to `envs/dev/` are tracked only by the `nginx-dev` Application. As long as `envs/prod/` manifests are unchanged, `nginx-prod` stays synced.
+
+## Summary
+
+- **Adding a directory is all it takes to create a new environment** — The Git Directory Generator watches for directories matching `envs/*` and auto-generates a corresponding Application when a new directory appears. No changes to the ApplicationSet definition are needed
+- **Per-environment changes don't affect other environments** — Manifest changes in `envs/dev/` are reflected only in `nginx-dev`. Staging and prod remain unaffected. Directory-based environment isolation works correctly with ApplicationSet
+- **Watch out for the Git Generator's polling interval** — In this test, adding a new environment took about 8 minutes to reflect. Use hard refresh on individual Applications for immediate sync
+- **Be careful with ApplicationSet deletion** — According to the [official documentation](https://docs.aws.amazon.com/eks/latest/userguide/argocd-applicationsets.html), deleting an ApplicationSet deletes all generated Applications. With `prune: true`, deployed resources are also deleted. Use [preserveResourcesOnDeletion](https://argo-cd.readthedocs.io/en/stable/operator-manual/applicationset/Application-Deletion/) to keep resources when deleting the ApplicationSet
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">Cleanup</summary>
+
+```bash title="Terminal"
+# Delete ApplicationSet (cascades to all generated Applications and resources)
+kubectl delete applicationset nginx-multi-env -n argocd
+
+# Delete namespaces
+kubectl delete namespace dev staging prod
+
+# Delete IAM policy
+aws iam delete-role-policy \
+  --role-name ArgoCDCapabilityRole \
+  --policy-name CodeCommitGitPullMultiEnv
+
+# Delete CodeCommit repository
+aws codecommit delete-repository \
+  --repository-name argocd-multi-env \
+  --region ap-northeast-1
+```
+
+</details>

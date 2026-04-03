@@ -1,0 +1,408 @@
+---
+title: "EKS ArgoCD Capability 構築 — ApplicationSet で複数環境に自動デプロイする"
+description: "Git Directory Generator でディレクトリ構造から dev/staging/prod の Application を自動生成。環境追加はディレクトリ push だけ、個別環境の変更は他に波及しない。ポーリング間隔が長い点に注意。"
+date: "2026-04-04"
+published: true
+featured: false
+series: "eks-argocd-capability"
+seriesOrder: 4
+categories: [infrastructure]
+tags: ["aws", "eks", "kubernetes", "argocd", "gitops", "codecommit", "applicationset", "devops"]
+---
+
+## はじめに
+
+[前回の記事](/ja/blog/2026/04/04/eks-argocd-capability-codecommit)では、CodeCommit プライベートリポジトリから単一の Application をデプロイした。しかし実プロジェクトでは dev/staging/prod のように複数環境へのデプロイが求められる。環境ごとに Application を手動で作成すると、設定の同期漏れや管理コストが増える。
+
+ArgoCD の [ApplicationSet](https://docs.aws.amazon.com/eks/latest/userguide/argocd-applicationsets.html) は、テンプレートとジェネレーターを組み合わせて複数の Application を自動生成する機能だ。Git Directory Generator を使えば、リポジトリ内のディレクトリ構造から環境ごとの Application を自動生成できる。ディレクトリを追加するだけで新環境の Application が生成される「ディレクトリ構造 = 環境構成」の GitOps パターンだ。
+
+この記事では、前回構築した CodeCommit 直接統合の上に ApplicationSet を追加し、複数環境への自動デプロイを構築する。新環境追加の自動化と、個別環境変更の分離が両立することを実機で確認する。
+
+前提条件:
+
+- EKS クラスターに ArgoCD Capability が構築済み（[シリーズ第1回](/ja/blog/2026/03/21/eks-argocd-capability)参照）
+- ターゲットクラスターが登録済み
+- Capability Role に `codecommit:GitPull` の設定経験がある（[前回の記事](/ja/blog/2026/04/04/eks-argocd-capability-codecommit)参照。今回は新リポジトリ用に別途追加する）
+- AWS CLI、kubectl、git が設定済み
+- 検証リージョン: ap-northeast-1
+
+## 検証 1: Git Directory Generator で複数環境に自動デプロイする
+
+### CodeCommit リポジトリの準備
+
+CodeCommit にリポジトリを作成し、環境ごとのディレクトリにマニフェストを配置する。
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">CodeCommit リポジトリの作成手順</summary>
+
+```bash title="Terminal"
+aws codecommit create-repository \
+  --repository-name argocd-multi-env \
+  --repository-description "Multi-environment demo for ArgoCD ApplicationSet"
+```
+
+```bash title="Terminal"
+git clone https://git-codecommit.ap-northeast-1.amazonaws.com/v1/repos/argocd-multi-env
+cd argocd-multi-env
+git config credential.helper '!aws codecommit credential-helper $@'
+git config credential.UseHttpPath true
+```
+
+Capability Role に新リポジトリの権限を追加する。`111122223333` は自分の AWS アカウント ID に置き換える。
+
+```bash title="Terminal"
+aws iam put-role-policy \
+  --role-name ArgoCDCapabilityRole \
+  --policy-name CodeCommitGitPullMultiEnv \
+  --policy-document '{
+    "Version": "2012-10-17",
+    "Statement": [
+      {
+        "Effect": "Allow",
+        "Action": "codecommit:GitPull",
+        "Resource": "arn:aws:codecommit:ap-northeast-1:111122223333:argocd-multi-env"
+      }
+    ]
+  }'
+```
+
+</details>
+
+ディレクトリ構造は以下の通り。`envs/` 配下に環境ごとのディレクトリを作成し、それぞれにマニフェストを配置する。
+
+```text title="ディレクトリ構造"
+envs/
+  dev/
+    deployment.yaml    # replicas: 1
+  prod/
+    deployment.yaml    # replicas: 3
+```
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">マニフェストの内容（dev）</summary>
+
+```yaml title="envs/dev/deployment.yaml"
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nginx
+  labels:
+    app: nginx
+    env: dev
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: nginx
+  template:
+    metadata:
+      labels:
+        app: nginx
+        env: dev
+    spec:
+      containers:
+        - name: nginx
+          image: nginx:1.27
+          ports:
+            - containerPort: 80
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: nginx
+spec:
+  selector:
+    app: nginx
+  ports:
+    - port: 80
+      targetPort: 80
+```
+
+prod は `replicas: 3` と `env: prod` に変更したもの。
+
+```yaml title="envs/prod/deployment.yaml"
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nginx
+  labels:
+    app: nginx
+    env: prod
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: nginx
+  template:
+    metadata:
+      labels:
+        app: nginx
+        env: prod
+    spec:
+      containers:
+        - name: nginx
+          image: nginx:1.27
+          ports:
+            - containerPort: 80
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: nginx
+spec:
+  selector:
+    app: nginx
+  ports:
+    - port: 80
+      targetPort: 80
+```
+
+</details>
+
+```bash title="Terminal"
+git add . && git commit -m "Initial commit: dev and prod environments"
+git push -u origin main
+```
+
+### ApplicationSet の作成
+
+ApplicationSet を作成する。Git Directory Generator で `envs/*` にマッチするディレクトリごとに Application を自動生成する。
+
+```yaml title="nginx-multi-env.yaml"
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: nginx-multi-env
+  namespace: argocd
+spec:
+  generators:
+  - git:
+      repoURL: https://git-codecommit.ap-northeast-1.amazonaws.com/v1/repos/argocd-multi-env
+      revision: main
+      directories:
+      - path: envs/*
+  template:
+    metadata:
+      name: 'nginx-{{path.basename}}'
+      namespace: argocd
+      finalizers:
+        - resources-finalizer.argocd.argoproj.io
+    spec:
+      project: default
+      source:
+        repoURL: https://git-codecommit.ap-northeast-1.amazonaws.com/v1/repos/argocd-multi-env
+        targetRevision: main
+        path: '{{path}}'
+      destination:
+        name: local-cluster
+        namespace: '{{path.basename}}'
+      syncPolicy:
+        automated:
+          prune: true
+          selfHeal: true
+        syncOptions:
+          - CreateNamespace=true
+```
+
+ポイントは `{{path.basename}}` の使い方だ。ApplicationSet は `generators` でパラメータを生成し、`template` に適用して Application を作成する。Git Directory Generator の場合、`envs/*` にマッチする各ディレクトリに対して `path` と `path.basename` が生成される。`envs/dev` の場合、`path.basename` は `dev` になる。これを Application 名（`nginx-dev`）とデプロイ先 namespace（`dev`）の両方に使っている。ディレクトリ名がそのまま環境名になる設計だ。
+
+```bash title="Terminal"
+kubectl apply -f nginx-multi-env.yaml
+```
+
+約1分後、2つの Application が自動生成された。
+
+```bash title="Terminal"
+kubectl get application -n argocd -o wide
+```
+
+```text title="Output"
+NAME         SYNC STATUS   HEALTH STATUS   REVISION                                   PROJECT
+nginx-dev    Synced        Healthy         dbecbdf2e1d8610355b38bf8328a346d1d88ea53   default
+nginx-prod   Synced        Healthy         dbecbdf2e1d8610355b38bf8328a346d1d88ea53   default
+```
+
+各環境の Pod 数も正しい。
+
+```text title="Output"
+=== dev ===
+NAME                    READY   STATUS    RESTARTS   AGE
+nginx-c89f94576-4llrw   1/1     Running   0          53s
+
+=== prod ===
+NAME                     READY   STATUS    RESTARTS   AGE
+nginx-7bd6c6d75b-4qpxb   1/1     Running   0          54s
+nginx-7bd6c6d75b-dnqcr   1/1     Running   0          54s
+nginx-7bd6c6d75b-lcd8n   1/1     Running   0          54s
+```
+
+**1つの ApplicationSet から、ディレクトリ構造に基づいて2つの Application が自動生成された。** namespace も `CreateNamespace=true` により自動作成されている。
+
+### 新環境の追加
+
+staging 環境を追加する。`envs/staging/` ディレクトリを作成してマニフェストを push するだけだ。ApplicationSet の定義は変更しない。
+
+```bash title="Terminal"
+# envs/staging/deployment.yaml を作成（replicas: 2）
+git add . && git commit -m "Add staging environment"
+git push
+```
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">staging マニフェストの内容</summary>
+
+```yaml title="envs/staging/deployment.yaml"
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nginx
+  labels:
+    app: nginx
+    env: staging
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: nginx
+  template:
+    metadata:
+      labels:
+        app: nginx
+        env: staging
+    spec:
+      containers:
+        - name: nginx
+          image: nginx:1.27
+          ports:
+            - containerPort: 80
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: nginx
+spec:
+  selector:
+    app: nginx
+  ports:
+    - port: 80
+      targetPort: 80
+```
+
+</details>
+
+ApplicationSet の Git Generator がリポジトリの変更を検知し、新しいディレクトリに対応する Application を自動生成するのを待つ。
+
+```bash title="Terminal（自動生成の監視）"
+# nginx-staging が生成されるまで30秒ごとに確認
+while true; do
+  apps=$(kubectl get application -n argocd --no-headers 2>/dev/null | wc -l)
+  staging=$(kubectl get application nginx-staging -n argocd \
+    -o jsonpath='{.status.sync.status}' 2>/dev/null || echo "not found")
+  echo "$(date +%H:%M:%S) apps=$apps staging=$staging"
+  sleep 30
+done
+```
+
+今回の検証では、**push から約8分後に `nginx-staging` が自動生成された**。
+
+```text title="Output"
+NAME            SYNC STATUS   HEALTH STATUS   REVISION                                   PROJECT
+nginx-dev       Synced        Healthy         f6d2a1cc107ab6a13c9ac72831a4f8fe7bb5a6c2   default
+nginx-prod      Synced        Healthy         f6d2a1cc107ab6a13c9ac72831a4f8fe7bb5a6c2   default
+nginx-staging   Synced        Healthy         f6d2a1cc107ab6a13c9ac72831a4f8fe7bb5a6c2   default
+```
+
+staging の Pod も正しく 2 つ起動している。
+
+```text title="Output"
+=== staging ===
+NAME                    READY   STATUS    RESTARTS   AGE
+nginx-d7dcb7974-4rdtl   1/1     Running   0          24s
+nginx-d7dcb7974-6n6kp   1/1     Running   0          24s
+```
+
+**ディレクトリを追加して push するだけで、ApplicationSet の定義を変更せずに新環境の Application が自動生成された。** ただし、Git Generator のポーリング間隔により、反映までに約8分かかった。前回の記事で単一 Application の自動同期が約5分だったことを考えると、ポーリングタイミングによっては同程度以上の待ち時間が発生する。
+
+## 検証 2: 個別環境のマニフェスト変更が他環境に影響しないか
+
+ApplicationSet では、テンプレートの変更は全環境の Application に反映され、個別のマニフェスト変更はその環境だけに反映されるとされている。後者の「個別環境の分離」を実機で確認する。
+
+dev の replicas を 1 → 2 に変更して push した。
+
+```bash title="Terminal"
+# envs/dev/deployment.yaml の replicas: 1 → 2 に変更
+git commit -am "Scale dev to 2 replicas" && git push
+```
+
+ポーリングを待つ代わりに、dev の Application に hard refresh を実行して即座に反映させた。
+
+```bash title="Terminal"
+kubectl annotate application nginx-dev -n argocd \
+  argocd.argoproj.io/refresh=hard --overwrite
+```
+
+結果を確認する。
+
+```bash title="Terminal"
+kubectl get application -n argocd -o custom-columns=\
+'NAME:.metadata.name,SYNC:.status.sync.status,HEALTH:.status.health.status'
+```
+
+```text title="Output"
+NAME            SYNC     HEALTH
+nginx-dev       Synced   Healthy
+nginx-prod      Synced   Healthy
+nginx-staging   Synced   Healthy
+```
+
+各環境の Pod 数を確認する。
+
+```bash title="Terminal"
+for ns in dev staging prod; do
+  echo "=== $ns ==="
+  kubectl get pods -n $ns --no-headers | wc -l
+done
+```
+
+```text title="Output"
+=== dev ===
+2
+=== staging ===
+2
+=== prod ===
+3
+```
+
+**dev のみ Pod が 1 → 2 にスケールし、staging（2 Pod）と prod（3 Pod）は変化なし。** 個別環境のマニフェスト変更は、その環境の Application だけに反映され、他環境には波及しない。
+
+これは ApplicationSet の重要な特性だ。ディレクトリ構造で環境を分離しているため、`envs/dev/` の変更は `nginx-dev` の Application だけがトラッキングする。`envs/prod/` のマニフェストに変更がなければ、`nginx-prod` は同期済みのまま維持される。
+
+## まとめ
+
+- **ディレクトリ追加だけで新環境の Application が自動生成される** — ApplicationSet の Git Directory Generator は `envs/*` にマッチするディレクトリを監視し、新しいディレクトリが追加されると対応する Application を自動生成する。ApplicationSet の定義を変更する必要はない
+- **個別環境の変更は他環境に波及しない** — `envs/dev/` のマニフェスト変更は `nginx-dev` だけに反映され、staging や prod には影響しない。ディレクトリ構造による環境分離が ApplicationSet でも正しく機能する
+- **Git Generator のポーリング間隔に注意** — 今回の検証では、新環境追加の反映に約8分かかった。即座に反映したい場合は Application への hard refresh が有効だ
+- **ApplicationSet 削除時はカスケード削除に注意** — [公式ドキュメント](https://docs.aws.amazon.com/eks/latest/userguide/argocd-applicationsets.html)によると、ApplicationSet を削除すると生成された全 Application が削除される。`prune: true` が設定されている場合、デプロイ済みリソースも削除される。リソースを残したい場合は [preserveResourcesOnDeletion](https://argo-cd.readthedocs.io/en/stable/operator-manual/applicationset/Application-Deletion/) を設定する
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">クリーンアップ</summary>
+
+```bash title="Terminal"
+# ApplicationSet の削除（生成された全 Application とリソースもカスケード削除される）
+kubectl delete applicationset nginx-multi-env -n argocd
+
+# namespace の削除
+kubectl delete namespace dev staging prod
+
+# IAM ポリシーの削除
+aws iam delete-role-policy \
+  --role-name ArgoCDCapabilityRole \
+  --policy-name CodeCommitGitPullMultiEnv
+
+# CodeCommit リポジトリの削除
+aws codecommit delete-repository \
+  --repository-name argocd-multi-env \
+  --region ap-northeast-1
+```
+
+</details>
