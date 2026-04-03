@@ -1,0 +1,40 @@
+---
+title: "aurora-dsql-sqlx-connector の retry_on_occ は sqlx::Error を要求する"
+description: "retry_on_occ のクロージャで anyhow::Error を返すとコンパイルエラーになる。クロージャは sqlx::Error、retry_on_occ の戻り値は DsqlError という2段階のエラー型になっている。"
+date: 2026-04-04
+published: true
+tags: ["rust", "aurora-dsql", "sqlx"]
+---
+
+Aurora DSQL の Rust コネクタで `retry_on_occ` を使ったとき、クロージャの戻り値を `Ok::<_, anyhow::Error>(())` にしたらコンパイルが通らなかった。
+
+```text title="Output"
+expected `sqlx::Error`, found `anyhow::Error`
+```
+
+`retry_on_occ` のシグネチャを見ると、クロージャの `Future` は `Result<T, sqlx::Error>` を返す必要がある。
+
+```rust title="Rust (シグネチャ)"
+pub async fn retry_on_occ<F, Fut, T>(config: &OCCRetryConfig, mut f: F) -> Result<T>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = std::result::Result<T, sqlx::Error>>,
+```
+
+一方、`retry_on_occ` 自体の戻り値は `Result<T, DsqlError>` だ。つまりエラー型が2段階になっている。
+
+- クロージャ内: `sqlx::Error`（SQLx の標準エラー）
+- `retry_on_occ` の戻り値: `DsqlError`（OCC リトライ失敗時は `DsqlError::OCCRetryExhausted`）
+
+クロージャ内では `?` で `sqlx::Error` をそのまま伝播すればよく、`anyhow` への変換は `retry_on_occ` の外側で行う。
+
+```rust title="Rust"
+let result: Result<(), DsqlError> = retry_on_occ(&config, || async {
+    let mut tx = pool.begin().await?; // sqlx::Error を ? で伝播
+    sqlx::query("...").execute(&mut *tx).await?;
+    tx.commit().await?;
+    Ok(())
+}).await;
+// DsqlError → anyhow::Error への変換はここで
+result.map_err(|e| anyhow::anyhow!(e))?;
+```

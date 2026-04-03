@@ -1,0 +1,40 @@
+---
+title: "aurora-dsql-sqlx-connector's retry_on_occ requires sqlx::Error"
+description: "Using anyhow::Error in the retry_on_occ closure causes a compile error. The closure must return sqlx::Error, while retry_on_occ itself returns DsqlError — a two-layer error type design."
+date: 2026-04-04
+published: true
+tags: ["rust", "aurora-dsql", "sqlx"]
+---
+
+While using the Aurora DSQL Rust connector's `retry_on_occ`, I wrote the closure return as `Ok::<_, anyhow::Error>(())` and got a compile error.
+
+```text title="Output"
+expected `sqlx::Error`, found `anyhow::Error`
+```
+
+Looking at the `retry_on_occ` signature, the closure's `Future` must return `Result<T, sqlx::Error>`.
+
+```rust title="Rust (signature)"
+pub async fn retry_on_occ<F, Fut, T>(config: &OCCRetryConfig, mut f: F) -> Result<T>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = std::result::Result<T, sqlx::Error>>,
+```
+
+However, `retry_on_occ` itself returns `Result<T, DsqlError>`. So there are two error type layers:
+
+- Inside the closure: `sqlx::Error` (standard SQLx error)
+- Return of `retry_on_occ`: `DsqlError` (wraps as `DsqlError::OCCRetryExhausted` on retry exhaustion)
+
+Inside the closure, just propagate `sqlx::Error` with `?`. Convert to `anyhow` outside `retry_on_occ`.
+
+```rust title="Rust"
+let result: Result<(), DsqlError> = retry_on_occ(&config, || async {
+    let mut tx = pool.begin().await?; // propagate sqlx::Error with ?
+    sqlx::query("...").execute(&mut *tx).await?;
+    tx.commit().await?;
+    Ok(())
+}).await;
+// convert DsqlError → anyhow::Error here
+result.map_err(|e| anyhow::anyhow!(e))?;
+```
