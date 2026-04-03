@@ -1,0 +1,298 @@
+---
+title: "EKS ArgoCD Capability — Deploy from a CodeCommit Private Repository via GitOps"
+description: "Just one IAM policy addition to the Capability Role enables CodeCommit private repo deployments. Watch out: URL typos and missing permissions produce the same error, and manual refresh is needed after fixing permissions."
+date: "2026-04-03"
+published: true
+featured: false
+series: "eks-argocd-capability"
+seriesOrder: 3
+categories: [infrastructure]
+tags: ["aws", "eks", "kubernetes", "argocd", "gitops", "codecommit", "devops"]
+---
+
+## Introduction
+
+In the [previous](/en/blog/2026/03/21/eks-argocd-capability-eksctl) [two posts](/en/blog/2026/03/21/eks-argocd-capability), I set up EKS ArgoCD Capability and deployed from a public GitHub repository (the guestbook sample). In real projects, however, deployment manifests live in private repositories.
+
+EKS ArgoCD Capability supports "direct integration" with CodeCommit. By adding `codecommit:GitPull` to the Capability Role, you can deploy from a private repository without creating a Repository Secret. Unlike self-hosted ArgoCD, which requires managing Git credentials as Kubernetes Secrets, the Capability version handles authentication entirely through IAM.
+
+This post walks through building a GitOps deployment from a CodeCommit private repository using direct integration, and examines error behavior when things go wrong. See the official documentation at [Configure repository access](https://docs.aws.amazon.com/eks/latest/userguide/argocd-configure-repositories.html).
+
+Prerequisites:
+
+- EKS cluster with ArgoCD Capability set up ([series part 1](/en/blog/2026/03/21/eks-argocd-capability))
+- Target cluster registered
+- AWS CLI, kubectl, and git configured
+- Test region: ap-northeast-1
+
+## Verification 1: Deploy from a Private Repository via Direct Integration
+
+### Prepare a CodeCommit Repository
+
+Create a CodeCommit repository and push nginx Deployment + Service manifests.
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">CodeCommit repository setup steps</summary>
+
+```bash title="Terminal"
+aws codecommit create-repository \
+  --repository-name argocd-demo \
+  --repository-description "Demo repository for ArgoCD Capability"
+```
+
+Clone it locally and configure the Git credential helper. This is required for CodeCommit HTTPS access.
+
+```bash title="Terminal"
+git clone https://git-codecommit.ap-northeast-1.amazonaws.com/v1/repos/argocd-demo
+cd argocd-demo
+git config credential.helper '!aws codecommit credential-helper $@'
+git config credential.UseHttpPath true
+```
+
+Create an nginx Deployment and Service.
+
+```yaml title="manifests/deployment.yaml"
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nginx
+  labels:
+    app: nginx
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: nginx
+  template:
+    metadata:
+      labels:
+        app: nginx
+    spec:
+      containers:
+        - name: nginx
+          image: nginx:1.27
+          ports:
+            - containerPort: 80
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: nginx
+spec:
+  selector:
+    app: nginx
+  ports:
+    - port: 80
+      targetPort: 80
+```
+
+```bash title="Terminal"
+git add . && git commit -m "Initial commit: nginx deployment and service"
+git push -u origin main
+```
+
+</details>
+
+### Add Permissions to the Capability Role
+
+Add a `codecommit:GitPull` inline policy to the Capability Role.
+
+```bash title="Terminal"
+aws iam put-role-policy \
+  --role-name ArgoCDCapabilityRole \
+  --policy-name CodeCommitGitPull \
+  --policy-document '{
+    "Version": "2012-10-17",
+    "Statement": [
+      {
+        "Effect": "Allow",
+        "Action": "codecommit:GitPull",
+        "Resource": "arn:aws:codecommit:ap-northeast-1:111122223333:argocd-demo"
+      }
+    ]
+  }'
+```
+
+Note that `Resource` is scoped to the specific repository ARN. You could use `*` to grant access to all repositories in the account, but following the principle of least privilege, scope it to only the repositories you need.
+
+### Create the Application and Deploy
+
+Create an Application with the CodeCommit HTTPS URL as `repoURL`. No Repository Secret is needed.
+
+```yaml title="nginx-codecommit.yaml"
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: nginx-codecommit
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: https://git-codecommit.ap-northeast-1.amazonaws.com/v1/repos/argocd-demo
+    targetRevision: main
+    path: manifests
+  destination:
+    name: local-cluster
+    namespace: default
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+```
+
+```bash title="Terminal"
+kubectl apply -f nginx-codecommit.yaml
+```
+
+After about a minute, the Application reached `Synced` / `Healthy`.
+
+```text title="Output"
+NAME               SYNC STATUS   HEALTH STATUS   REVISION                                   PROJECT
+nginx-codecommit   Synced        Healthy         d3bd890b2ce55b3092dc422147755b8a2417c462   default
+```
+
+Pods and Service were running normally.
+
+```text title="Output"
+NAME                    READY   STATUS    RESTARTS   AGE
+nginx-fd956d49d-snhfv   1/1     Running   0          75s
+
+NAME         TYPE        CLUSTER-IP      EXTERNAL-IP   PORT(S)   AGE
+nginx        ClusterIP   10.100.146.27   <none>        80/TCP    75s
+```
+
+**Deployment from a CodeCommit private repository succeeded without any Repository Secret.** Authentication was handled transparently through the Capability Role's IAM policy.
+
+### Auto-Sync on Manifest Changes
+
+I verified that the GitOps "push and it deploys" cycle works with CodeCommit integration. After changing replicas from 1 to 2 and pushing:
+
+```bash title="Terminal"
+# Change replicas: 1 → 2 and push
+git commit -am "Scale nginx to 2 replicas" && git push
+```
+
+ArgoCD's default polling interval is about 3 minutes. Monitoring every 30 seconds, **the new revision was picked up about 5 minutes 15 seconds after the push**, and pods scaled to 2.
+
+```text title="Output (monitored every 30s)"
+20:54:12 revision=d3bd890b pods=1
+20:54:44 revision=d3bd890b pods=1
+  ...(omitted)...
+20:58:25 revision=d3bd890b pods=1
+20:58:56 revision=c03946cd pods=2  ← synced here
+```
+
+Considering the polling interval (~3 min) plus IAM authentication overhead, ~5 minutes is within expectations. For faster feedback, consider configuring [webhooks](https://docs.aws.amazon.com/eks/latest/userguide/argocd-considerations.html).
+
+## Verification 2: Error Behavior and Debugging on Misconfiguration
+
+With direct integration, the repository doesn't appear in ArgoCD UI's Settings → Repositories. Since no Repository Secret exists, ArgoCD doesn't "know" about the repository. Connection testing from the UI isn't possible either.
+
+So where do you look when something goes wrong? I reproduced two common mistakes to find out.
+
+### Case 1: Deploying Before Granting Permissions
+
+When I created the Application without the `codecommit:GitPull` policy, the following error appeared in `status.conditions`:
+
+```bash title="Terminal"
+kubectl get application nginx-codecommit -n argocd \
+  -o jsonpath='{.status.conditions[0].message}'
+```
+
+```text title="Output"
+Failed to load target state: failed to generate manifest for source 1 of 1:
+rpc error: code = Unknown desc = failed to list refs: authorization failed:
+<AccessDeniedException>
+  <Message>User: arn:aws:sts::111122223333:assumed-role/ArgoCDCapabilityRole/...
+  is not authorized to perform: codecommit:GitPull on resource:
+  arn:aws:codecommit:ap-northeast-1:111122223333:argocd-demo
+  because no identity-based policy allows the codecommit:GitPull action</Message>
+</AccessDeniedException>
+```
+
+The error message is highly specific — it clearly states which role, which action, and which resource was denied. IAM errors propagate directly into ArgoCD conditions, providing sufficient information for debugging.
+
+However, **the Application doesn't automatically recover after adding the permission**. Even after attaching the IAM policy, the same error persisted through ArgoCD's next polling cycle. A manual hard refresh was required:
+
+```bash title="Terminal"
+kubectl annotate application nginx-codecommit -n argocd \
+  argocd.argoproj.io/refresh=hard --overwrite
+```
+
+Deployment started about 15 seconds after the hard refresh.
+
+### Case 2: Typo in the Repository URL
+
+I tested with a non-existent repository name (`argocd-demo-typo`):
+
+```text title="Output"
+Failed to load target state: failed to generate manifest for source 1 of 1:
+rpc error: code = Unknown desc = failed to list refs: authorization failed:
+<AccessDeniedException>
+  <Message>User: arn:aws:sts::111122223333:assumed-role/ArgoCDCapabilityRole/...
+  is not authorized to perform: codecommit:GitPull on resource:
+  arn:aws:codecommit:ap-northeast-1:111122223333:argocd-demo-typo
+  because no identity-based policy allows the codecommit:GitPull action</Message>
+</AccessDeniedException>
+```
+
+**Both URL typos and missing permissions produce the same `AccessDeniedException`.** Because the IAM policy is scoped to a specific repository ARN, accessing a non-existent repository is also treated as "not authorized" rather than "not found."
+
+This can be confusing during debugging. When you see `AccessDeniedException`, the first step should be comparing the `Resource` ARN in your IAM policy against the `repoURL` in your Application to verify the repository name matches.
+
+## Note: Using Repository Secrets Instead
+
+As an alternative to direct integration, you can create a Repository Secret to explicitly register the CodeCommit repository with ArgoCD.
+
+```yaml title="codecommit-repo-secret.yaml"
+apiVersion: v1
+kind: Secret
+metadata:
+  name: codecommit-repo
+  namespace: argocd
+  labels:
+    argocd.argoproj.io/secret-type: repository
+stringData:
+  type: git
+  url: https://git-codecommit.ap-northeast-1.amazonaws.com/v1/repos/argocd-demo
+  project: default
+```
+
+With a Repository Secret, the repository appears in ArgoCD UI's Settings → Repositories, where you can check connection status.
+
+**When to choose which:**
+
+- **Direct integration** — Minimal setup. One IAM policy and you're done. Best when you have few repositories and your team is comfortable with IAM
+- **Repository Secret** — Better visibility in ArgoCD UI. Preferred when managing many repositories or when you want connection status at a glance
+
+In both cases, authentication is handled by the Capability Role's IAM policy. The Repository Secret simply makes ArgoCD "aware" of the repository's existence.
+
+## Summary
+
+- **One IAM policy is all you need for CodeCommit integration** — Adding `codecommit:GitPull` to the Capability Role enables private repository deployments without Repository Secrets. The Git credential management required by self-hosted ArgoCD is eliminated entirely
+- **URL typos and missing permissions produce the same error** — Because the IAM policy is scoped to a specific repository ARN, non-existent repositories also return `AccessDeniedException`. When debugging, always cross-check the IAM policy's `Resource` ARN against the Application's `repoURL` first
+- **Manual refresh is needed after fixing permissions** — ArgoCD doesn't automatically recover from IAM errors. After adding the missing policy, run `argocd.argoproj.io/refresh=hard` to trigger an immediate retry
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">Cleanup</summary>
+
+```bash title="Terminal"
+# Delete the Application (finalizer ensures cascading deletion)
+kubectl delete application nginx-codecommit -n argocd
+
+# Delete the IAM policy
+aws iam delete-role-policy \
+  --role-name ArgoCDCapabilityRole \
+  --policy-name CodeCommitGitPull
+
+# Delete the CodeCommit repository
+aws codecommit delete-repository \
+  --repository-name argocd-demo \
+  --region ap-northeast-1
+```
+
+</details>

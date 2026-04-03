@@ -1,0 +1,302 @@
+---
+title: "EKS ArgoCD Capability 構築 — CodeCommit プライベートリポジトリから GitOps デプロイする"
+description: "Capability Role に IAM ポリシーを1つ追加するだけで CodeCommit プライベートリポジトリからデプロイできる。URL typo と権限不足が同じエラーになる点と、権限修正後に手動 refresh が必要な点が落とし穴。"
+date: "2026-04-03"
+published: true
+featured: false
+series: "eks-argocd-capability"
+seriesOrder: 3
+categories: [infrastructure]
+tags: ["aws", "eks", "kubernetes", "argocd", "gitops", "codecommit", "devops"]
+---
+
+## はじめに
+
+[前回](/ja/blog/2026/03/21/eks-argocd-capability-eksctl)・[前々回](/ja/blog/2026/03/21/eks-argocd-capability)の記事では、EKS ArgoCD Capability を構築し、GitHub の公開リポジトリ（guestbook サンプル）からデプロイした。しかし実プロジェクトでは、デプロイ対象のマニフェストはプライベートリポジトリに置かれる。
+
+EKS ArgoCD Capability は CodeCommit との「直接統合」をサポートしている。Capability Role に `codecommit:GitPull` を付与するだけで、Repository Secret を作成せずにプライベートリポジトリからデプロイできる。セルフホスト ArgoCD では Git 認証情報を Kubernetes Secret として管理する必要があったが、Capability 版では IAM に統合されている。
+
+この記事では、CodeCommit 直接統合でプライベートリポジトリからの GitOps デプロイを構築し、設定ミス時のエラー挙動とデバッグ方法も検証する。公式ドキュメントは [Configure repository access](https://docs.aws.amazon.com/eks/latest/userguide/argocd-configure-repositories.html) を参照。
+
+前提条件:
+
+- EKS クラスターに ArgoCD Capability が構築済み（[シリーズ第1回](/ja/blog/2026/03/21/eks-argocd-capability)参照）
+- ターゲットクラスターが登録済み
+- AWS CLI、kubectl、git が設定済み
+- 検証リージョン: ap-northeast-1
+
+## 検証 1: 直接統合でプライベートリポジトリからデプロイする
+
+### CodeCommit リポジトリの準備
+
+CodeCommit にリポジトリを作成し、nginx の Deployment + Service マニフェストを push する。
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">CodeCommit リポジトリの作成手順</summary>
+
+```bash title="Terminal"
+aws codecommit create-repository \
+  --repository-name argocd-demo \
+  --repository-description "Demo repository for ArgoCD Capability"
+```
+
+ローカルにクローンして Git 認証ヘルパーを設定する。CodeCommit の HTTPS 接続にはこの設定が必要だ。
+
+```bash title="Terminal"
+git clone https://git-codecommit.ap-northeast-1.amazonaws.com/v1/repos/argocd-demo
+cd argocd-demo
+git config credential.helper '!aws codecommit credential-helper $@'
+git config credential.UseHttpPath true
+```
+
+nginx の Deployment と Service を作成する。
+
+```yaml title="manifests/deployment.yaml"
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nginx
+  labels:
+    app: nginx
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: nginx
+  template:
+    metadata:
+      labels:
+        app: nginx
+    spec:
+      containers:
+        - name: nginx
+          image: nginx:1.27
+          ports:
+            - containerPort: 80
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: nginx
+spec:
+  selector:
+    app: nginx
+  ports:
+    - port: 80
+      targetPort: 80
+```
+
+```bash title="Terminal"
+git add . && git commit -m "Initial commit: nginx deployment and service"
+git push -u origin main
+```
+
+</details>
+
+### Capability Role に権限を追加
+
+Capability Role に `codecommit:GitPull` のインラインポリシーを追加する。
+
+```bash title="Terminal"
+aws iam put-role-policy \
+  --role-name ArgoCDCapabilityRole \
+  --policy-name CodeCommitGitPull \
+  --policy-document '{
+    "Version": "2012-10-17",
+    "Statement": [
+      {
+        "Effect": "Allow",
+        "Action": "codecommit:GitPull",
+        "Resource": "arn:aws:codecommit:ap-northeast-1:111122223333:argocd-demo"
+      }
+    ]
+  }'
+```
+
+ポイントは `Resource` をリポジトリ ARN にスコープしている点だ。`*` にすればアカウント内の全リポジトリにアクセスできるが、最小権限の原則に従い、必要なリポジトリだけに絞るべきだ。
+
+### Application の作成とデプロイ
+
+Application を作成する。`repoURL` に CodeCommit の HTTPS URL を直接指定する。Repository Secret は作成しない。
+
+```yaml title="nginx-codecommit.yaml"
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: nginx-codecommit
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: https://git-codecommit.ap-northeast-1.amazonaws.com/v1/repos/argocd-demo
+    targetRevision: main
+    path: manifests
+  destination:
+    name: local-cluster
+    namespace: default
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+```
+
+```bash title="Terminal"
+kubectl apply -f nginx-codecommit.yaml
+```
+
+約1分後、Application が `Synced` / `Healthy` になった。
+
+```bash title="Terminal"
+kubectl get application nginx-codecommit -n argocd -o wide
+```
+
+```text title="Output"
+NAME               SYNC STATUS   HEALTH STATUS   REVISION                                   PROJECT
+nginx-codecommit   Synced        Healthy         d3bd890b2ce55b3092dc422147755b8a2417c462   default
+```
+
+Pod と Service も正常に起動している。
+
+```text title="Output"
+NAME                    READY   STATUS    RESTARTS   AGE
+nginx-fd956d49d-snhfv   1/1     Running   0          75s
+
+NAME         TYPE        CLUSTER-IP      EXTERNAL-IP   PORT(S)   AGE
+nginx        ClusterIP   10.100.146.27   <none>        80/TCP    75s
+```
+
+**Repository Secret なしで、CodeCommit プライベートリポジトリからのデプロイが成功した。** Capability Role の IAM ポリシーだけで認証が透過的に処理されている。
+
+### マニフェスト変更の自動同期
+
+GitOps の「push したら反映される」サイクルが CodeCommit 連携でも機能するか確認する。replicas を 1 → 2 に変更して push した。
+
+```bash title="Terminal"
+# replicas: 1 → 2 に変更して push
+git commit -am "Scale nginx to 2 replicas" && git push
+```
+
+ArgoCD のデフォルトポーリング間隔は約3分だ。30秒ごとにステータスを監視した結果、**push から約5分15秒後に新しいリビジョンが反映され、Pod が 2 つにスケールした**。
+
+```text title="Output（30秒間隔で監視）"
+20:54:12 revision=d3bd890b pods=1
+20:54:44 revision=d3bd890b pods=1
+  ...（中略）...
+20:58:25 revision=d3bd890b pods=1
+20:58:56 revision=c03946cd pods=2  ← ここで同期
+```
+
+ポーリング間隔（約3分）+ IAM 認証のオーバーヘッドを考慮すると、5分程度は想定内だ。より即時性が必要な場合は [Webhook の設定](https://docs.aws.amazon.com/eks/latest/userguide/argocd-considerations.html) を検討するとよい。
+
+## 検証 2: 設定ミス時のエラー挙動とデバッグ方法
+
+直接統合では ArgoCD UI の Settings → Repositories にリポジトリが表示されない。Repository Secret を作成していないため、ArgoCD はリポジトリの存在を「知らない」状態だ。接続テストも UI からは行えない。
+
+では、設定ミスが起きたときにどこを見ればよいのか。読者が実際にやりがちな2つのミスを再現して確認した。
+
+### ケース 1: 権限を付与する前にデプロイした場合
+
+`codecommit:GitPull` を付与せずに Application を作成すると、以下のエラーが Application の `status.conditions` に表示された。
+
+```bash title="Terminal"
+kubectl get application nginx-codecommit -n argocd \
+  -o jsonpath='{.status.conditions[0].message}'
+```
+
+```text title="Output"
+Failed to load target state: failed to generate manifest for source 1 of 1:
+rpc error: code = Unknown desc = failed to list refs: authorization failed:
+<AccessDeniedException>
+  <Message>User: arn:aws:sts::111122223333:assumed-role/ArgoCDCapabilityRole/...
+  is not authorized to perform: codecommit:GitPull on resource:
+  arn:aws:codecommit:ap-northeast-1:111122223333:argocd-demo
+  because no identity-based policy allows the codecommit:GitPull action</Message>
+</AccessDeniedException>
+```
+
+エラーメッセージは非常に具体的だ。「どのロールが」「どのアクションを」「どのリソースに対して」拒否されたかが明確に示されている。IAM のエラーがそのまま ArgoCD の条件に伝播するため、デバッグに必要な情報は十分にある。
+
+ただし、**権限を付与した後に Application が自動的にリカバリしない**点に注意が必要だ。IAM ポリシーを追加しても、ArgoCD の次のポーリングサイクルでは同じエラーが継続した。手動で hard refresh を実行する必要があった。
+
+```bash title="Terminal"
+kubectl annotate application nginx-codecommit -n argocd \
+  argocd.argoproj.io/refresh=hard --overwrite
+```
+
+この hard refresh 後、約15秒でデプロイが開始された。
+
+### ケース 2: リポジトリ URL を間違えた場合
+
+存在しないリポジトリ名（`argocd-demo-typo`）を指定した場合のエラーを確認した。
+
+```text title="Output"
+Failed to load target state: failed to generate manifest for source 1 of 1:
+rpc error: code = Unknown desc = failed to list refs: authorization failed:
+<AccessDeniedException>
+  <Message>User: arn:aws:sts::111122223333:assumed-role/ArgoCDCapabilityRole/...
+  is not authorized to perform: codecommit:GitPull on resource:
+  arn:aws:codecommit:ap-northeast-1:111122223333:argocd-demo-typo
+  because no identity-based policy allows the codecommit:GitPull action</Message>
+</AccessDeniedException>
+```
+
+**URL typo でも権限不足でも、同じ `AccessDeniedException` が返る。** IAM ポリシーが特定のリポジトリ ARN にスコープされているため、存在しないリポジトリへのアクセスも「権限がない」として処理される。「リポジトリが見つからない」というエラーにはならない。
+
+これはデバッグ時に混乱を招く可能性がある。`AccessDeniedException` が出たら、まず IAM ポリシーの `Resource` ARN と Application の `repoURL` を突き合わせて、リポジトリ名が一致しているかを確認するのがよい。
+
+## 補足: Repository Secret を使う方法
+
+直接統合の代わりに、Repository Secret を作成して CodeCommit リポジトリを明示的に登録する方法もある。
+
+```yaml title="codecommit-repo-secret.yaml"
+apiVersion: v1
+kind: Secret
+metadata:
+  name: codecommit-repo
+  namespace: argocd
+  labels:
+    argocd.argoproj.io/secret-type: repository
+stringData:
+  type: git
+  url: https://git-codecommit.ap-northeast-1.amazonaws.com/v1/repos/argocd-demo
+  project: default
+```
+
+Repository Secret を作成すると、ArgoCD UI の Settings → Repositories にリポジトリが表示され、接続ステータスを確認できるようになる。
+
+**どちらを選ぶか:**
+
+- **直接統合** — 設定が最小限。IAM ポリシー1つで完結する。リポジトリ数が少なく、チームが IAM に慣れている場合に適している
+- **Repository Secret** — ArgoCD UI での可視性が高い。リポジトリ数が多い場合や、ArgoCD の管理画面で接続状態を一覧したい場合に適している
+
+どちらの方法でも、認証は Capability Role の IAM ポリシーで行われる。Repository Secret はあくまで ArgoCD にリポジトリの存在を「教える」ためのものだ。
+
+## まとめ
+
+- **IAM ポリシー1つで CodeCommit 連携が完結する** — Capability Role に `codecommit:GitPull` を追加するだけで、Repository Secret なしにプライベートリポジトリからデプロイできる。セルフホスト ArgoCD で必要だった Git 認証情報の管理が不要になる
+- **URL typo と権限不足が同じエラーになる** — IAM ポリシーがリソース ARN にスコープされているため、存在しないリポジトリへのアクセスも `AccessDeniedException` として返る。エラーが出たら、まず IAM ポリシーの `Resource` と `repoURL` のリポジトリ名を突き合わせるのが最初のデバッグステップだ
+- **権限修正後は手動 refresh が必要** — IAM ポリシーを追加しても、ArgoCD は自動的にリカバリしない。`argocd.argoproj.io/refresh=hard` アノテーションで明示的に refresh を実行する必要がある
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">クリーンアップ</summary>
+
+```bash title="Terminal"
+# Application の削除（finalizer 付きなのでリソースもカスケード削除される）
+kubectl delete application nginx-codecommit -n argocd
+
+# IAM ポリシーの削除
+aws iam delete-role-policy \
+  --role-name ArgoCDCapabilityRole \
+  --policy-name CodeCommitGitPull
+
+# CodeCommit リポジトリの削除
+aws codecommit delete-repository \
+  --repository-name argocd-demo \
+  --region ap-northeast-1
+```
+
+</details>
