@@ -5,6 +5,7 @@ import { PostList } from "@/components/blog/post-list";
 import { TilCard } from "@/components/blog/til-card";
 import { FeaturedPostCard } from "@/components/blog/featured-post-card";
 import { ProfileCard } from "@/components/common/profile-card";
+import { StarIcon, BookIcon, LightbulbIcon } from "@/components/common/section-icons";
 import { getDictionary, isValidLocale } from "@/lib/i18n";
 import { SITE_URL } from "@/lib/constants";
 import { buildAlternateLanguages } from "@/lib/seo";
@@ -41,17 +42,19 @@ export default async function HomePage({ params }: HomePageProps) {
 
   return (
     <div className="mx-auto max-w-3xl px-4 py-6 md:py-12">
-      <section className="mb-8 md:mb-12">
-        <h1 className="text-2xl font-bold tracking-tight md:text-3xl">{t.site.name}</h1>
+      <section aria-labelledby="home-title">
+        <h1 id="home-title" className="text-2xl font-bold tracking-tight md:text-3xl">{t.site.name}</h1>
         <p className="mt-2 text-muted-foreground">
           {t.home.subtitle}
         </p>
       </section>
-      <ProfileCard locale={locale} />
+      <div className="mt-8 md:mt-12">
+        <ProfileCard locale={locale} />
+      </div>
       {featuredPosts.length > 0 && (
-        <section className="mt-8 md:mt-12">
-          <h2 className="text-xl font-semibold mb-4 flex items-center gap-2">
-            <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-muted-foreground"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2" /></svg>
+        <section className="mt-8 md:mt-12" aria-labelledby="featured-posts">
+          <h2 id="featured-posts" className="text-xl font-semibold mb-4 flex items-center gap-2">
+            <StarIcon />
             {t.home.featuredPosts}
           </h2>
           <div className="grid gap-3 sm:grid-cols-2">
@@ -61,29 +64,26 @@ export default async function HomePage({ params }: HomePageProps) {
           </div>
         </section>
       )}
-      <section className="mt-8 md:mt-12">
-        <div className="flex items-center justify-between mb-4">
-          <h2 className="text-xl font-semibold flex items-center gap-2">
-            <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-muted-foreground"><path d="M4 19.5v-15A2.5 2.5 0 0 1 6.5 2H19a1 1 0 0 1 1 1v18a1 1 0 0 1-1 1H6.5a1 1 0 0 1 0-5H20" /></svg>
+      {posts.length > 0 && (
+        <section className="mt-8 md:mt-12" aria-labelledby="latest-posts">
+          <h2 id="latest-posts" className="text-xl font-semibold mb-4 flex items-center gap-2">
+            <BookIcon />
             {t.home.latestPosts}
           </h2>
-          <Link href={`/${locale}/blog`} className="inline-flex items-center gap-1 rounded-md border border-border px-3 py-1.5 text-sm text-foreground hover:bg-muted transition-colors">
-            {t.home.allPosts} &rarr;
-          </Link>
-        </div>
-        <PostList posts={posts} locale={locale} />
-      </section>
-      {latestTils.length > 0 && (
-        <section className="mt-8 md:mt-12">
-          <div className="flex items-center justify-between mb-4">
-            <h2 className="text-xl font-semibold flex items-center gap-2">
-              <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-muted-foreground"><path d="M15 14c.2-1 .7-1.7 1.5-2.5 1-.9 1.5-2.2 1.5-3.5A6 6 0 0 0 6 8c0 1 .2 2.2 1.5 3.5.7.7 1.3 1.5 1.5 2.5" /><path d="M9 18h6" /><path d="M10 22h4" /></svg>
-              {t.home.latestTils}
-            </h2>
-            <Link href={`/${locale}/til`} className="inline-flex items-center gap-1 rounded-md border border-border px-3 py-1.5 text-sm text-foreground hover:bg-muted transition-colors">
-              {t.home.allTils} &rarr;
+          <PostList posts={posts} locale={locale} />
+          <div className="mt-4 text-center">
+            <Link href={`/${locale}/blog`} className="inline-flex items-center gap-1 rounded-md border border-border px-3 py-1.5 text-sm text-foreground hover:bg-muted transition-colors">
+              {t.home.allPosts} &rarr;
             </Link>
           </div>
+        </section>
+      )}
+      {latestTils.length > 0 && (
+        <section className="mt-8 md:mt-12" aria-labelledby="latest-tils">
+          <h2 id="latest-tils" className="text-xl font-semibold mb-4 flex items-center gap-2">
+            <LightbulbIcon />
+            {t.home.latestTils}
+          </h2>
           <div>
             {latestTils.map((til) => (
               <TilCard
@@ -97,6 +97,11 @@ export default async function HomePage({ params }: HomePageProps) {
                 readingTime={til.metadata.readingTime}
               />
             ))}
+          </div>
+          <div className="mt-4 text-center">
+            <Link href={`/${locale}/til`} className="inline-flex items-center gap-1 rounded-md border border-border px-3 py-1.5 text-sm text-foreground hover:bg-muted transition-colors">
+              {t.home.allTils} &rarr;
+            </Link>
           </div>
         </section>
       )}
