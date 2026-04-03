@@ -1,0 +1,291 @@
+---
+title: "CloudWatch Query Studio で AWS メトリクスを PromQL で横断クエリする"
+description: "CloudWatch Query Studio（Preview）と OTel エンリッチメントを有効化し、AWS ベンダーメトリクスを PromQL で照会・アラーム作成するまでを検証。histogram 関数の必要性やタグベース横断クエリなど、Prometheus ユーザー向けの実践データを共有する。"
+date: "2026-04-04"
+published: true
+featured: false
+categories: [infrastructure]
+tags: ["aws", "cloudwatch", "promql", "opentelemetry", "observability"]
+---
+
+## はじめに
+
+2026年4月3日、AWS は [Amazon CloudWatch Query Studio のパブリックプレビュー](https://aws.amazon.com/about-aws/whats-new/2026/04/amazon-cloudwatch-query-studio-preview/)を発表した。CloudWatch 初のネイティブ PromQL クエリ環境であり、AWS ベンダーメトリクスと OpenTelemetry メトリクスを単一のインターフェースで照会できる。
+
+CloudWatch Query Studio と OTel エンリッチメントを組み合わせると、Prometheus エクスポーターや外部バックエンドなしに AWS ベンダーメトリクスを PromQL で横断的に照会できる。本記事では有効化から Query Studio でのクエリ・アラーム作成までを検証し、Prometheus ユーザーが移行・併用を判断するための実践データを共有する。公式ドキュメントは [Query metrics with PromQL](https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/CloudWatch-PromQL.html) を参照。
+
+**本記事の内容は 2026年4月時点のパブリックプレビューでの動作に基づいており、GA 時に変更される可能性がある。**
+
+前提条件:
+
+- AWS CLI v2（エンリッチメント有効化に使用）
+- `cloudwatch:*` および `observabilityadmin:*` 権限（必要な権限の詳細は [IAM permissions for PromQL](https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/CloudWatch-PromQL.html#CloudWatch-PromQL-IAM) を参照）
+- 検証リージョン: us-east-1（プレビュー対応リージョン）
+- EC2 インスタンスなど、CloudWatch メトリクスが存在するリソース
+
+## OTel エンリッチメントの有効化
+
+Query Studio で PromQL を使うには、2つのエンリッチメント設定を有効化する必要がある。
+
+1つ目は、AWS リソースタグをテレメトリに伝播する設定だ。
+
+```bash title="Terminal"
+aws observabilityadmin start-telemetry-enrichment --region us-east-1
+```
+
+```json title="Output"
+{
+    "Status": "Running",
+    "AwsResourceExplorerManagedViewArn": "arn:aws:resource-explorer-2:us-east-1:XXXXXXXXXXXX:managed-view/AWSManagedViewForCloudWatchTelemetryEnrichment/..."
+}
+```
+
+Resource Explorer のマネージドビューが自動作成される。これにより、EC2 インスタンスや Lambda 関数に付与したタグが PromQL ラベルとして利用可能になる。
+
+2つ目は、CloudWatch ベンダーメトリクスの OTel エンリッチメントだ。
+
+```bash title="Terminal"
+aws cloudwatch start-o-tel-enrichment --region us-east-1
+```
+
+有効化の確認:
+
+```bash title="Terminal"
+aws cloudwatch get-o-tel-enrichment --region us-east-1
+```
+
+```json title="Output"
+{
+    "Status": "Running"
+}
+```
+
+2コマンドで即座に有効化が完了する。なお、[公式ブログ](https://aws.amazon.com/blogs/mt/introducing-opentelemetry-promql-support-in-amazon-cloudwatch/)では `describe-o-tel-enrichment-status` というコマンド名が記載されているが、実際の AWS CLI（v2.34 時点）では `get-o-tel-enrichment` である。
+
+コンソールからも有効化できる。CloudWatch の Settings 画面で「Enable resource tags on telemetry」と「Enable OTel enrichment for AWS metrics」をオンにすればよい。
+
+## Query Studio で PromQL クエリを実行する
+
+### Query Studio へのアクセス
+
+CloudWatch コンソールのナビゲーションペインから **Query Studio (Preview)** を選択する。クエリ言語のドロップダウンで **PromQL** を選ぶと、Builder モードと Editor モードが利用可能になる。右上の **`</>`** アイコンで両モードを切り替えられる。
+
+### 基本クエリ — EC2 CPUUtilization
+
+まず Builder モードで EC2 の CPUUtilization を照会してみる。
+
+1. **Metric** フィールドで `CPUUtilization` を選択
+2. **Run** をクリック
+
+これだけで時系列グラフが表示される。結果には OTel エンリッチメントにより以下のラベルが自動付与されている:
+
+| ラベル | 説明 | 例 |
+|---|---|---|
+| `@aws.account` | AWS アカウント ID | `123456789012` |
+| `@aws.region` | メトリクスが取り込まれたリージョン | `us-east-1` |
+| `@aws.tag.Name` | EC2 インスタンスの Name タグ | `my-ec2-instance` |
+| `@resource.cloud.resource_id` | リソースの完全な ARN | `arn:aws:ec2:us-east-1:...` |
+| `@instrumentation.@name` | ソースサービスの識別子 | `cloudwatch.aws/ec2` |
+| `@instrumentation.cloudwatch.source` | サービス識別子 | `aws.ec2` |
+| `InstanceId` | 元の CloudWatch ディメンション | `i-0123456789abcdef0` |
+
+これらは手動でのインストルメンテーションなしに利用可能だ。
+
+### Prometheus との構文差異 — histogram 関数
+
+ここが Prometheus ユーザーにとって最大の注意点だ。CloudWatch のベンダーメトリクスは内部的に ExponentialHistogram として格納されている。Builder モードでは集約された値がグラフに表示されるが、Editor モードで同じクエリを書くと挙動が異なる。
+
+Editor モードに切り替えて `{"CPUUtilization"}` と入力し Run すると、集約された値ではなく生のヒストグラムデータが返る。
+
+```text
+# Editor モード — 生のヒストグラムデータが返る
+{"CPUUtilization"}
+```
+
+集約された値を得るには `histogram_avg` で囲む必要がある:
+
+```text
+# Editor モード — 集約された平均値が返る
+histogram_avg({"CPUUtilization"})
+```
+
+Prometheus では `node_cpu_seconds_total` のような gauge/counter メトリクスを直接クエリできるが、CloudWatch PromQL ではベンダーメトリクスに対して `histogram_avg()` や `histogram_sum()` で集約する必要がある。CloudWatch メトリクスは統計値（Average, Sum, Min, Max, SampleCount）を持つデータモデルであり、PromQL では ExponentialHistogram として格納される。
+
+| 用途 | CloudWatch PromQL | Prometheus 相当 |
+|---|---|---|
+| 平均値 | `histogram_avg({"CPUUtilization"})` | `avg(node_cpu_idle)` |
+| 合計値 | `histogram_sum({"Invocations"})` | `sum(invocations_total)` |
+| パーセンタイル | `histogram_quantile(0.99, {"Duration"})` | `histogram_quantile(0.99, rate(duration_bucket[5m]))` |
+
+### `@` プレフィックスによるスコープ指定
+
+PromQL ラベルは OTLP のスコープに応じた `@` プレフィックスを持つ。
+
+| スコープ | プレフィックス | 例 |
+|---|---|---|
+| Resource | `@resource.` | `@resource.cloud.resource_id` |
+| Instrumentation | `@instrumentation.` | `@instrumentation.@name` |
+| AWS 予約 | `@aws.` | `@aws.tag.Name`, `@aws.region` |
+| Datapoint | `@datapoint.` またはプレフィックスなし | `InstanceId` |
+
+UTF-8 文字を含むラベル名は Editor モードではダブルクォートで囲む必要がある（例: `"@instrumentation.@name"`）。Builder モードではドロップダウンから選択するだけなので意識する必要はない。
+
+### サービス横断クエリ — タグベース集計
+
+OTel エンリッチメントの真価は、リソースタグによるサービス横断クエリにある。
+
+`CPUUtilization` は EC2 だけでなく RDS など複数のサービスが同名のメトリクスを持つ。`@instrumentation.@name` ラベルでソースサービスを絞り込める:
+
+```text
+histogram_avg({"CPUUtilization", "@instrumentation.@name"="cloudwatch.aws/ec2"})
+```
+
+さらに `sum by` でリソースタグによる集計ができる。例えば、同じ `Name` タグを持つ複数の EC2 インスタンスの CPU 使用率をタグごとに集約する:
+
+```text
+sum by ("@aws.tag.Name")(histogram_avg({"CPUUtilization", "@instrumentation.@name"="cloudwatch.aws/ec2"}))
+```
+
+`@aws.tag.Environment` や `@aws.tag.Team` など、任意のリソースタグで集計できるため、複数サービス・複数インスタンスのメトリクスをタグベースで横断的に分析できる。Prometheus エクスポーターなしでこれが実現できる点が、この機能の最大の価値だ。
+
+### Builder モード vs Editor モード
+
+| 観点 | Builder モード | Editor モード |
+|---|---|---|
+| 操作性 | GUI でメトリクス名・ラベルを選択 | PromQL を直接入力 |
+| オートコンプリート | メトリクス名・ラベル名の候補表示あり | シンタックスハイライトあり |
+| 複雑なクエリ | 基本的なフィルタ・集計に限定 | 任意の PromQL 式を記述可能 |
+| 適したユーザー | PromQL 初心者、メトリクス探索時 | Prometheus 経験者、複雑な分析時 |
+
+メトリクスの探索は Builder モードで始め、複雑なクエリが必要になったら Editor モードに切り替えるのが効率的だ。
+
+## アラーム作成とダッシュボード連携
+
+### Query Studio からアラームを作成する
+
+Query Studio で PromQL クエリを実行した後、アクションメニューから **Create alarm** を選択すると、クエリが事前入力された状態でアラーム作成画面に遷移する。
+
+PromQL アラームの特徴は、閾値条件をクエリ内に埋め込む点だ。従来の CloudWatch アラームでは閾値を別パラメータで指定するが、PromQL アラームでは `> 80` のような比較演算子が PromQL 式の一部になる。Builder モードでは **Basic Operation** ドロップダウンで比較演算子と閾値を設定できる。Editor モードでは直接式に記述する:
+
+```text
+histogram_avg({"CPUUtilization", "@instrumentation.@name"="cloudwatch.aws/ec2"}) > 80
+```
+
+設定項目は3つ:
+
+- **Evaluation interval** — クエリの評価間隔（例: 1分）
+- **Pending period** — ALARM 状態に遷移するまでの待機時間（例: 120秒）
+- **Recovery period** — OK 状態に復帰するまでの待機時間（例: 300秒）
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">CLI からアラームを作成する場合</summary>
+
+```bash title="Terminal"
+aws cloudwatch put-metric-alarm \
+  --region us-east-1 \
+  --alarm-name "PromQL-EC2-CPU-High" \
+  --evaluation-criteria '{
+    "PromQLCriteria": {
+      "Query": "histogram_avg({__name__=\"CPUUtilization\", \"@instrumentation.@name\"=\"cloudwatch.aws/ec2\"}) > 80",
+      "PendingPeriod": 120,
+      "RecoveryPeriod": 300
+    }
+  }' \
+  --evaluation-interval 60
+```
+
+作成されたアラームを確認すると、PromQL クエリが `EvaluationCriteria` に格納されていることがわかる:
+
+```bash title="Terminal"
+aws cloudwatch describe-alarms \
+  --region us-east-1 \
+  --alarm-names "PromQL-EC2-CPU-High"
+```
+
+```json title="Output"
+{
+    "MetricAlarms": [
+        {
+            "AlarmName": "PromQL-EC2-CPU-High",
+            "StateValue": "OK",
+            "StateReason": "No time series evaluated to ALARM",
+            "EvaluationCriteria": {
+                "PromQLCriteria": {
+                    "Query": "histogram_avg({__name__=\"CPUUtilization\", \"@instrumentation.@name\"=\"cloudwatch.aws/ec2\"}) > 80",
+                    "PendingPeriod": 120,
+                    "RecoveryPeriod": 300
+                }
+            },
+            "EvaluationInterval": 60
+        }
+    ]
+}
+```
+
+CLI 経由の場合、メトリクス名は `__name__=` 形式で指定する必要がある点に注意。
+
+</details>
+
+### ダッシュボードへの追加
+
+Query Studio でクエリを実行した後、アクションメニューから **Add to dashboard** を選択し、追加先のダッシュボードを指定する。ウィジェットはダッシュボードのリフレッシュ間隔で PromQL クエリを再実行し、最新のデータを表示し続ける。
+
+## まとめ
+
+- **CLI 2コマンドで即座に有効化** — `start-telemetry-enrichment` と `start-o-tel-enrichment` を実行するだけで、既存の AWS ベンダーメトリクスが PromQL で照会可能になる。追加のインフラ構築は不要だ。
+- **histogram 関数が必須** — CloudWatch ベンダーメトリクスは ExponentialHistogram として格納されるため、`histogram_avg` / `histogram_sum` で集約する必要がある。Prometheus から移行する際の最大の構文差異であり、既存の PromQL クエリをそのまま使い回すことはできない。
+- **タグベース横断クエリが実用的** — OTel エンリッチメントにより `@aws.tag.*` ラベルが自動付与され、サービスを横断したタグベースの集計・フィルタが可能。Prometheus エクスポーターなしでこれが実現できる点が最大の価値だ。
+- **PromQL 関数の互換性** — 検証した `rate`, `avg_over_time`, `histogram_quantile`, `topk`, `count`, `sum by` はすべて動作した。Prometheus 3.0 ベースで UTF-8 ラベル名もサポートされている。
+
+### プレビューの制約
+
+- **対応リージョン:** us-east-1, us-west-2, eu-west-1, ap-southeast-1, ap-southeast-2 の5リージョンのみ（東京リージョン未対応）
+- **料金:** プレビュー期間中は無料。GA 後の料金体系は未発表
+- **クエリ制限:** 最大 500 時系列/クエリ、最大 7 日間のレンジ、20 秒のタイムアウト
+- **recording rules:** Prometheus のような recording rules はサポートされていない。アラームは `put-metric-alarm` の PromQL 形式で個別に作成する
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">補足: Prometheus 互換 API エンドポイントからのクエリ</summary>
+
+Query Studio のコンソール以外に、Prometheus 互換の HTTP API エンドポイントから直接 PromQL クエリを実行することもできる。Grafana との連携や自動化スクリプトで利用する場合に有用だ。
+
+**エンドポイント:**
+
+```text
+https://monitoring.<region>.amazonaws.com/api/v1/query        # instant query
+https://monitoring.<region>.amazonaws.com/api/v1/query_range  # range query
+```
+
+SigV4 署名のサービス名は `monitoring`。[awscurl](https://github.com/okigan/awscurl) を使えば署名を自動処理できる。
+
+```bash title="Terminal"
+REGION="us-east-1"
+BASE="https://monitoring.${REGION}.amazonaws.com/api/v1/query"
+QUERY='histogram_avg({__name__="CPUUtilization", "@instrumentation.@name"="cloudwatch.aws/ec2"})'
+ENCODED=$(python3 -c "import urllib.parse, sys; print(urllib.parse.quote(sys.argv[1]))" "$QUERY")
+
+awscurl --service monitoring --region "$REGION" \
+  -X POST \
+  -H "Content-Type: application/x-www-form-urlencoded" \
+  -d "query=${ENCODED}" \
+  "$BASE"
+```
+
+**メトリクス名の指定方法に注意:** Query Studio の Editor モードおよび API エンドポイント経由では、メトリクス名をダブルクォートで囲む必要がある（`{"CPUUtilization"}`）。`__name__=` 形式（`{__name__="CPUUtilization"}`）でも動作する。
+
+**Grafana との連携:** Amazon Managed Grafana で Prometheus データソースを追加し、URL に `https://monitoring.<region>.amazonaws.com/v1/metrics`、認証に SigV4 を設定すれば、Grafana ダッシュボードから同じ PromQL クエリを実行できる。
+
+</details>
+
+## クリーンアップ
+
+```bash title="Terminal"
+# アラームの削除
+aws cloudwatch delete-alarms \
+  --region us-east-1 \
+  --alarm-names "PromQL-EC2-CPU-High"
+
+# OTel エンリッチメントの無効化（不要な場合）
+aws cloudwatch stop-o-tel-enrichment --region us-east-1
+aws observabilityadmin stop-telemetry-enrichment --region us-east-1
+```

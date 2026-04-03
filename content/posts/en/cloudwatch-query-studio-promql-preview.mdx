@@ -1,0 +1,291 @@
+---
+title: "Query AWS Metrics with PromQL Using CloudWatch Query Studio"
+description: "Verify CloudWatch Query Studio (Preview) with OTel enrichment — from enabling PromQL on vended metrics to creating alarms. Covers histogram function requirements, tag-based cross-service queries, and practical tips for Prometheus users."
+date: "2026-04-04"
+published: true
+featured: false
+categories: [infrastructure]
+tags: ["aws", "cloudwatch", "promql", "opentelemetry", "observability"]
+---
+
+## Introduction
+
+On April 3, 2026, AWS [announced the public preview of Amazon CloudWatch Query Studio](https://aws.amazon.com/about-aws/whats-new/2026/04/amazon-cloudwatch-query-studio-preview/). This is CloudWatch's first native PromQL query environment, enabling you to query both AWS vended metrics and OpenTelemetry metrics from a single interface.
+
+Combined with OTel enrichment, Query Studio lets you query AWS vended metrics with PromQL across services — no Prometheus exporters or external backends required. This article walks through the setup, querying in Query Studio, and alarm creation, providing practical data for Prometheus users evaluating migration or coexistence. See the official documentation at [Query metrics with PromQL](https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/CloudWatch-PromQL.html).
+
+**This article is based on the public preview as of April 2026. Behavior may change at GA.**
+
+Prerequisites:
+
+- AWS CLI v2 (for enabling enrichment)
+- `cloudwatch:*` and `observabilityadmin:*` permissions (see [IAM permissions for PromQL](https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/CloudWatch-PromQL.html#CloudWatch-PromQL-IAM) for details)
+- Test region: us-east-1 (preview-supported region)
+- Existing resources with CloudWatch metrics (e.g., EC2 instances)
+
+## Enabling OTel Enrichment
+
+Using PromQL in Query Studio requires two enrichment settings to be enabled.
+
+First, enable resource tag propagation to telemetry:
+
+```bash title="Terminal"
+aws observabilityadmin start-telemetry-enrichment --region us-east-1
+```
+
+```json title="Output"
+{
+    "Status": "Running",
+    "AwsResourceExplorerManagedViewArn": "arn:aws:resource-explorer-2:us-east-1:XXXXXXXXXXXX:managed-view/AWSManagedViewForCloudWatchTelemetryEnrichment/..."
+}
+```
+
+A Resource Explorer managed view is automatically created. This makes tags on your EC2 instances, Lambda functions, and other resources available as PromQL labels.
+
+Second, enable OTel enrichment for CloudWatch vended metrics:
+
+```bash title="Terminal"
+aws cloudwatch start-o-tel-enrichment --region us-east-1
+```
+
+Verify the status:
+
+```bash title="Terminal"
+aws cloudwatch get-o-tel-enrichment --region us-east-1
+```
+
+```json title="Output"
+{
+    "Status": "Running"
+}
+```
+
+Two commands, instant activation. Note that the [official blog](https://aws.amazon.com/blogs/mt/introducing-opentelemetry-promql-support-in-amazon-cloudwatch/) references `describe-o-tel-enrichment-status`, but the actual AWS CLI command (as of v2.34) is `get-o-tel-enrichment`.
+
+You can also enable both settings from the console: open CloudWatch Settings and turn on "Enable resource tags on telemetry" and "Enable OTel enrichment for AWS metrics."
+
+## Running PromQL Queries in Query Studio
+
+### Accessing Query Studio
+
+In the CloudWatch console navigation pane, choose **Query Studio (Preview)**. Select **PromQL** from the query language dropdown to access Builder and Editor modes. Use the **`</>`** icon in the upper right to switch between them.
+
+### Basic Query — EC2 CPUUtilization
+
+Start with Builder mode to query EC2 CPUUtilization:
+
+1. Select `CPUUtilization` in the **Metric** field
+2. Click **Run**
+
+A time series graph appears with just these two steps. Thanks to OTel enrichment, the results include automatically added labels:
+
+| Label | Description | Example |
+|---|---|---|
+| `@aws.account` | AWS account ID | `123456789012` |
+| `@aws.region` | Region where the metric was ingested | `us-east-1` |
+| `@aws.tag.Name` | EC2 instance Name tag | `my-ec2-instance` |
+| `@resource.cloud.resource_id` | Full resource ARN | `arn:aws:ec2:us-east-1:...` |
+| `@instrumentation.@name` | Source service identifier | `cloudwatch.aws/ec2` |
+| `@instrumentation.cloudwatch.source` | Service identifier | `aws.ec2` |
+| `InstanceId` | Original CloudWatch dimension | `i-0123456789abcdef0` |
+
+No manual instrumentation needed — these labels are available out of the box.
+
+### Key Difference from Prometheus — Histogram Functions
+
+This is the biggest gotcha for Prometheus users. CloudWatch vended metrics are stored internally as ExponentialHistograms. Builder mode displays aggregated values in the graph, but Editor mode behaves differently.
+
+Switch to Editor mode and enter `{"CPUUtilization"}` — instead of aggregated values, you get raw histogram data:
+
+```text
+# Editor mode — returns raw histogram data
+{"CPUUtilization"}
+```
+
+To get aggregated values, wrap the query with `histogram_avg`:
+
+```text
+# Editor mode — returns aggregated average
+histogram_avg({"CPUUtilization"})
+```
+
+In Prometheus, you can query gauge/counter metrics like `node_cpu_seconds_total` directly. In CloudWatch PromQL, vended metrics require `histogram_avg()` or `histogram_sum()` for aggregation. CloudWatch metrics use a data model with statistics (Average, Sum, Min, Max, SampleCount), and in PromQL they are stored as ExponentialHistograms.
+
+| Use case | CloudWatch PromQL | Prometheus equivalent |
+|---|---|---|
+| Average | `histogram_avg({"CPUUtilization"})` | `avg(node_cpu_idle)` |
+| Sum | `histogram_sum({"Invocations"})` | `sum(invocations_total)` |
+| Percentile | `histogram_quantile(0.99, {"Duration"})` | `histogram_quantile(0.99, rate(duration_bucket[5m]))` |
+
+### `@` Prefix Label Scoping
+
+PromQL labels use `@` prefixes corresponding to OTLP scopes:
+
+| Scope | Prefix | Example |
+|---|---|---|
+| Resource | `@resource.` | `@resource.cloud.resource_id` |
+| Instrumentation | `@instrumentation.` | `@instrumentation.@name` |
+| AWS reserved | `@aws.` | `@aws.tag.Name`, `@aws.region` |
+| Datapoint | `@datapoint.` or bare | `InstanceId` |
+
+In Editor mode, label names containing UTF-8 characters must be double-quoted (e.g., `"@instrumentation.@name"`). In Builder mode, you simply select from dropdowns.
+
+### Cross-Service Queries — Tag-Based Aggregation
+
+The real power of OTel enrichment is cross-service querying by resource tags.
+
+`CPUUtilization` exists across multiple services — EC2, RDS, and others share the same metric name. Use the `@instrumentation.@name` label to filter by source service:
+
+```text
+histogram_avg({"CPUUtilization", "@instrumentation.@name"="cloudwatch.aws/ec2"})
+```
+
+Then use `sum by` to aggregate by resource tags. For example, aggregate CPU utilization across multiple EC2 instances sharing the same `Name` tag:
+
+```text
+sum by ("@aws.tag.Name")(histogram_avg({"CPUUtilization", "@instrumentation.@name"="cloudwatch.aws/ec2"}))
+```
+
+You can aggregate by any resource tag — `@aws.tag.Environment`, `@aws.tag.Team`, etc. — enabling cross-service, cross-instance analysis by tags. Achieving this without Prometheus exporters is the core value proposition of this feature.
+
+### Builder Mode vs Editor Mode
+
+| Aspect | Builder mode | Editor mode |
+|---|---|---|
+| Interaction | GUI-based metric/label selection | Direct PromQL input |
+| Autocomplete | Metric and label name suggestions | Syntax highlighting |
+| Complex queries | Limited to basic filters and aggregations | Any PromQL expression |
+| Best for | PromQL beginners, metric exploration | Prometheus veterans, complex analysis |
+
+Start exploring metrics in Builder mode, then switch to Editor mode when you need complex queries.
+
+## Alarm Creation and Dashboard Integration
+
+### Creating Alarms from Query Studio
+
+After running a PromQL query in Query Studio, choose **Create alarm** from the actions menu. The query is pre-populated in the alarm creation page.
+
+PromQL alarms embed the threshold condition in the query itself. Instead of configuring a separate threshold parameter as with traditional CloudWatch alarms, the comparison operator (`> 80`) is part of the PromQL expression. In Builder mode, use the **Basic Operation** dropdown to set the operator and threshold. In Editor mode, write it directly in the expression:
+
+```text
+histogram_avg({"CPUUtilization", "@instrumentation.@name"="cloudwatch.aws/ec2"}) > 80
+```
+
+Three configuration parameters:
+
+- **Evaluation interval** — How often the query runs (e.g., 1 minute)
+- **Pending period** — Wait time before transitioning to ALARM (e.g., 120 seconds)
+- **Recovery period** — Wait time before returning to OK (e.g., 300 seconds)
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">Creating alarms via CLI</summary>
+
+```bash title="Terminal"
+aws cloudwatch put-metric-alarm \
+  --region us-east-1 \
+  --alarm-name "PromQL-EC2-CPU-High" \
+  --evaluation-criteria '{
+    "PromQLCriteria": {
+      "Query": "histogram_avg({__name__=\"CPUUtilization\", \"@instrumentation.@name\"=\"cloudwatch.aws/ec2\"}) > 80",
+      "PendingPeriod": 120,
+      "RecoveryPeriod": 300
+    }
+  }' \
+  --evaluation-interval 60
+```
+
+Verify the created alarm:
+
+```bash title="Terminal"
+aws cloudwatch describe-alarms \
+  --region us-east-1 \
+  --alarm-names "PromQL-EC2-CPU-High"
+```
+
+```json title="Output"
+{
+    "MetricAlarms": [
+        {
+            "AlarmName": "PromQL-EC2-CPU-High",
+            "StateValue": "OK",
+            "StateReason": "No time series evaluated to ALARM",
+            "EvaluationCriteria": {
+                "PromQLCriteria": {
+                    "Query": "histogram_avg({__name__=\"CPUUtilization\", \"@instrumentation.@name\"=\"cloudwatch.aws/ec2\"}) > 80",
+                    "PendingPeriod": 120,
+                    "RecoveryPeriod": 300
+                }
+            },
+            "EvaluationInterval": 60
+        }
+    ]
+}
+```
+
+Note that via CLI, metric names must use the `__name__=` form.
+
+</details>
+
+### Adding to Dashboards
+
+After running a query in Query Studio, choose **Add to dashboard** from the actions menu and select the target dashboard. The widget continues to re-execute the PromQL query at the dashboard's refresh interval, keeping the data up to date.
+
+## Summary
+
+- **Instant activation with two CLI commands** — Running `start-telemetry-enrichment` and `start-o-tel-enrichment` immediately makes existing AWS vended metrics queryable via PromQL. No additional infrastructure required.
+- **Histogram functions are mandatory** — CloudWatch vended metrics are stored as ExponentialHistograms, requiring `histogram_avg` / `histogram_sum` for aggregation. This is the biggest syntax difference from Prometheus — existing PromQL queries cannot be reused as-is.
+- **Tag-based cross-service queries work well** — OTel enrichment automatically adds `@aws.tag.*` labels, enabling cross-service aggregation and filtering by resource tags. Achieving this without Prometheus exporters is the core value.
+- **PromQL function compatibility** — The functions tested — `rate`, `avg_over_time`, `histogram_quantile`, `topk`, `count`, and `sum by` — all worked. Based on Prometheus 3.0 with UTF-8 label name support.
+
+### Preview Limitations
+
+- **Regions:** us-east-1, us-west-2, eu-west-1, ap-southeast-1, ap-southeast-2 only (Tokyo not yet supported)
+- **Pricing:** Free during preview. GA pricing not yet announced
+- **Query limits:** Max 500 time series per query, 7-day max range, 20-second timeout
+- **Recording rules:** Prometheus-style recording rules are not supported. Alarms are created individually via `put-metric-alarm` with PromQL criteria
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">Appendix: Querying via the Prometheus-Compatible API Endpoint</summary>
+
+Beyond the Query Studio console, you can execute PromQL queries directly via a Prometheus-compatible HTTP API endpoint. This is useful for Grafana integration or automation scripts.
+
+**Endpoints:**
+
+```text
+https://monitoring.<region>.amazonaws.com/api/v1/query        # instant query
+https://monitoring.<region>.amazonaws.com/api/v1/query_range  # range query
+```
+
+The SigV4 service name is `monitoring`. Use [awscurl](https://github.com/okigan/awscurl) to handle signing automatically.
+
+```bash title="Terminal"
+REGION="us-east-1"
+BASE="https://monitoring.${REGION}.amazonaws.com/api/v1/query"
+QUERY='histogram_avg({__name__="CPUUtilization", "@instrumentation.@name"="cloudwatch.aws/ec2"})'
+ENCODED=$(python3 -c "import urllib.parse, sys; print(urllib.parse.quote(sys.argv[1]))" "$QUERY")
+
+awscurl --service monitoring --region "$REGION" \
+  -X POST \
+  -H "Content-Type: application/x-www-form-urlencoded" \
+  -d "query=${ENCODED}" \
+  "$BASE"
+```
+
+**Metric name syntax note:** In Query Studio's Editor mode and via the API endpoint, metric names must be double-quoted (e.g., `{"CPUUtilization"}`). The `__name__=` form (`{__name__="CPUUtilization"}`) also works.
+
+**Grafana integration:** In Amazon Managed Grafana, add a Prometheus data source with URL `https://monitoring.<region>.amazonaws.com/v1/metrics` and SigV4 authentication to run the same PromQL queries from Grafana dashboards.
+
+</details>
+
+## Cleanup
+
+```bash title="Terminal"
+# Delete the alarm
+aws cloudwatch delete-alarms \
+  --region us-east-1 \
+  --alarm-names "PromQL-EC2-CPU-High"
+
+# Disable OTel enrichment (if no longer needed)
+aws cloudwatch stop-o-tel-enrichment --region us-east-1
+aws observabilityadmin stop-telemetry-enrichment --region us-east-1
+```
