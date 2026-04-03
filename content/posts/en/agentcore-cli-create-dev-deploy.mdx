@@ -59,6 +59,8 @@ agentcore create --name AgentCoreTest --defaults
 cd AgentCoreTest
 ```
 
+`agentcore create` initializes a git repository by default. If git is not installed or your git configuration causes errors, add `--skip-git` to skip this step.
+
 Running `agentcore create` without flags launches an interactive wizard where you can choose the framework (Strands / LangChain / GoogleADK / OpenAI Agents), model provider (Bedrock / Anthropic / OpenAI / Gemini), and memory options.
 
 ### Generated project structure
@@ -406,7 +408,7 @@ Tool calling with streaming worked correctly on the deployed agent. The invoke l
 `agentcore logs` streams runtime logs from the deployed agent.
 
 ```bash title="Terminal"
-agentcore logs --agent AgentCoreTest --since 10m
+agentcore logs --runtime AgentCoreTest --since 10m
 ```
 
 Logs are in OpenTelemetry structured format. Key observations:

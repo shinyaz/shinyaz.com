@@ -59,6 +59,8 @@ agentcore create --name AgentCoreTest --defaults
 cd AgentCoreTest
 ```
 
+`agentcore create` はデフォルトで git リポジトリを初期化する。git が未インストールの環境や git の設定によってはエラーになることがあるため、その場合は `--skip-git` を付けて実行する。
+
 対話的に作成したい場合は `agentcore create` だけで実行すればウィザードが起動する。フレームワーク（Strands / LangChain / GoogleADK / OpenAI Agents）、モデルプロバイダー（Bedrock / Anthropic / OpenAI / Gemini）、メモリの有無などを選択できる。
 
 ### 生成されるプロジェクト構成
@@ -412,7 +414,7 @@ The sum of 10 + 20 is **30**.
 `agentcore logs` でデプロイ済みエージェントのランタイムログを確認できる。
 
 ```bash title="Terminal"
-agentcore logs --agent AgentCoreTest --since 10m
+agentcore logs --runtime AgentCoreTest --since 10m
 ```
 
 ログは OpenTelemetry 形式の構造化ログで出力される。以下のような情報が確認できた。
