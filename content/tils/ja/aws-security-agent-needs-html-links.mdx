@@ -1,0 +1,13 @@
+---
+title: "AWS Security Agent のペンテストは HTML リンクがないとエンドポイントを発見できない"
+description: "Security Agent の SCANNER は JSON レスポンスからリンクを辿らない。API-only アプリをテストする場合は HTML の <a> タグやフォームを含むエントリポイントが必要。"
+date: "2026-04-05"
+published: true
+tags: ["aws", "security-agent", "penetration-testing", "security"]
+---
+
+[GraphQL API に対するペンテスト検証](/ja/blog/2026/04/05/aws-security-agent-graphql-pentest)で気づいた挙動。`GET /` が `{"graphql_endpoint": "/graphql"}` という JSON を返すアプリに対してペンテストを実行したところ、Agent は `/graphql` に一度もアクセスしなかった。ドキュメント（SDL + API doc）を `documents` として提供しても、エンドポイントを `http://<host>/graphql` と明示指定しても結果は同じで、Finding 0 件だった。
+
+`/` を HTML ページに変更し `<a href="/graphql">` リンクと `<form method="POST" action="/graphql">` フォームを追加したところ、Agent は `/graphql` を発見して 3,601 回の POST リクエストを送信し、8 件の Finding を検出した。
+
+Agent の SCANNER は HTML の `<a>` タグやフォームを起点にクローリングしていると推測される。JSON レスポンスの値を解析してリンク先に遷移する挙動は観測されなかった。GraphQL に限らず、API-only のバックエンド（SPA のバックエンド等）をテストする場合は、テスト用の HTML エントリポイントを一時的にデプロイするのが有効だと考えられる。

@@ -1,0 +1,13 @@
+---
+title: "AWS Security Agent pentest can't discover endpoints without HTML links"
+description: "Security Agent's SCANNER doesn't follow links from JSON responses. API-only apps need an HTML entry point with <a> tags or forms for the agent to discover endpoints."
+date: "2026-04-05"
+published: true
+tags: ["aws", "security-agent", "penetration-testing", "security"]
+---
+
+Discovered this while [testing Security Agent against a GraphQL API](/en/blog/2026/04/05/aws-security-agent-graphql-pentest). When `GET /` returned `{"graphql_endpoint": "/graphql"}` as JSON, the agent never accessed `/graphql`. Providing schema documentation via `documents` or explicitly setting the endpoint URL to `http://<host>/graphql` didn't help either — 0 findings in all cases.
+
+After changing `/` to an HTML page with `<a href="/graphql">` and adding a `<form method="POST" action="/graphql">`, the agent discovered `/graphql`, sent 3,601 POST requests, and reported 8 findings.
+
+The SCANNER appears to crawl via HTML `<a>` tags and form actions. It didn't parse JSON values to navigate to linked endpoints. This applies beyond GraphQL — any API-only backend (e.g. SPA backends) likely needs a temporary HTML entry point for effective testing.
