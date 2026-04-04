@@ -1,0 +1,15 @@
+---
+title: "AWS Security Agent の Private VPC ドメインは UNREACHABLE が正常な検証状態"
+description: "Target Domain の HTTP Route 検証で UNREACHABLE になっても問題ない。Private VPC ドメインの場合、UNREACHABLE がペンテストに使用可能な正常状態。ドキュメントに記載あり。"
+date: "2026-04-05"
+published: true
+tags: ["aws", "security-agent", "penetration-testing"]
+---
+
+[Code Remediation 検証](/ja/blog/2026/04/05/aws-security-agent-code-remediation)と[認証フロー検証](/ja/blog/2026/04/05/aws-security-agent-auth-flow)で遭遇した。EC2 の Private DNS を Target Domain として登録し、HTTP Route 検証を実行したところ、ステータスが `UNREACHABLE` のまま `VERIFIED` にならなかった。
+
+[ドキュメント](https://docs.aws.amazon.com/securityagent/latest/userguide/manage-target-domains.html)には以下の記載がある。
+
+> Private VPC domain: Verify the target domain IP falls within a private CIDR range. Click Verify and confirm that the target domain status becomes Unreachable. This domain can now be used for penetration testing with a configured VPC.
+
+Private VPC ドメインの場合、`UNREACHABLE` がペンテストに使用可能な正常状態である。Agent は VPC 内からアクセスするため、外部からの到達性は不要。`create-pentest` でこのドメインを指定すれば、VPC 設定を使ってペンテストが実行される。

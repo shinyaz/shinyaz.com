@@ -1,0 +1,17 @@
+---
+title: "AWS Security Agent の Code Remediation には NAT Gateway が必要"
+description: "Code Remediation を有効にしたペンテストで Unable to reach GitHub repository エラー。Agent のテスト環境は Agent Space のサブネットで起動し、GitHub にアクセスするためインターネット接続が必要。"
+date: "2026-04-05"
+published: true
+tags: ["aws", "security-agent", "penetration-testing", "github"]
+---
+
+[Code Remediation 検証](/ja/blog/2026/04/05/aws-security-agent-code-remediation)で遭遇したエラー。GitHub リポジトリを紐づけたペンテストジョブを開始したところ、setup-toolbox フェーズで以下のエラーが出てジョブが FAILED になった。
+
+```text title="Output"
+Testing environment setup failed with a client exception: Unable to reach GitHub repository 1201211240. Please ensure your VPC network configuration allows access to GitHub.
+```
+
+Agent のテスト環境は Agent Space に設定したサブネットで起動し、GitHub からソースコードを取得する。パブリックサブネットを指定していても Agent のコンテナにパブリック IP が割り当てられないため、NAT Gateway 経由でインターネットアクセスを確保する必要がある。プライベートサブネットを作成し、NAT Gateway へのルートを設定したところ、ジョブが正常に進行した。
+
+Remediation を使わないペンテスト（`integratedRepositories` なし）では NAT Gateway は不要である。GitHub リポジトリを紐づけた場合のみ必要になる。

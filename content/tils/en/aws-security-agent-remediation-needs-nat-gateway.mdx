@@ -1,0 +1,17 @@
+---
+title: "AWS Security Agent Code Remediation requires a NAT Gateway"
+description: "Pentest with GitHub repo failed with 'Unable to reach GitHub repository'. The agent's test environment runs in the Agent Space subnet and needs internet access to pull source code. NAT Gateway fixes it."
+date: "2026-04-05"
+published: true
+tags: ["aws", "security-agent", "penetration-testing", "github"]
+---
+
+Hit this during [Code Remediation verification](/en/blog/2026/04/05/aws-security-agent-code-remediation). Started a pentest job with a linked GitHub repository and got this in the setup-toolbox phase:
+
+```text title="Output"
+Testing environment setup failed with a client exception: Unable to reach GitHub repository 1201211240. Please ensure your VPC network configuration allows access to GitHub.
+```
+
+The agent's test environment launches in the subnet configured in the Agent Space and pulls source code from GitHub. Even with a public subnet, the agent container doesn't get a public IP, so it can't reach GitHub. Created a private subnet with a NAT Gateway route and the job proceeded normally.
+
+NAT Gateway is only needed when `integratedRepositories` is specified in the pentest. Pentests without GitHub repos don't require it.

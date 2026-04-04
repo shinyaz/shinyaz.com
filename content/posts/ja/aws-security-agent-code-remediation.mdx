@@ -1,0 +1,324 @@
+---
+title: "AWS Security Agent の自動コード修正（Code Remediation）を検証する"
+description: "ペンテストで検出した7件の脆弱性に対して自動コード修正を実行。全件に GitHub PR が生成され、SQL Injection のパラメータ化クエリからクレデンシャルのハッシュ化まで、そのまま適用可能な修正が得られた。"
+date: "2026-04-05"
+published: true
+categories:
+  - programming
+tags:
+  - aws
+  - security-agent
+  - penetration-testing
+  - security
+  - github
+series: "aws-security-agent"
+seriesOrder: 5
+---
+
+## はじめに
+
+[第1回](/ja/blog/2026/04/02/aws-security-agent-pentest-verification)では REST API に対するペネトレーションテストで 5 件中 4 件の脆弱性を検出し、[第2回](/ja/blog/2026/04/02/aws-security-agent-source-code-impact)ではソースコード提供による検出数の変化を、[第3回](/ja/blog/2026/04/05/aws-security-agent-graphql-pentest)では GraphQL API に対する検出能力を、[第4回](/ja/blog/2026/04/05/aws-security-agent-auth-flow)では認証フロー対応と検出範囲の変化を検証した。
+
+第1〜4回は全て「検出」に焦点を当てていた。AWS Security Agent にはペンテストで検出した脆弱性に対して自動的にコード修正を生成し、GitHub リポジトリに PR を作成する **Code Remediation** 機能がある。本記事では第4回と同じ Flask アプリに対してペンテストを実行し、検出された脆弱性に対する自動修正の品質を検証する。
+
+公式ドキュメント: [Remediate a penetration test finding](https://docs.aws.amazon.com/securityagent/latest/userguide/remediate-finding.html)
+
+## 前提条件と制約
+
+Code Remediation には以下の制約がある。
+
+- **us-east-1 のみ** — Code Remediation は現時点で us-east-1 リージョンでのみ利用可能
+- **GitHub 連携が必須** — AWS Security Agent GitHub App をインストールし、リポジトリを Agent Space に接続する必要がある
+- **Private リポジトリ → PR 作成、Public リポジトリ → diff ファイルダウンロード**
+- **VPC から GitHub へのアクセスが必要** — Agent のテスト環境からソースコードを取得するため、NAT Gateway 等でインターネットアクセスを確保する必要がある
+
+第1〜4回は ap-northeast-1 で実施したが、本記事は us-east-1 で実施する。
+
+## 検証環境
+
+第4回と同じ Flask + pyotp アプリ（5つの脆弱性を埋め込み済み）を使用する。
+
+- **アプリ**: Flask + pyotp + SQLite、TOTP 2FA 有効
+- **GitHub リポジトリ**: `shinyaz/auth-vuln-app`（Private）
+- **リージョン**: us-east-1
+- **認証**: Secrets Manager 経由で testuser のクレデンシャルを提供
+
+<details>
+<summary className="cursor-pointer font-medium">ソースコード全文（app.py）</summary>
+
+第4回と同じソースコードのため、[第4回の記事](/ja/blog/2026/04/05/aws-security-agent-auth-flow)を参照。
+
+</details>
+
+<details>
+<summary className="cursor-pointer font-medium">環境構築手順（EC2 + GitHub 連携 + NAT Gateway）</summary>
+
+```bash title="Terminal"
+REGION=us-east-1
+ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+AGENT_SPACE_ID=<your-agent-space-id>
+
+# 1. GitHub リポジトリ作成・プッシュ
+gh repo create auth-vuln-app --private
+cd /tmp && mkdir auth-vuln-app-repo && cd auth-vuln-app-repo
+git init
+# app.py と requirements.txt を配置
+git add . && git commit -m "Initial commit"
+git remote add origin git@github.com:<your-org>/auth-vuln-app.git
+git push -u origin main
+
+# 2. EC2 起動（パブリックサブネット）
+AMI_ID=$(aws ec2 describe-images --region $REGION --owners amazon \
+  --filters "Name=name,Values=al2023-ami-2023*-x86_64" "Name=state,Values=available" \
+  --query "sort_by(Images, &CreationDate)[-1].ImageId" --output text)
+
+SG_ID=$(aws ec2 create-security-group --region $REGION \
+  --group-name "remediation-test-sg" --description "Remediation test" \
+  --vpc-id <your-vpc-id> --query "GroupId" --output text)
+
+aws ec2 authorize-security-group-ingress --region $REGION \
+  --group-id "$SG_ID" --protocol tcp --port 80 --cidr <vpc-cidr>
+
+# SG 自己参照ルール（Agent コンテナ → EC2）
+aws ec2 authorize-security-group-ingress --region $REGION \
+  --group-id "$SG_ID" --protocol tcp --port 80 --source-group "$SG_ID"
+
+INSTANCE_ID=$(aws ec2 run-instances --region $REGION \
+  --image-id "$AMI_ID" --instance-type t3.small \
+  --subnet-id <your-public-subnet-id> --security-group-ids "$SG_ID" \
+  --iam-instance-profile Name=<your-ssm-profile> \
+  --associate-public-ip-address \
+  --tag-specifications 'ResourceType=instance,Tags=[{Key=Name,Value=remediation-test-target}]' \
+  --query "Instances[0].InstanceId" --output text)
+
+# 3. アプリデプロイ（SSM 経由）
+aws ssm send-command --region $REGION --instance-ids "$INSTANCE_ID" \
+  --document-name "AWS-RunShellScript" \
+  --parameters commands='["dnf install -y python3-pip",
+    "pip3 install flask pyotp gunicorn",
+    "mkdir -p /opt/app",
+    "# app.py を base64 でデコードして配置",
+    "cd /opt/app && TOTP_ENABLED=true python3 -c \"from app import init_db; init_db()\"",
+    "cd /opt/app && TOTP_ENABLED=true gunicorn -w 4 -b 0.0.0.0:80 --timeout 120 -e TOTP_ENABLED=true --daemon app:app"]'
+
+# 4. NAT Gateway 作成（Agent コンテナから GitHub へのアクセス用）
+EIP_ALLOC=$(aws ec2 allocate-address --region $REGION --domain vpc --query "AllocationId" --output text)
+NAT_GW=$(aws ec2 create-nat-gateway --region $REGION \
+  --subnet-id <your-public-subnet-id> --allocation-id "$EIP_ALLOC" \
+  --query "NatGateway.NatGatewayId" --output text)
+aws ec2 wait nat-gateway-available --region $REGION --nat-gateway-ids "$NAT_GW"
+
+# 5. プライベートサブネット作成（Agent コンテナ用）
+PRIVATE_SUBNET=$(aws ec2 create-subnet --region $REGION \
+  --vpc-id <your-vpc-id> --cidr-block "172.31.128.0/24" \
+  --availability-zone <your-az> \
+  --query "Subnet.SubnetId" --output text)
+
+PRIVATE_RT=$(aws ec2 create-route-table --region $REGION \
+  --vpc-id <your-vpc-id> --query "RouteTable.RouteTableId" --output text)
+aws ec2 create-route --region $REGION \
+  --route-table-id "$PRIVATE_RT" --destination-cidr-block "0.0.0.0/0" \
+  --nat-gateway-id "$NAT_GW"
+aws ec2 associate-route-table --region $REGION \
+  --route-table-id "$PRIVATE_RT" --subnet-id "$PRIVATE_SUBNET"
+
+# 6. Target Domain 作成・検証
+PRIVATE_DNS=$(aws ec2 describe-instances --region $REGION \
+  --instance-ids "$INSTANCE_ID" \
+  --query "Reservations[0].Instances[0].PrivateDnsName" --output text)
+aws securityagent create-target-domain --region $REGION \
+  --target-domain-name "$PRIVATE_DNS" --verification-method HTTP_ROUTE
+# Private VPC ドメインの場合、UNREACHABLE が正常な検証状態
+
+# 7. Secrets Manager
+aws secretsmanager create-secret --region $REGION \
+  --name "security-agent/remediation-test/testuser" \
+  --secret-string '{"username":"testuser","password":"testpass123","totpSecret":"JBSWY3DPEHPK3PXP"}'
+
+# 8. Agent Space 更新（プライベートサブネット + Secret + Target Domain）
+aws securityagent update-agent-space --region $REGION \
+  --agent-space-id "$AGENT_SPACE_ID" \
+  --target-domain-ids <target-domain-id> \
+  --aws-resources '{
+    "vpcs": [{"vpcArn":"<vpc-id>","securityGroupArns":["'$SG_ID'"],"subnetArns":["'$PRIVATE_SUBNET'"]}],
+    "secretArns": ["<secret-arn>"],
+    "iamRoles": ["<role-arn>"]
+  }'
+
+# 9. GitHub 連携（AWS Console で実施）
+# - Security Agent → Agent Space → Integrations → Connect GitHub
+# - GitHub App インストール → リポジトリ選択
+# - Penetration test タブ → Pentest remediation enabled
+
+# 10. ペンテスト作成（GitHub リポジトリ + AUTOMATIC Remediation）
+aws securityagent create-pentest --region $REGION \
+  --agent-space-id "$AGENT_SPACE_ID" \
+  --title "remediation-test-auth" \
+  --code-remediation-strategy AUTOMATIC \
+  --assets '{
+    "endpoints": [{"uri": "http://'"$PRIVATE_DNS"'"}],
+    "actors": [{"identifier":"testuser","uris":["http://'"$PRIVATE_DNS"'"],
+      "authentication":{"providerType":"SECRETS_MANAGER","value":"<secret-arn>"},
+      "description":"Navigate to /login. Enter username and password. Enter TOTP code. Click Login."}],
+    "integratedRepositories": [{"integrationId":"<integration-id>","providerResourceId":"<github-repo-id>"}]
+  }' \
+  --service-role "<role-arn>" \
+  --vpc-config '{"vpcArn":"<vpc-id>","securityGroupArns":["'$SG_ID'"],"subnetArns":["'$PRIVATE_SUBNET'"]}'
+
+# 11. ペンテストジョブ開始
+aws securityagent start-pentest-job --region $REGION \
+  --agent-space-id "$AGENT_SPACE_ID" --pentest-id <pentest-id>
+```
+
+</details>
+
+### セットアップで遭遇した問題
+
+環境構築では以下の問題に遭遇した。
+
+1. **DB 未初期化** — gunicorn 経由では `init_db()` が実行されない。手動で `python3 -c "from app import init_db; init_db()"` を実行する必要がある。これを忘れると全 DB 依存エンドポイントが 500 エラーを返し、ペンテストが FAILED になる
+2. **VPC から GitHub へのアクセス** — Agent のテスト環境は Agent Space に設定したサブネットで起動する。このサブネットから GitHub にアクセスできないとソースコードを取得できず、`Unable to reach GitHub repository` エラーでジョブが失敗する。今回はプライベートサブネットを作成し、NAT Gateway 経由でインターネットアクセスを確保した
+3. **ペンテスト作成時にリポジトリを紐づける必要がある** — `create-pentest` の `assets.integratedRepositories` でリポジトリを指定する。後から `update-pentest` で追加しても、既に実行中のジョブには反映されない
+
+## 検証結果
+
+**7 件の Finding を検出し、全件に対して GitHub PR が自動生成された。** `code-remediation-strategy` を `AUTOMATIC` に設定したため、Finding が確認されるたびに PR が順次生成された。ペンテストジョブの完了を待つ必要はなく、Finding の検出から数分後に対応する PR が GitHub リポジトリに作成された。
+
+| # | Finding | リスクタイプ | 深刻度 | 確信度 | PR |
+| --- | --- | --- | --- | --- | --- |
+| 1 | SQL Injection in /api/products | SQL_INJECTION | CRITICAL | HIGH | #1 |
+| 2 | Reflected XSS in /search | CROSS_SITE_SCRIPTING | MEDIUM | LOW | #2 |
+| 3 | Hardcoded Flask Secret Key | SESSION_TOKEN_VULNERABILITIES | CRITICAL | HIGH | #3 |
+| 4 | Default Credentials + Plaintext Passwords | DEFAULT_CREDENTIALS | CRITICAL | HIGH | #4 |
+| 5 | IDOR on /profile | INSECURE_DIRECT_OBJECT_REFERENCE | MEDIUM | HIGH | #5 |
+| 6 | Privilege Escalation /admin/users | PRIVILEGE_ESCALATION | MEDIUM | HIGH | #6 |
+| 7 | Stored XSS in Comments | CROSS_SITE_SCRIPTING | MEDIUM | LOW | #7 |
+
+第4回（条件 B）では 6 件だったが、今回は 7 件検出された。第4回では検出されなかった Hardcoded Secret Key（#3）と Default Credentials（#4）が新たに検出されている。今回は GitHub リポジトリとしてソースコードが提供されており、コードレベルの分析が加わった可能性がある。
+
+### PR の修正内容
+
+各 PR の修正内容を分析する。
+
+**PR #1: SQL Injection（CRITICAL）— f-string → パラメータ化クエリ（+4/-4）**
+
+```python title="修正前"
+query = f"SELECT * FROM products WHERE category = '{category}'"
+results = conn.execute(query).fetchall()
+```
+
+```python title="修正後"
+results = conn.execute(
+    "SELECT * FROM products WHERE category = ?", (category,)
+).fetchall()
+```
+
+f-string による文字列結合を SQLite のパラメータ化クエリ（`?` プレースホルダ）に置き換えている。加えて、例外ハンドラの `str(e)` を汎用メッセージに変更し、エラー詳細の漏洩も防いでいる。教科書的な修正であり、そのまま適用可能。
+
+なお、各 PR の description には Pentest ID、Finding ID、CWE 番号、根本原因の説明、修正内容の詳細、影響範囲が構造化されて記載されている。コードレビュー時に Finding の詳細を別途確認する必要がなく、PR 単体で修正の妥当性を判断できる。
+
+**PR #2: Reflected XSS（MEDIUM）— `|safe` フィルタ除去（+1/-1）**
+
+```python title="修正前"
+<h2>Results for: {{ query | safe }}</h2>
+```
+
+```python title="修正後"
+<h2>Results for: {{ query }}</h2>
+```
+
+Jinja2 の `|safe` フィルタを除去し、デフォルトの自動エスケープを有効にしている。1行の変更で正確に脆弱性を解消している。
+
+**PR #3: Hardcoded Secret Key（CRITICAL）— 環境変数 / ランダム生成（+5/-1）**
+
+ハードコードされた `app.secret_key = "insecure-secret-key-for-testing"` を、環境変数 `FLASK_SECRET_KEY` から取得するように変更。未設定の場合は `os.urandom(32)` でランダム生成し、警告を出力する。セッション偽造を防ぐ実用的な修正。
+
+**PR #4: Default Credentials + Plaintext（CRITICAL）— 包括的リファクタリング（+70/-30）**
+
+最も大規模な修正。以下の変更を含む。
+
+- 平文パスワード → `werkzeug.security.generate_password_hash` によるハッシュ化
+- 共通 TOTP Secret → `pyotp.random_base32()` による per-user TOTP Secret 生成
+- 起動時の毎回シード → `SELECT COUNT(*)` で空テーブルの場合のみシード
+- ログイン処理を `check_password_hash` に変更
+- users テーブルに `totp_secret` カラムを追加
+
+単一の脆弱性修正を超えて、認証基盤全体をリファクタリングしている。
+
+**PR #5: IDOR（MEDIUM）— 所有者チェック追加（+2/-1）**
+
+```python title="修正後（追加部分）"
+if session["user_id"] != user_id and session.get("role") != "admin":
+    return "Forbidden", 403
+```
+
+自分自身のプロフィールまたは admin ロールの場合のみアクセスを許可する認可チェックを追加。admin の例外を考慮している点が実用的。
+
+**PR #6: Privilege Escalation（MEDIUM）— ロールベース認可チェック（+3/-1）**
+
+```python title="修正後（追加部分）"
+if session.get("role") != "admin":
+    return "Forbidden", 403
+```
+
+`/admin/users` エンドポイントに admin ロールチェックを追加。シンプルだが正確な修正。
+
+**PR #7: Stored XSS（MEDIUM）— `|safe` フィルタ除去（+1/-1）**
+
+PR #2 と同じパターン。コメント表示の `{{ c['content'] | safe }}` から `|safe` を除去。
+
+### 修正品質の評価
+
+| # | 脆弱性 | 深刻度 | 修正の正確性 | そのまま適用可能か | 変更量 |
+| --- | --- | --- | --- | --- | --- |
+| 1 | SQL Injection | CRITICAL | ✅ 正確 | ✅ | +4/-4 |
+| 2 | Reflected XSS | MEDIUM | ✅ 正確 | ✅ | +1/-1 |
+| 3 | Hardcoded Secret Key | CRITICAL | ✅ 正確 | ✅ | +5/-1 |
+| 4 | Default Credentials | CRITICAL | ✅ 正確 | ⚠️ 要テスト | +70/-30 |
+| 5 | IDOR | MEDIUM | ✅ 正確 | ✅ | +2/-1 |
+| 6 | Privilege Escalation | MEDIUM | ✅ 正確 | ✅ | +3/-1 |
+| 7 | Stored XSS | MEDIUM | ✅ 正確 | ✅ | +1/-1 |
+
+全 7 件の修正が技術的に正確だった。PR #4（Default Credentials）のみ +70/-30 の大規模変更であり、テーブルスキーマの変更を含むため適用前にテストが必要だが、修正の方向性は適切である。
+
+## まとめ
+
+- **全 Finding に対して PR が自動生成された** — 7 件の脆弱性に対して 7 件の PR が作成され、全て技術的に正確な修正だった。XSS の `|safe` 除去（1行）から認証基盤のリファクタリング（70行）まで、脆弱性の複雑さに応じた修正が生成された
+- **修正は「検出」の延長線上にある** — PR の description には Finding のタイトル、CWE 番号、根本原因、修正内容、影響範囲が記載されており、コードレビューに必要な情報が揃っている。ペンテストの Finding を読んで手動で修正するよりも効率的である
+- **NAT Gateway が必要** — Agent のテスト環境はプライベートサブネットで起動するため、GitHub へのアクセスには NAT Gateway が必要。これは追加コスト（NAT Gateway の時間課金 + データ転送）を伴う
+- **us-east-1 限定は実用上の制約** — 既存の Agent Space が別リージョンにある場合、Remediation のためだけに us-east-1 で環境を再構築する必要がある
+
+<details>
+<summary className="cursor-pointer font-medium">クリーンアップ</summary>
+
+```bash title="Terminal"
+REGION=us-east-1
+
+# EC2
+aws ec2 terminate-instances --region $REGION --instance-ids <instance-id>
+
+# NAT Gateway + EIP
+aws ec2 delete-nat-gateway --region $REGION --nat-gateway-id <nat-gw-id>
+# NAT Gateway 削除完了を待ってから EIP 解放
+aws ec2 release-address --region $REGION --allocation-id <eip-alloc-id>
+
+# プライベートサブネット + ルートテーブル
+aws ec2 delete-subnet --region $REGION --subnet-id <private-subnet-id>
+aws ec2 delete-route-table --region $REGION --route-table-id <private-rt-id>
+
+# Security Group
+aws ec2 delete-security-group --region $REGION --group-id <sg-id>
+
+# Secrets Manager
+aws secretsmanager delete-secret --region $REGION \
+  --secret-id <secret-name> --force-delete-without-recovery
+
+# Target Domain
+aws securityagent delete-target-domain --region $REGION \
+  --target-domain-id <target-domain-id>
+
+# GitHub リポジトリ
+gh repo delete <your-org>/auth-vuln-app --yes
+```
+
+</details>
