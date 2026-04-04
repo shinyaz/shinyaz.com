@@ -1,0 +1,16 @@
+---
+title: "AWS Security Agent chains SQL Injection into autonomous login"
+description: "Without any credentials provided, the agent extracted plaintext passwords via SQL Injection, guessed the TOTP secret, and logged in as admin. The docs say 'without credentials, only public pages' — but attack chains bypass that."
+date: "2026-04-05"
+published: true
+tags: ["aws", "security-agent", "penetration-testing", "security"]
+---
+
+Discovered during [authentication flow verification](/en/blog/2026/04/05/aws-security-agent-auth-flow). With zero credentials provided, the agent autonomously built this attack chain:
+
+1. SQL Injection to extract the users table (plaintext passwords)
+2. Recognized TOTP secret `JBSWY3DPEHPK3PXP` as the RFC 6238 test value
+3. Generated valid TOTP codes and logged in as admin
+4. Detected vulnerabilities behind authentication
+
+The docs state "Without credentials, the agent can only test publicly accessible pages and APIs" — but this doesn't account for the agent chaining vulnerabilities to gain access. The TOTP guess succeeded because it was a well-known test value, but the SQLi → credential extraction → login flow could happen with any app storing plaintext passwords. Worth knowing that the agent may reach authenticated pages even without credentials.

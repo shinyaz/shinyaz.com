@@ -1,0 +1,15 @@
+---
+title: "AWS Security Agent create-pentest only accepts one subnet"
+description: "The vpcConfig.subnetArns parameter is an array in the CLI schema, but passing more than one subnet returns 'Maximum of 1 subnet id is allowed'. Use the same subnet as your EC2 target."
+date: "2026-04-05"
+published: true
+tags: ["aws", "security-agent", "penetration-testing"]
+---
+
+Hit this during [authentication flow verification](/en/blog/2026/04/05/aws-security-agent-auth-flow). Passed multiple subnets to `create-pentest --vpc-config`:
+
+```text title="Output"
+ValidationException: Maximum of 1 subnet id is allowed
+```
+
+The CLI schema defines `subnetArns` as a `list`, but the API only accepts one. Note that `update-agent-space` does accept multiple subnets in `awsResources.vpcs[].subnetArns` — this restriction is specific to pentest creation. Just use the same subnet as your EC2 target.

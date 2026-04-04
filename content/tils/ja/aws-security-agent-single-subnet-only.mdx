@@ -1,0 +1,15 @@
+---
+title: "AWS Security Agent の create-pentest で subnetArns は1つしか指定できない"
+description: "create-pentest の vpcConfig.subnetArns は配列だが、2つ以上指定すると 'Maximum of 1 subnet id is allowed' エラーになる。EC2 と同じサブネットを1つだけ指定する。"
+date: "2026-04-05"
+published: true
+tags: ["aws", "security-agent", "penetration-testing"]
+---
+
+[認証フロー検証](/ja/blog/2026/04/05/aws-security-agent-auth-flow)で遭遇したエラー。`create-pentest` の `--vpc-config` で `subnetArns` に複数のサブネットを指定したところ、以下のエラーが返された。
+
+```text title="Output"
+ValidationException: Maximum of 1 subnet id is allowed
+```
+
+CLI のスキーマ上は `subnetArns` は配列（`list`）だが、実際には1つしか受け付けない。`update-agent-space` の `awsResources.vpcs[].subnetArns` では複数指定できるため、ペンテスト作成時だけの制約である。EC2 と同じサブネットを1つだけ指定すれば問題ない。

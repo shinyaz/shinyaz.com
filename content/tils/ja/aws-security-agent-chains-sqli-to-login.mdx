@@ -1,0 +1,16 @@
+---
+title: "AWS Security Agent は SQL Injection で取得したクレデンシャルで自力ログインする"
+description: "認証情報を提供しなくても、Agent は SQL Injection でデータベースからクレデンシャルを抽出し、TOTP コードを推測して管理者としてログインした。ドキュメントの「認証情報なしでは公開ページのみテスト」は攻撃チェーンによる突破を除外していない。"
+date: "2026-04-05"
+published: true
+tags: ["aws", "security-agent", "penetration-testing", "security"]
+---
+
+[認証フロー検証](/ja/blog/2026/04/05/aws-security-agent-auth-flow)で発見した挙動。認証情報を一切提供せずにペンテストを実行したところ、Agent は以下の攻撃チェーンを自律的に構築した。
+
+1. SQL Injection でユーザーテーブルを抽出（平文パスワード取得）
+2. TOTP Secret `JBSWY3DPEHPK3PXP` が RFC 6238 のテスト値であることを認識
+3. TOTP コードを生成して管理者としてログイン
+4. 認証後のページの脆弱性を検出
+
+公式ドキュメントには「Without credentials, the agent can only test publicly accessible pages and APIs」と記載されているが、これは Agent が他の脆弱性を利用して認証を突破するケースを除外していないと考えられる。TOTP Secret がよく知られたテスト値だったために成功した面はあるが、SQL Injection → クレデンシャル取得 → ログインという流れ自体は実運用でも起こりうる。認証情報を提供しなくても Agent が認証後のページに到達する可能性があることは認識しておくべきである。
