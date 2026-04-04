@@ -1,0 +1,553 @@
+---
+title: "AWS Security Agent 検証 — 認証フロー対応と検出範囲の変化"
+description: "認証なし・単一ロール（2FA 付き）・複数ロールの3条件でペンテストを実行。認証情報なしでも Agent が SQL Injection 経由でクレデンシャルを取得し TOTP を推測して自力ログインする挙動を確認した。"
+date: "2026-04-05"
+published: true
+featured: false
+categories: [infrastructure]
+tags: ["aws", "security-agent", "penetration-testing", "authentication", "security", "devsecops"]
+series: "aws-security-agent"
+seriesOrder: 4
+---
+
+## はじめに
+
+[第1回](/ja/blog/2026/04/02/aws-security-agent-pentest-verification)では REST API に対するペネトレーションテストで 5 件中 4 件の脆弱性を検出し、[第2回](/ja/blog/2026/04/02/aws-security-agent-source-code-impact)ではソースコード提供による検出数の変化を、[第3回](/ja/blog/2026/04/05/aws-security-agent-graphql-pentest)では GraphQL API に対する検出能力を検証した。
+
+第1回〜3回は全て**未認証テスト**だった。公式ドキュメント（[Provide authentication credentials](https://docs.aws.amazon.com/securityagent/latest/userguide/provide-testing-credentials.html)）には「Without credentials, the agent can only test publicly accessible pages and APIs」と記載されている。本記事では認証付きアプリに対して「認証なし」「単一ロール（2FA 付き）」「複数ロール」の 3 条件でペンテストを実行し、認証情報の提供が検出範囲にどう影響するかを検証する。
+
+前提条件:
+
+- 第1回で作成した Agent Space・IAM ロールを再利用
+- 検証リージョン: ap-northeast-1（東京）
+- 料金: $50/タスク時間（秒単位課金）
+
+## 検証環境
+
+Flask アプリにログインフォーム（セッション Cookie ベース）と TOTP 2FA を実装し、認証の有無で到達できるページを分けた。
+
+### 埋め込み脆弱性
+
+| # | 脆弱性 | 到達条件 | 説明 |
+| --- | --- | --- | --- |
+| 1 | Reflected XSS | 未認証 | `/search?q=` にユーザー入力を `| safe` でレンダリング |
+| 2 | SQL Injection | 未認証 | `/api/products?category=` で文字列結合による SQL 構築 |
+| 3 | IDOR | 認証済み | `/profile/<user_id>` でセッションユーザーとの一致チェックなし |
+| 4 | Stored XSS | 認証済み | `/dashboard/comment` でコメントを未サニタイズで保存・表示 |
+| 5 | 水平権限昇格 | 認証済み | `/admin/users` にロールチェックなし（一般ユーザーでアクセス可能） |
+
+脆弱性 #1・#2 は未認証でアクセス可能、#3〜#5 は認証後のページにのみ存在する。認証情報の提供により検出範囲が広がるかを確認する構成である。
+
+### 認証方式
+
+AWS Security Agent は以下の認証方式をサポートしている。
+
+- **直接入力（Input credentials）** — ユーザー名・パスワードを直接指定
+- **Secrets Manager** — シークレットに格納した認証情報を参照（暗号化・ローテーション対応）
+- **Lambda** — 動的な認証情報生成（外部 IdP 連携等）
+- **IAM ロール** — Cognito や API Gateway の IAM 認証
+
+本検証では **Secrets Manager** を使用した。本番環境での推奨方式であり、TOTP Secret も JSON フィールドとして格納できる。
+
+### 3 条件の設定
+
+| 条件 | 認証 | actors 設定 | 目的 |
+| --- | --- | --- | --- |
+| A | なし | なし | ベースライン。未認証での検出範囲を確認 |
+| B | testuser（一般ユーザー + 2FA） | Secrets Manager × 1 | Agent が 2FA 付きログインを突破できるか |
+| C | testuser + admin（2ロール + 2FA） | Secrets Manager × 2 | 複数ロールで権限昇格の検出精度が変わるか |
+
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">アプリのソースコード（app.py 全文）</summary>
+
+Flask + pyotp で構築。`TOTP_ENABLED=true` 環境変数で 2FA を有効化する。TOTP Secret は全アカウント共通で `JBSWY3DPEHPK3PXP`（RFC 6238 のテスト値）を使用している。
+
+```python title="app.py"
+from flask import Flask, request, jsonify, session, redirect, render_template_string
+import sqlite3
+import os
+import pyotp
+
+app = Flask(__name__)
+app.secret_key = "insecure-secret-key-for-testing"
+
+DB_PATH = "/tmp/auth_vuln.db"
+TOTP_SECRET = "JBSWY3DPEHPK3PXP"
+
+def get_db():
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+def init_db():
+    conn = get_db()
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY, username TEXT UNIQUE,
+            password TEXT, role TEXT DEFAULT 'user', email TEXT, phone TEXT);
+        CREATE TABLE IF NOT EXISTS products (
+            id INTEGER PRIMARY KEY, name TEXT, category TEXT, price REAL);
+        CREATE TABLE IF NOT EXISTS comments (
+            id INTEGER PRIMARY KEY, user_id INTEGER,
+            content TEXT, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);
+        DELETE FROM users; DELETE FROM products; DELETE FROM comments;
+        INSERT INTO users (id, username, password, role, email, phone) VALUES
+            (1, 'admin', 'admin123', 'admin', 'admin@example.com', '555-0100'),
+            (2, 'testuser', 'testpass123', 'user', 'test@example.com', '555-0200'),
+            (3, 'alice', 'alice123', 'user', 'alice@example.com', '555-0300');
+        INSERT INTO products (id, name, category, price) VALUES
+            (1, 'Laptop', 'electronics', 999.99), (2, 'Phone', 'electronics', 699.99),
+            (3, 'Desk', 'furniture', 299.99), (4, 'Chair', 'furniture', 199.99);
+        INSERT INTO comments (user_id, content) VALUES
+            (1, 'Welcome to the dashboard!'), (2, 'This is a test comment.');
+    """)
+    conn.commit()
+    conn.close()
+
+LAYOUT_HEAD = """<!DOCTYPE html><html><head><title>Auth Vuln App</title></head><body>
+<nav>
+  <a href="/">Home</a> | <a href="/search">Search</a> |
+  <a href="/api/products">Products API</a> |
+  {% if session.get('user_id') %}
+    <a href="/dashboard">Dashboard</a> |
+    <a href="/profile/{{ session['user_id'] }}">Profile</a> |
+    {% if session.get('role') == 'admin' %}<a href="/admin/users">Admin</a> |{% endif %}
+    <a href="/logout">Logout ({{ session['username'] }})</a>
+  {% else %}<a href="/login">Login</a>{% endif %}
+</nav><hr>"""
+LAYOUT_FOOT = "</body></html>"
+
+HOME_PAGE = LAYOUT_HEAD + """
+<h1>Auth Vuln App</h1>
+<h2>Public Pages</h2>
+<ul>
+  <li><a href="/search">Search Products</a></li>
+  <li><a href="/api/products">Products API</a></li>
+  <li><a href="/api/products?category=electronics">Electronics</a></li>
+</ul>
+<h2>Authenticated Pages</h2>
+<ul>
+  <li><a href="/dashboard">Dashboard</a> (requires login)</li>
+  <li><a href="/profile/1">User Profile</a> (requires login)</li>
+  <li><a href="/admin/users">Admin Panel</a> (requires admin)</li>
+</ul>""" + LAYOUT_FOOT
+
+LOGIN_PAGE = LAYOUT_HEAD + """
+<h1>Login</h1>
+{% if error %}<p style="color:red">{{ error }}</p>{% endif %}
+<form method="POST" action="/login">
+  <label>Username: <input type="text" name="username"></label><br>
+  <label>Password: <input type="password" name="password"></label><br>
+  {% if totp_required %}
+    <label>2FA Code: <input type="text" name="totp_code"></label><br>
+  {% endif %}
+  <button type="submit">Login</button>
+</form>""" + LAYOUT_FOOT
+
+SEARCH_PAGE = LAYOUT_HEAD + """
+<h1>Search Products</h1>
+<form method="GET" action="/search">
+  <input type="text" name="q" value="{{ query }}">
+  <button type="submit">Search</button>
+</form>
+{% if query %}
+  <h2>Results for: {{ query | safe }}</h2>
+  <ul>{% for p in results %}<li>{{ p['name'] }} - ${{ p['price'] }}</li>{% endfor %}</ul>
+{% endif %}""" + LAYOUT_FOOT
+
+DASHBOARD_PAGE = LAYOUT_HEAD + """
+<h1>Dashboard</h1>
+<p>Welcome, {{ session['username'] }}!</p>
+<h2>Comments</h2>
+<form method="POST" action="/dashboard/comment">
+  <textarea name="content" rows="3" cols="40"></textarea><br>
+  <button type="submit">Post Comment</button>
+</form>
+<ul>{% for c in comments %}<li>{{ c['content'] | safe }}</li>{% endfor %}</ul>
+""" + LAYOUT_FOOT
+
+PROFILE_PAGE = LAYOUT_HEAD + """
+<h1>User Profile</h1>
+<table>
+  <tr><td>ID</td><td>{{ user['id'] }}</td></tr>
+  <tr><td>Username</td><td>{{ user['username'] }}</td></tr>
+  <tr><td>Email</td><td>{{ user['email'] }}</td></tr>
+  <tr><td>Phone</td><td>{{ user['phone'] }}</td></tr>
+  <tr><td>Role</td><td>{{ user['role'] }}</td></tr>
+</table>""" + LAYOUT_FOOT
+
+ADMIN_PAGE = LAYOUT_HEAD + """
+<h1>Admin - User Management</h1>
+<table border="1">
+  <tr><th>ID</th><th>Username</th><th>Email</th><th>Role</th></tr>
+  {% for u in users %}
+  <tr><td>{{ u['id'] }}</td><td><a href="/profile/{{ u['id'] }}">{{ u['username'] }}</a></td>
+      <td>{{ u['email'] }}</td><td>{{ u['role'] }}</td></tr>
+  {% endfor %}
+</table>""" + LAYOUT_FOOT
+
+@app.route("/")
+def index():
+    return render_template_string(HOME_PAGE)
+
+@app.route("/search")
+def search():
+    query = request.args.get("q", "")
+    results = []
+    if query:
+        conn = get_db()
+        results = conn.execute("SELECT * FROM products WHERE name LIKE ?", (f"%{query}%",)).fetchall()
+        conn.close()
+    return render_template_string(SEARCH_PAGE, query=query, results=results)
+
+@app.route("/api/products")
+def api_products():
+    category = request.args.get("category", "")
+    conn = get_db()
+    if category:
+        query = f"SELECT * FROM products WHERE category = '{category}'"
+        try:
+            results = conn.execute(query).fetchall()
+        except Exception as e:
+            conn.close()
+            return jsonify({"error": str(e)}), 500
+    else:
+        results = conn.execute("SELECT * FROM products").fetchall()
+    conn.close()
+    return jsonify([dict(r) for r in results])
+
+TOTP_ENABLED = os.environ.get("TOTP_ENABLED", "false").lower() == "true"
+
+@app.route("/login", methods=["GET", "POST"])
+def login():
+    if request.method == "GET":
+        return render_template_string(LOGIN_PAGE, error=None, totp_required=TOTP_ENABLED)
+    username = request.form.get("username", "")
+    password = request.form.get("password", "")
+    conn = get_db()
+    user = conn.execute("SELECT * FROM users WHERE username = ? AND password = ?",
+                        (username, password)).fetchone()
+    conn.close()
+    if not user:
+        return render_template_string(LOGIN_PAGE, error="Invalid credentials",
+                                      totp_required=TOTP_ENABLED), 401
+    if TOTP_ENABLED:
+        totp_code = request.form.get("totp_code", "")
+        totp = pyotp.TOTP(TOTP_SECRET)
+        if not totp.verify(totp_code, valid_window=1):
+            return render_template_string(LOGIN_PAGE, error="Invalid 2FA code",
+                                          totp_required=True), 401
+    session["user_id"] = user["id"]
+    session["username"] = user["username"]
+    session["role"] = user["role"]
+    return redirect("/dashboard")
+
+@app.route("/logout")
+def logout():
+    session.clear()
+    return redirect("/")
+
+@app.route("/profile/<int:user_id>")
+def profile(user_id):
+    if "user_id" not in session:
+        return redirect("/login")
+    conn = get_db()
+    user = conn.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+    conn.close()
+    if not user:
+        return "User not found", 404
+    return render_template_string(PROFILE_PAGE, user=dict(user))
+
+@app.route("/dashboard")
+def dashboard():
+    if "user_id" not in session:
+        return redirect("/login")
+    conn = get_db()
+    comments = conn.execute("SELECT * FROM comments ORDER BY created_at DESC").fetchall()
+    conn.close()
+    return render_template_string(DASHBOARD_PAGE, comments=comments)
+
+@app.route("/dashboard/comment", methods=["POST"])
+def post_comment():
+    if "user_id" not in session:
+        return redirect("/login")
+    content = request.form.get("content", "")
+    conn = get_db()
+    conn.execute("INSERT INTO comments (user_id, content) VALUES (?, ?)",
+                 (session["user_id"], content))
+    conn.commit()
+    conn.close()
+    return redirect("/dashboard")
+
+@app.route("/admin/users")
+def admin_users():
+    if "user_id" not in session:
+        return redirect("/login")
+    conn = get_db()
+    users = conn.execute("SELECT * FROM users").fetchall()
+    conn.close()
+    return render_template_string(ADMIN_PAGE, users=users)
+
+@app.route("/.well-known/aws/securityagent-domain-verification.json")
+def verify():
+    return jsonify({"token": "<verification-token>"})
+
+if __name__ == "__main__":
+    init_db()
+    app.run(host="0.0.0.0", port=5000, debug=False)
+```
+
+</details>
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">EC2 デプロイ・Secrets Manager・ペンテスト作成手順</summary>
+
+```bash title="Terminal"
+REGION=ap-northeast-1
+ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+AGENT_SPACE_ID=<your-agent-space-id>
+
+# 1. EC2 起動（t3.small, Amazon Linux 2023）
+AMI_ID=$(aws ec2 describe-images --region $REGION --owners amazon \
+  --filters "Name=name,Values=al2023-ami-2023*-x86_64" "Name=state,Values=available" \
+  --query "sort_by(Images, &CreationDate)[-1].ImageId" --output text)
+
+SG_ID=$(aws ec2 create-security-group --region $REGION \
+  --group-name "auth-vuln-app-sg" --description "Auth vuln app" \
+  --vpc-id <your-vpc-id> --query "GroupId" --output text)
+
+aws ec2 authorize-security-group-ingress --region $REGION \
+  --group-id "$SG_ID" --protocol tcp --port 80 --cidr <vpc-cidr>
+
+INSTANCE_ID=$(aws ec2 run-instances --region $REGION \
+  --image-id "$AMI_ID" --instance-type t3.small \
+  --subnet-id <your-subnet-id> --security-group-ids "$SG_ID" \
+  --iam-instance-profile Name=<your-ssm-profile> \
+  --associate-public-ip-address \
+  --tag-specifications 'ResourceType=instance,Tags=[{Key=Name,Value=auth-vuln-app-target}]' \
+  --query "Instances[0].InstanceId" --output text)
+
+# 2. SSM 経由でアプリをデプロイ（2FA 有効）
+aws ssm send-command --region $REGION --instance-ids "$INSTANCE_ID" \
+  --document-name "AWS-RunShellScript" \
+  --parameters commands='["pip3 install flask pyotp gunicorn",
+    "TOTP_ENABLED=true gunicorn -w 4 -b 0.0.0.0:80 --timeout 120 -e TOTP_ENABLED=true --daemon app:app"]'
+
+# 3. Target Domain 登録・検証
+PRIVATE_DNS=$(aws ec2 describe-instances --region $REGION \
+  --instance-ids "$INSTANCE_ID" \
+  --query "Reservations[0].Instances[0].PrivateDnsName" --output text)
+
+aws securityagent create-target-domain --region $REGION \
+  --target-domain-name "$PRIVATE_DNS" --verification-method HTTP_ROUTE
+
+# 4. Secrets Manager にテスト用認証情報を作成
+aws secretsmanager create-secret --region $REGION \
+  --name "security-agent/auth-test/testuser" \
+  --secret-string '{"username":"testuser","password":"testpass123","totpSecret":"JBSWY3DPEHPK3PXP"}'
+
+aws secretsmanager create-secret --region $REGION \
+  --name "security-agent/auth-test/admin" \
+  --secret-string '{"username":"admin","password":"admin123","totpSecret":"JBSWY3DPEHPK3PXP"}'
+
+# 5. IAM ロールに Secrets Manager アクセス権限を追加
+aws iam put-role-policy --role-name SecurityAgentPentestRole \
+  --policy-name SecurityAgentSecretsAccess \
+  --policy-document '{
+    "Version":"2012-10-17",
+    "Statement":[{"Effect":"Allow",
+      "Action":["secretsmanager:GetSecretValue","secretsmanager:DescribeSecret"],
+      "Resource":"arn:aws:secretsmanager:'$REGION':'$ACCOUNT_ID':secret:security-agent/auth-test/*"}]}'
+
+# 6. Agent Space を更新（Secrets 登録）
+aws securityagent update-agent-space --region $REGION \
+  --agent-space-id "$AGENT_SPACE_ID" --name "pentest-verification" \
+  --aws-resources '{"vpcs":[...],"secretArns":["<testuser-secret-arn>","<admin-secret-arn>"],"iamRoles":["<role-arn>"]}'
+
+# 7. ペンテスト作成（3条件）
+ROLE_ARN="arn:aws:iam::${ACCOUNT_ID}:role/SecurityAgentPentestRole"
+VPC_CONFIG='{"vpcArn":"<vpc-id>","securityGroupArns":["'$SG_ID'"],"subnetArns":["<subnet-id>"]}'
+
+# 条件 A: 認証なし
+aws securityagent create-pentest --region $REGION \
+  --agent-space-id "$AGENT_SPACE_ID" --title "auth-test-a-no-auth" \
+  --assets '{"endpoints":[{"uri":"http://'"$PRIVATE_DNS"'"}]}' \
+  --service-role "$ROLE_ARN" --vpc-config "$VPC_CONFIG"
+
+# 条件 B: 単一ロール + 2FA
+aws securityagent create-pentest --region $REGION \
+  --agent-space-id "$AGENT_SPACE_ID" --title "auth-test-b-single-role-2fa" \
+  --assets '{"endpoints":[{"uri":"http://'"$PRIVATE_DNS"'"}],
+    "actors":[{"identifier":"testuser","uris":["http://'"$PRIVATE_DNS"'"],
+      "authentication":{"providerType":"SECRETS_MANAGER","value":"<testuser-secret-arn>"},
+      "description":"Navigate to /login. Enter username and password. Enter TOTP code from totpSecret. Click Login."}]}' \
+  --service-role "$ROLE_ARN" --vpc-config "$VPC_CONFIG"
+
+# 条件 C: 複数ロール
+aws securityagent create-pentest --region $REGION \
+  --agent-space-id "$AGENT_SPACE_ID" --title "auth-test-c-multi-role" \
+  --assets '{"endpoints":[{"uri":"http://'"$PRIVATE_DNS"'"}],
+    "actors":[
+      {"identifier":"testuser","uris":["http://'"$PRIVATE_DNS"'"],
+        "authentication":{"providerType":"SECRETS_MANAGER","value":"<testuser-secret-arn>"},
+        "description":"Navigate to /login. Enter username and password. Enter TOTP code. Click Login. Regular user."},
+      {"identifier":"admin","uris":["http://'"$PRIVATE_DNS"'"],
+        "authentication":{"providerType":"SECRETS_MANAGER","value":"<admin-secret-arn>"},
+        "description":"Navigate to /login. Enter username and password. Enter TOTP code. Click Login. Admin user."}]}' \
+  --service-role "$ROLE_ARN" --vpc-config "$VPC_CONFIG"
+
+# 8. 実行
+aws securityagent start-pentest-job --region $REGION \
+  --agent-space-id "$AGENT_SPACE_ID" --pentest-id <pentest-id>
+```
+
+</details>
+
+## 条件 A: 認証なし
+
+認証情報を一切提供せずにペンテストを実行した。
+
+**結果: 5 件の Finding（実行時間 2 時間 58 分）**
+
+| # | Finding | リスクタイプ | 深刻度 | 確信度 |
+| --- | --- | --- | --- | --- |
+| 1 | Reflected XSS in Search Parameter | CROSS_SITE_SCRIPTING | MEDIUM | HIGH |
+| 2 | Critical SQL Injection in Products API | SQL_INJECTION | CRITICAL | HIGH |
+| 3 | Stored XSS in Comments Functionality | CROSS_SITE_SCRIPTING | MEDIUM | HIGH |
+| 4 | Vertical Privilege Escalation - Missing RBAC on Admin Endpoint | PRIVILEGE_ESCALATION | MEDIUM | HIGH |
+| 5 | Predictable TOTP Secret Enables Two-Factor Authentication Bypass | AUTHENTICATION_BYPASS | CRITICAL | HIGH |
+
+予想は「未認証の脆弱性 2 件（#1 XSS、#2 SQLi）のみ検出」だったが、**埋め込み脆弱性 5 件中 4 件を検出し、さらに追加発見（TOTP Bypass）を含む計 5 件の Finding** を報告した。IDOR（#3）は検出されていない。Agent は攻撃チェーンで admin としてログインしたため、`/profile/1`（admin 自身のプロフィール）へのアクセスは正当なリクエストとなり、IDOR として報告されなかったと考えられる。
+
+### Agent の攻撃チェーン
+
+Finding #5 の description から、Agent は以下の手順で認証を突破したことが確認できた。
+
+1. SQL Injection（#2）でデータベースからユーザーテーブルを抽出し、平文のクレデンシャル（admin/admin123 等）を取得
+2. TOTP Secret `JBSWY3DPEHPK3PXP` が RFC 6238 のテスト値（`"Hello!"` の Base32 エンコード）であることを認識
+3. 標準的な TOTP アルゴリズムで有効なワンタイムコードを生成
+4. 取得したクレデンシャルと生成した TOTP コードで管理者としてログイン
+5. `/admin/users` にアクセスし、全ユーザー情報を取得
+
+Agent は認証情報を提供されていないにもかかわらず、**SQL Injection → クレデンシャル取得 → TOTP 推測 → 管理者ログイン**という攻撃チェーンを自律的に構築した。公式ブログ（[Inside AWS Security Agent](https://aws.amazon.com/blogs/security/inside-aws-security-agent-a-multi-agent-architecture-for-automated-penetration-testing/)）で言及されている「chained attacks」の実例である。
+
+## 条件 B: 単一ロール + 2FA（Secrets Manager）
+
+一般ユーザー（testuser）の認証情報を Secrets Manager 経由で提供した。TOTP Secret も JSON フィールドとして含めている。
+
+```json title="Secret の内容"
+{"username": "testuser", "password": "testpass123", "totpSecret": "JBSWY3DPEHPK3PXP"}
+```
+
+`actors` の `description` には「Navigate to /login. Enter the username and password from the secret. A 2FA code field will appear - enter the TOTP code generated from the totpSecret in the secret. Click Login.」と記載した。
+
+**結果: 6 件の Finding（実行時間 2 時間 14 分）**
+
+| # | Finding | リスクタイプ | 深刻度 | 確信度 |
+| --- | --- | --- | --- | --- |
+| 1 | Reflected XSS in Search Endpoint | CROSS_SITE_SCRIPTING | MEDIUM | LOW |
+| 2 | SQL Injection in Product API Enables Credential Disclosure | SQL_INJECTION | CRITICAL | HIGH |
+| 3 | SQL Injection - Complete Database Disclosure | SQL_INJECTION | HIGH | HIGH |
+| 4 | Stored XSS in Dashboard Comment Form | CROSS_SITE_SCRIPTING | MEDIUM | LOW |
+| 5 | Insecure Direct Object Reference on User Profile Endpoint | INSECURE_DIRECT_OBJECT_REFERENCE | MEDIUM | HIGH |
+| 6 | Vertical Privilege Escalation - Regular User Can Access Admin Panel | PRIVILEGE_ESCALATION | MEDIUM | HIGH |
+
+Agent は 2FA 付きログインフォームを突破し、認証後のページ（Dashboard、Profile、Admin）にアクセスした。overview には「authentication mechanisms properly enforcing login requirements via HTTP 302 redirects, Flask-based session management using signed cookies」と記載されており、Agent がログインフローを把握した上でテストしていることがうかがえる。
+
+条件 A との違い:
+- **IDOR（#5）を新たに検出** — testuser（id=2）としてログインした状態で `/profile/1`（admin のプロフィール）にアクセスし、認可チェックの欠如を発見。条件 A では Agent が admin としてログインしていたため `/profile/1` は自身のプロフィールとなり IDOR にならなかったが、条件 B では別ユーザーのプロフィールへのアクセスとなるため IDOR として検出された
+- **SQL Injection が 2 件に分離** — 異なる観点（クレデンシャル漏洩 vs データベース全体の開示）で報告
+- **TOTP Bypass は未検出** — 認証情報が提供されているため、TOTP Secret の推測を試みる必要がなかった
+- **XSS の確信度が LOW に低下** — 条件 A では HIGH だったが、条件 B では LOW。テスト戦略の違いによるものと推測される
+
+## 条件 C: 複数ロール（testuser + admin）
+
+一般ユーザーと管理者の 2 つの認証情報を Secrets Manager 経由で提供した。
+
+**結果: 6 件の Finding（実行時間 2 時間 30 分）**
+
+| # | Finding | リスクタイプ | 深刻度 | 確信度 |
+| --- | --- | --- | --- | --- |
+| 1 | Reflected XSS in Search Endpoint | CROSS_SITE_SCRIPTING | MEDIUM | LOW |
+| 2 | Critical SQL Injection in Products API Category Parameter | SQL_INJECTION | CRITICAL | HIGH |
+| 3 | Stored XSS in Dashboard Comment Field | CROSS_SITE_SCRIPTING | MEDIUM | HIGH |
+| 4 | IDOR - Unauthorized Access to Other Users' Profiles | INSECURE_DIRECT_OBJECT_REFERENCE | MEDIUM | HIGH |
+| 5 | Vertical Privilege Escalation - Unauthorized Access to Admin Panel | PRIVILEGE_ESCALATION | MEDIUM | HIGH |
+| 6 | No Arbitrary File Upload Vulnerability | ARBITRARY_FILE_UPLOAD | UNKNOWN | FALSE_POSITIVE |
+
+条件 B と比較して:
+- **検出された脆弱性の種類は同じ** — 複数ロールを提供しても新たな脆弱性は検出されなかった
+- **Finding #6 は Agent 自身が FALSE_POSITIVE と判定** — ファイルアップロード機能が存在しないことを確認した結果
+- **Stored XSS の確信度が HIGH に上昇** — 条件 B では LOW だったが、条件 C では HIGH。管理者アカウントでのテストにより確認精度が向上した可能性がある
+
+## 3 条件比較
+
+| 条件 | 認証 | Finding | 埋め込み脆弱性の検出 | 追加発見 | 実行時間 | 推定コスト |
+| --- | --- | --- | --- | --- | --- | --- |
+| A: 認証なし | なし | 5 | 4/5（IDOR 未検出） | TOTP Bypass | 2h58m | ~$148 |
+| B: 単一ロール + 2FA | testuser | 6 | 5/5 | SQLi 重複 | 2h14m | ~$112 |
+| C: 複数ロール | testuser + admin | 6 | 5/5（+ 1 FP） | File Upload (FP) | 2h30m | ~$125 |
+
+### 分析
+
+**1. 認証情報なしでも Agent は攻撃チェーンで認証を突破できる**
+
+今回の検証で最も予想外だった結果である。条件 A では認証情報を一切提供していないにもかかわらず、Agent は SQL Injection でクレデンシャルを取得し、TOTP Secret を推測して管理者としてログインした。「Without credentials, the agent can only test publicly accessible pages and APIs」というドキュメントの記載は、Agent が他の脆弱性を利用して認証を突破するケースを除外していると考えられる。
+
+ただし、これは TOTP Secret がよく知られたテスト値（RFC 6238 の例示値）だったために成功した。実運用のランダムな TOTP Secret では推測は困難であり、認証情報の提供が必要になる。
+
+**2. 認証情報の提供は「安定した認証アクセス」を保証する**
+
+条件 A は攻撃チェーンの成功に依存しており、SQL Injection が存在しなければ認証後のページには到達できなかった。条件 B/C では Secrets Manager 経由で認証情報を提供することで、脆弱性の有無に関係なく認証後のページをテストできる。これが認証情報提供の本来の価値である。
+
+**3. 複数ロールの効果は今回の検証では限定的だった**
+
+条件 B と C の検出結果はほぼ同じだった。今回のアプリでは権限昇格の脆弱性（#5）が「ロールチェックの完全な欠如」という単純なものだったため、一般ユーザーだけでも検出できた。より複雑な RBAC（特定の操作のみ管理者に許可されている等）では、複数ロールの提供が検出精度に影響する可能性がある。
+
+## まとめ
+
+- **Agent は攻撃チェーンを自律的に構築する** — SQL Injection → クレデンシャル取得 → TOTP 推測 → 管理者ログインという多段階の攻撃を、人間の指示なしに実行した。単なる脆弱性スキャナではなく、ペネトレーションテスターに近い挙動といえる
+- **2FA（TOTP）付きログインフォームを突破できる** — Secrets Manager に `totpSecret` フィールドを含め、`description` にログイン手順を記載することで、Agent は TOTP コードを自動生成してログインした
+- **認証情報の提供は「保険」として推奨** — 攻撃チェーンに依存せず確実に認証後のページをテストするために、認証情報の提供が推奨される。Secrets Manager 経由での提供は設定も簡単で、本番環境でも安全に運用できる
+- **複数ロールの効果は RBAC の複雑さに依存する** — 今回の検証では単一ロールと複数ロールで差が出なかったが、より複雑な権限モデルでは複数ロールの提供が有効と考えられる
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">リソース削除手順</summary>
+
+```bash title="Terminal"
+REGION=ap-northeast-1
+
+# EC2
+aws ec2 terminate-instances --region $REGION --instance-ids <instance-id>
+aws ec2 wait instance-terminated --region $REGION --instance-ids <instance-id>
+aws ec2 delete-security-group --region $REGION --group-id <sg-id>
+
+# Secrets Manager
+aws secretsmanager delete-secret --region $REGION \
+  --secret-id "security-agent/auth-test/testuser" --force-delete-without-recovery
+aws secretsmanager delete-secret --region $REGION \
+  --secret-id "security-agent/auth-test/admin" --force-delete-without-recovery
+
+# IAM インラインポリシー
+aws iam delete-role-policy --role-name SecurityAgentPentestRole \
+  --policy-name SecurityAgentSecretsAccess
+
+# Target Domain
+aws securityagent delete-target-domain --region $REGION \
+  --target-domain-id <target-domain-id>
+
+# CloudWatch ログ（自動作成されたもの）
+for LOG in /aws/securityagent/pentest-verification/pt-<pentest-a> \
+           /aws/securityagent/pentest-verification/pt-<pentest-b> \
+           /aws/securityagent/pentest-verification/pt-<pentest-c>; do
+  aws logs delete-log-group --region $REGION --log-group-name "$LOG"
+done
+
+# S3（デプロイ用バケットを使った場合）
+aws s3 rb "s3://auth-vuln-app-deploy-<account-id>" --force
+```
+
+Agent Space は次回の検証でも再利用するため削除しない。
+
+</details>

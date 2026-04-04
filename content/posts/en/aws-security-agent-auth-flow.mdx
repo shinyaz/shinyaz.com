@@ -1,0 +1,546 @@
+---
+title: "AWS Security Agent Verification — Authentication Flow Support and Detection Scope"
+description: "Tested with no auth, single role (with 2FA), and multiple roles. Without credentials, the agent autonomously chained SQL Injection → credential extraction → TOTP guessing → admin login. Providing credentials via Secrets Manager enabled stable authenticated testing including 2FA bypass."
+date: "2026-04-05"
+published: true
+featured: false
+categories: [infrastructure]
+tags: ["aws", "security-agent", "penetration-testing", "authentication", "security", "devsecops"]
+series: "aws-security-agent"
+seriesOrder: 4
+---
+
+## Introduction
+
+[Part 1](/en/blog/2026/04/02/aws-security-agent-pentest-verification) detected 4 of 5 vulnerabilities in a REST API, [Part 2](/en/blog/2026/04/02/aws-security-agent-source-code-impact) measured the impact of source code on detection rates, and [Part 3](/en/blog/2026/04/05/aws-security-agent-graphql-pentest) verified GraphQL API testing capabilities.
+
+Parts 1–3 were all **unauthenticated tests**. The [official documentation](https://docs.aws.amazon.com/securityagent/latest/userguide/provide-testing-credentials.html) states: "Without credentials, the agent can only test publicly accessible pages and APIs." This article tests an authenticated app under three conditions — no auth, single role (with 2FA), and multiple roles — to measure how credential provisioning affects detection scope.
+
+Prerequisites:
+
+- Agent Space and IAM role from Part 1
+- Region: ap-northeast-1 (Tokyo)
+- Pricing: $50/task-hour (per-second billing)
+
+## Test Environment
+
+A Flask app with session-based login and TOTP 2FA, with pages split between authenticated and unauthenticated access.
+
+### Planted Vulnerabilities
+
+| # | Vulnerability | Auth Required | Description |
+| --- | --- | --- | --- |
+| 1 | Reflected XSS | No | `/search?q=` rendered with `| safe` |
+| 2 | SQL Injection | No | `/api/products?category=` with string concatenation |
+| 3 | IDOR | Yes | `/profile/<user_id>` without session user check |
+| 4 | Stored XSS | Yes | `/dashboard/comment` stores unsanitized input |
+| 5 | Privilege Escalation | Yes | `/admin/users` without role check |
+
+Vulnerabilities #1–#2 are publicly accessible. #3–#5 exist only behind authentication.
+
+### Authentication Methods
+
+AWS Security Agent supports:
+
+- **Input credentials** — Direct username/password entry
+- **Secrets Manager** — Encrypted credential storage with rotation support
+- **Lambda** — Dynamic credential generation for external IdPs
+- **IAM role** — For Cognito or API Gateway IAM auth
+
+This verification uses **Secrets Manager** — the recommended approach for production, with TOTP secrets stored as JSON fields.
+
+### Three Conditions
+
+| Condition | Auth | actors config | Purpose |
+| --- | --- | --- | --- |
+| A | None | None | Baseline: unauthenticated detection scope |
+| B | testuser (regular + 2FA) | Secrets Manager × 1 | Can the agent handle 2FA login? |
+| C | testuser + admin (2 roles + 2FA) | Secrets Manager × 2 | Does multi-role improve privilege escalation detection? |
+
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">App source code (app.py)</summary>
+
+Built with Flask + pyotp. Set `TOTP_ENABLED=true` to enable 2FA. The TOTP secret is `JBSWY3DPEHPK3PXP` (the RFC 6238 test value, base32 of "Hello!"), shared across all accounts.
+
+```python title="app.py"
+from flask import Flask, request, jsonify, session, redirect, render_template_string
+import sqlite3, os, pyotp
+
+app = Flask(__name__)
+app.secret_key = "insecure-secret-key-for-testing"
+DB_PATH = "/tmp/auth_vuln.db"
+TOTP_SECRET = "JBSWY3DPEHPK3PXP"
+
+def get_db():
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+def init_db():
+    conn = get_db()
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY, username TEXT UNIQUE,
+            password TEXT, role TEXT DEFAULT 'user', email TEXT, phone TEXT);
+        CREATE TABLE IF NOT EXISTS products (
+            id INTEGER PRIMARY KEY, name TEXT, category TEXT, price REAL);
+        CREATE TABLE IF NOT EXISTS comments (
+            id INTEGER PRIMARY KEY, user_id INTEGER,
+            content TEXT, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);
+        DELETE FROM users; DELETE FROM products; DELETE FROM comments;
+        INSERT INTO users (id, username, password, role, email, phone) VALUES
+            (1, 'admin', 'admin123', 'admin', 'admin@example.com', '555-0100'),
+            (2, 'testuser', 'testpass123', 'user', 'test@example.com', '555-0200'),
+            (3, 'alice', 'alice123', 'user', 'alice@example.com', '555-0300');
+        INSERT INTO products (id, name, category, price) VALUES
+            (1, 'Laptop', 'electronics', 999.99), (2, 'Phone', 'electronics', 699.99),
+            (3, 'Desk', 'furniture', 299.99), (4, 'Chair', 'furniture', 199.99);
+        INSERT INTO comments (user_id, content) VALUES
+            (1, 'Welcome to the dashboard!'), (2, 'This is a test comment.');
+    """)
+    conn.commit()
+    conn.close()
+
+LAYOUT_HEAD = """<!DOCTYPE html><html><head><title>Auth Vuln App</title></head><body>
+<nav>
+  <a href="/">Home</a> | <a href="/search">Search</a> |
+  <a href="/api/products">Products API</a> |
+  {% if session.get('user_id') %}
+    <a href="/dashboard">Dashboard</a> |
+    <a href="/profile/{{ session['user_id'] }}">Profile</a> |
+    {% if session.get('role') == 'admin' %}<a href="/admin/users">Admin</a> |{% endif %}
+    <a href="/logout">Logout ({{ session['username'] }})</a>
+  {% else %}<a href="/login">Login</a>{% endif %}
+</nav><hr>"""
+LAYOUT_FOOT = "</body></html>"
+
+HOME_PAGE = LAYOUT_HEAD + """
+<h1>Auth Vuln App</h1>
+<h2>Public Pages</h2>
+<ul>
+  <li><a href="/search">Search Products</a></li>
+  <li><a href="/api/products">Products API</a></li>
+  <li><a href="/api/products?category=electronics">Electronics</a></li>
+</ul>
+<h2>Authenticated Pages</h2>
+<ul>
+  <li><a href="/dashboard">Dashboard</a> (requires login)</li>
+  <li><a href="/profile/1">User Profile</a> (requires login)</li>
+  <li><a href="/admin/users">Admin Panel</a> (requires admin)</li>
+</ul>""" + LAYOUT_FOOT
+
+LOGIN_PAGE = LAYOUT_HEAD + """
+<h1>Login</h1>
+{% if error %}<p style="color:red">{{ error }}</p>{% endif %}
+<form method="POST" action="/login">
+  <label>Username: <input type="text" name="username"></label><br>
+  <label>Password: <input type="password" name="password"></label><br>
+  {% if totp_required %}
+    <label>2FA Code: <input type="text" name="totp_code"></label><br>
+  {% endif %}
+  <button type="submit">Login</button>
+</form>""" + LAYOUT_FOOT
+
+SEARCH_PAGE = LAYOUT_HEAD + """
+<h1>Search Products</h1>
+<form method="GET" action="/search">
+  <input type="text" name="q" value="{{ query }}">
+  <button type="submit">Search</button>
+</form>
+{% if query %}
+  <h2>Results for: {{ query | safe }}</h2>
+  <ul>{% for p in results %}<li>{{ p['name'] }} - ${{ p['price'] }}</li>{% endfor %}</ul>
+{% endif %}""" + LAYOUT_FOOT
+
+DASHBOARD_PAGE = LAYOUT_HEAD + """
+<h1>Dashboard</h1><p>Welcome, {{ session['username'] }}!</p>
+<h2>Comments</h2>
+<form method="POST" action="/dashboard/comment">
+  <textarea name="content" rows="3" cols="40"></textarea><br>
+  <button type="submit">Post Comment</button>
+</form>
+<ul>{% for c in comments %}<li>{{ c['content'] | safe }}</li>{% endfor %}</ul>
+""" + LAYOUT_FOOT
+
+PROFILE_PAGE = LAYOUT_HEAD + """
+<h1>User Profile</h1>
+<table>
+  <tr><td>ID</td><td>{{ user['id'] }}</td></tr>
+  <tr><td>Username</td><td>{{ user['username'] }}</td></tr>
+  <tr><td>Email</td><td>{{ user['email'] }}</td></tr>
+  <tr><td>Phone</td><td>{{ user['phone'] }}</td></tr>
+  <tr><td>Role</td><td>{{ user['role'] }}</td></tr>
+</table>""" + LAYOUT_FOOT
+
+ADMIN_PAGE = LAYOUT_HEAD + """
+<h1>Admin - User Management</h1>
+<table border="1">
+  <tr><th>ID</th><th>Username</th><th>Email</th><th>Role</th></tr>
+  {% for u in users %}
+  <tr><td>{{ u['id'] }}</td><td><a href="/profile/{{ u['id'] }}">{{ u['username'] }}</a></td>
+      <td>{{ u['email'] }}</td><td>{{ u['role'] }}</td></tr>
+  {% endfor %}
+</table>""" + LAYOUT_FOOT
+
+@app.route("/")
+def index():
+    return render_template_string(HOME_PAGE)
+
+@app.route("/search")
+def search():
+    query = request.args.get("q", "")
+    results = []
+    if query:
+        conn = get_db()
+        results = conn.execute("SELECT * FROM products WHERE name LIKE ?", (f"%{query}%",)).fetchall()
+        conn.close()
+    return render_template_string(SEARCH_PAGE, query=query, results=results)
+
+@app.route("/api/products")
+def api_products():
+    category = request.args.get("category", "")
+    conn = get_db()
+    if category:
+        query = f"SELECT * FROM products WHERE category = '{category}'"
+        try:
+            results = conn.execute(query).fetchall()
+        except Exception as e:
+            conn.close()
+            return jsonify({"error": str(e)}), 500
+    else:
+        results = conn.execute("SELECT * FROM products").fetchall()
+    conn.close()
+    return jsonify([dict(r) for r in results])
+
+TOTP_ENABLED = os.environ.get("TOTP_ENABLED", "false").lower() == "true"
+
+@app.route("/login", methods=["GET", "POST"])
+def login():
+    if request.method == "GET":
+        return render_template_string(LOGIN_PAGE, error=None, totp_required=TOTP_ENABLED)
+    username = request.form.get("username", "")
+    password = request.form.get("password", "")
+    conn = get_db()
+    user = conn.execute("SELECT * FROM users WHERE username = ? AND password = ?",
+                        (username, password)).fetchone()
+    conn.close()
+    if not user:
+        return render_template_string(LOGIN_PAGE, error="Invalid credentials",
+                                      totp_required=TOTP_ENABLED), 401
+    if TOTP_ENABLED:
+        totp_code = request.form.get("totp_code", "")
+        totp = pyotp.TOTP(TOTP_SECRET)
+        if not totp.verify(totp_code, valid_window=1):
+            return render_template_string(LOGIN_PAGE, error="Invalid 2FA code",
+                                          totp_required=True), 401
+    session["user_id"] = user["id"]
+    session["username"] = user["username"]
+    session["role"] = user["role"]
+    return redirect("/dashboard")
+
+@app.route("/logout")
+def logout():
+    session.clear()
+    return redirect("/")
+
+@app.route("/profile/<int:user_id>")
+def profile(user_id):
+    if "user_id" not in session:
+        return redirect("/login")
+    conn = get_db()
+    user = conn.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+    conn.close()
+    if not user:
+        return "User not found", 404
+    return render_template_string(PROFILE_PAGE, user=dict(user))
+
+@app.route("/dashboard")
+def dashboard():
+    if "user_id" not in session:
+        return redirect("/login")
+    conn = get_db()
+    comments = conn.execute("SELECT * FROM comments ORDER BY created_at DESC").fetchall()
+    conn.close()
+    return render_template_string(DASHBOARD_PAGE, comments=comments)
+
+@app.route("/dashboard/comment", methods=["POST"])
+def post_comment():
+    if "user_id" not in session:
+        return redirect("/login")
+    content = request.form.get("content", "")
+    conn = get_db()
+    conn.execute("INSERT INTO comments (user_id, content) VALUES (?, ?)",
+                 (session["user_id"], content))
+    conn.commit()
+    conn.close()
+    return redirect("/dashboard")
+
+@app.route("/admin/users")
+def admin_users():
+    if "user_id" not in session:
+        return redirect("/login")
+    conn = get_db()
+    users = conn.execute("SELECT * FROM users").fetchall()
+    conn.close()
+    return render_template_string(ADMIN_PAGE, users=users)
+
+@app.route("/.well-known/aws/securityagent-domain-verification.json")
+def verify():
+    return jsonify({"token": "<verification-token>"})
+
+if __name__ == "__main__":
+    init_db()
+    app.run(host="0.0.0.0", port=5000, debug=False)
+```
+
+</details>
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">EC2 deployment, Secrets Manager, and pentest creation steps</summary>
+
+```bash title="Terminal"
+REGION=ap-northeast-1
+ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+AGENT_SPACE_ID=<your-agent-space-id>
+
+# 1. Launch EC2 (t3.small, Amazon Linux 2023)
+AMI_ID=$(aws ec2 describe-images --region $REGION --owners amazon \
+  --filters "Name=name,Values=al2023-ami-2023*-x86_64" "Name=state,Values=available" \
+  --query "sort_by(Images, &CreationDate)[-1].ImageId" --output text)
+
+SG_ID=$(aws ec2 create-security-group --region $REGION \
+  --group-name "auth-vuln-app-sg" --description "Auth vuln app" \
+  --vpc-id <your-vpc-id> --query "GroupId" --output text)
+
+aws ec2 authorize-security-group-ingress --region $REGION \
+  --group-id "$SG_ID" --protocol tcp --port 80 --cidr <vpc-cidr>
+
+INSTANCE_ID=$(aws ec2 run-instances --region $REGION \
+  --image-id "$AMI_ID" --instance-type t3.small \
+  --subnet-id <your-subnet-id> --security-group-ids "$SG_ID" \
+  --iam-instance-profile Name=<your-ssm-profile> \
+  --associate-public-ip-address \
+  --tag-specifications 'ResourceType=instance,Tags=[{Key=Name,Value=auth-vuln-app-target}]' \
+  --query "Instances[0].InstanceId" --output text)
+
+# 2. Deploy app via SSM (2FA enabled, port 80)
+aws ssm send-command --region $REGION --instance-ids "$INSTANCE_ID" \
+  --document-name "AWS-RunShellScript" \
+  --parameters commands='["pip3 install flask pyotp gunicorn",
+    "TOTP_ENABLED=true gunicorn -w 4 -b 0.0.0.0:80 --timeout 120 -e TOTP_ENABLED=true --daemon app:app"]'
+
+# 3. Create and verify Target Domain
+PRIVATE_DNS=$(aws ec2 describe-instances --region $REGION \
+  --instance-ids "$INSTANCE_ID" \
+  --query "Reservations[0].Instances[0].PrivateDnsName" --output text)
+
+aws securityagent create-target-domain --region $REGION \
+  --target-domain-name "$PRIVATE_DNS" --verification-method HTTP_ROUTE
+
+# 4. Create Secrets Manager secrets
+aws secretsmanager create-secret --region $REGION \
+  --name "security-agent/auth-test/testuser" \
+  --secret-string '{"username":"testuser","password":"testpass123","totpSecret":"JBSWY3DPEHPK3PXP"}'
+
+aws secretsmanager create-secret --region $REGION \
+  --name "security-agent/auth-test/admin" \
+  --secret-string '{"username":"admin","password":"admin123","totpSecret":"JBSWY3DPEHPK3PXP"}'
+
+# 5. Add Secrets Manager permissions to IAM role
+aws iam put-role-policy --role-name SecurityAgentPentestRole \
+  --policy-name SecurityAgentSecretsAccess \
+  --policy-document '{
+    "Version":"2012-10-17",
+    "Statement":[{"Effect":"Allow",
+      "Action":["secretsmanager:GetSecretValue","secretsmanager:DescribeSecret"],
+      "Resource":"arn:aws:secretsmanager:'$REGION':'$ACCOUNT_ID':secret:security-agent/auth-test/*"}]}'
+
+# 6. Update Agent Space with secrets and IAM role
+aws securityagent update-agent-space --region $REGION \
+  --agent-space-id "$AGENT_SPACE_ID" --name "pentest-verification" \
+  --aws-resources '{"vpcs":[...],"secretArns":["<testuser-secret-arn>","<admin-secret-arn>"],"iamRoles":["<role-arn>"]}'
+
+# 7. Create pentests (3 conditions)
+ROLE_ARN="arn:aws:iam::${ACCOUNT_ID}:role/SecurityAgentPentestRole"
+VPC_CONFIG='{"vpcArn":"<vpc-id>","securityGroupArns":["'$SG_ID'"],"subnetArns":["<subnet-id>"]}'
+
+# Condition A: no auth
+aws securityagent create-pentest --region $REGION \
+  --agent-space-id "$AGENT_SPACE_ID" --title "auth-test-a-no-auth" \
+  --assets '{"endpoints":[{"uri":"http://'"$PRIVATE_DNS"'"}]}' \
+  --service-role "$ROLE_ARN" --vpc-config "$VPC_CONFIG"
+
+# Condition B: single role + 2FA
+aws securityagent create-pentest --region $REGION \
+  --agent-space-id "$AGENT_SPACE_ID" --title "auth-test-b-single-role-2fa" \
+  --assets '{"endpoints":[{"uri":"http://'"$PRIVATE_DNS"'"}],
+    "actors":[{"identifier":"testuser","uris":["http://'"$PRIVATE_DNS"'"],
+      "authentication":{"providerType":"SECRETS_MANAGER","value":"<testuser-secret-arn>"},
+      "description":"Navigate to /login. Enter username and password. Enter TOTP code from totpSecret. Click Login."}]}' \
+  --service-role "$ROLE_ARN" --vpc-config "$VPC_CONFIG"
+
+# Condition C: multiple roles
+aws securityagent create-pentest --region $REGION \
+  --agent-space-id "$AGENT_SPACE_ID" --title "auth-test-c-multi-role" \
+  --assets '{"endpoints":[{"uri":"http://'"$PRIVATE_DNS"'"}],
+    "actors":[
+      {"identifier":"testuser","uris":["http://'"$PRIVATE_DNS"'"],
+        "authentication":{"providerType":"SECRETS_MANAGER","value":"<testuser-secret-arn>"},
+        "description":"Navigate to /login. Enter username and password. Enter TOTP code. Click Login. Regular user."},
+      {"identifier":"admin","uris":["http://'"$PRIVATE_DNS"'"],
+        "authentication":{"providerType":"SECRETS_MANAGER","value":"<admin-secret-arn>"},
+        "description":"Navigate to /login. Enter username and password. Enter TOTP code. Click Login. Admin user."}]}' \
+  --service-role "$ROLE_ARN" --vpc-config "$VPC_CONFIG"
+
+# 8. Start pentest jobs
+aws securityagent start-pentest-job --region $REGION \
+  --agent-space-id "$AGENT_SPACE_ID" --pentest-id <pentest-id>
+```
+
+</details>
+
+## Condition A: No Authentication
+
+No credentials provided.
+
+**Result: 5 findings (2h 58min)**
+
+| # | Finding | Risk Type | Severity | Confidence |
+| --- | --- | --- | --- | --- |
+| 1 | Reflected XSS in Search Parameter | CROSS_SITE_SCRIPTING | MEDIUM | HIGH |
+| 2 | Critical SQL Injection in Products API | SQL_INJECTION | CRITICAL | HIGH |
+| 3 | Stored XSS in Comments Functionality | CROSS_SITE_SCRIPTING | MEDIUM | HIGH |
+| 4 | Vertical Privilege Escalation - Missing RBAC on Admin Endpoint | PRIVILEGE_ESCALATION | MEDIUM | HIGH |
+| 5 | Predictable TOTP Secret Enables Two-Factor Authentication Bypass | AUTHENTICATION_BYPASS | CRITICAL | HIGH |
+
+Expected only 2 findings (#1 XSS, #2 SQLi). Instead, **4 of 5 planted vulnerabilities were detected, plus an additional TOTP Bypass discovery — 5 findings total**. IDOR (#3) was not detected — the agent logged in as admin via the attack chain, so accessing `/profile/1` (admin's own profile) was a legitimate request, not an IDOR.
+
+### The Agent's Attack Chain
+
+From Finding #5's description, the agent executed the following chain:
+
+1. Exploited SQL Injection (#2) to extract the users table, obtaining plaintext credentials (admin/admin123, etc.)
+2. Recognized that TOTP secret `JBSWY3DPEHPK3PXP` is the RFC 6238 test value (base32 of "Hello!")
+3. Generated valid TOTP codes using the standard algorithm
+4. Logged in as admin with extracted credentials + generated TOTP code
+5. Accessed `/admin/users` to retrieve all user data
+
+Without any credentials provided, the agent autonomously built a **SQL Injection → credential extraction → TOTP guessing → admin login** attack chain. This is a real-world example of the "chained attacks" described in the [official architecture blog](https://aws.amazon.com/blogs/security/inside-aws-security-agent-a-multi-agent-architecture-for-automated-penetration-testing/).
+
+## Condition B: Single Role + 2FA (Secrets Manager)
+
+Provided testuser credentials via Secrets Manager, including TOTP secret:
+
+```json title="Secret content"
+{"username": "testuser", "password": "testpass123", "totpSecret": "JBSWY3DPEHPK3PXP"}
+```
+
+The `description` field instructed: "Navigate to /login. Enter the username and password from the secret. A 2FA code field will appear - enter the TOTP code generated from the totpSecret in the secret. Click Login."
+
+**Result: 6 findings (2h 14min)**
+
+| # | Finding | Risk Type | Severity | Confidence |
+| --- | --- | --- | --- | --- |
+| 1 | Reflected XSS in Search Endpoint | CROSS_SITE_SCRIPTING | MEDIUM | LOW |
+| 2 | SQL Injection in Product API Enables Credential Disclosure | SQL_INJECTION | CRITICAL | HIGH |
+| 3 | SQL Injection - Complete Database Disclosure | SQL_INJECTION | HIGH | HIGH |
+| 4 | Stored XSS in Dashboard Comment Form | CROSS_SITE_SCRIPTING | MEDIUM | LOW |
+| 5 | Insecure Direct Object Reference on User Profile Endpoint | INSECURE_DIRECT_OBJECT_REFERENCE | MEDIUM | HIGH |
+| 6 | Vertical Privilege Escalation - Regular User Can Access Admin Panel | PRIVILEGE_ESCALATION | MEDIUM | HIGH |
+
+The agent successfully navigated the 2FA login flow. The overview states: "authentication mechanisms properly enforcing login requirements via HTTP 302 redirects, Flask-based session management using signed cookies" — suggesting the agent understood the login flow before testing.
+
+Differences from Condition A:
+- **IDOR (#5) newly detected** — Logged in as testuser (id=2), accessed `/profile/1` (admin's profile), found missing authorization check. In Condition A, the agent logged in as admin, so `/profile/1` was its own profile — not an IDOR. With testuser credentials, accessing another user's profile correctly triggered IDOR detection
+- **SQL Injection split into 2 findings** — Reported from different angles (credential disclosure vs full database access)
+- **TOTP Bypass not detected** — No need to guess TOTP when credentials are provided
+- **XSS confidence dropped to LOW** — Was HIGH in Condition A; likely due to different testing strategies
+
+## Condition C: Multiple Roles (testuser + admin)
+
+Provided both regular user and admin credentials via Secrets Manager.
+
+**Result: 6 findings (2h 30min)**
+
+| # | Finding | Risk Type | Severity | Confidence |
+| --- | --- | --- | --- | --- |
+| 1 | Reflected XSS in Search Endpoint | CROSS_SITE_SCRIPTING | MEDIUM | LOW |
+| 2 | Critical SQL Injection in Products API Category Parameter | SQL_INJECTION | CRITICAL | HIGH |
+| 3 | Stored XSS in Dashboard Comment Field | CROSS_SITE_SCRIPTING | MEDIUM | HIGH |
+| 4 | IDOR - Unauthorized Access to Other Users' Profiles | INSECURE_DIRECT_OBJECT_REFERENCE | MEDIUM | HIGH |
+| 5 | Vertical Privilege Escalation - Unauthorized Access to Admin Panel | PRIVILEGE_ESCALATION | MEDIUM | HIGH |
+| 6 | No Arbitrary File Upload Vulnerability | ARBITRARY_FILE_UPLOAD | UNKNOWN | FALSE_POSITIVE |
+
+Compared to Condition B:
+- **Same vulnerability types detected** — Multiple roles didn't uncover new vulnerabilities
+- **Finding #6 self-classified as FALSE_POSITIVE** — Agent confirmed no file upload functionality exists
+- **Stored XSS confidence rose to HIGH** — Was LOW in Condition B; admin account testing may have improved validation
+
+## Comparison
+
+| Condition | Auth | Findings | Planted Vulns Detected | Extra Findings | Duration | Est. Cost |
+| --- | --- | --- | --- | --- | --- | --- |
+| A: No auth | None | 5 | 4/5 (IDOR missed) | TOTP Bypass | 2h 58min | ~$148 |
+| B: Single role + 2FA | testuser | 6 | 5/5 | SQLi duplicate | 2h 14min | ~$112 |
+| C: Multiple roles | testuser + admin | 6 | 5/5 (+ 1 FP) | File Upload (FP) | 2h 30min | ~$125 |
+
+### Analysis
+
+**1. The agent can chain attacks to bypass authentication without credentials**
+
+The most unexpected result. In Condition A, the agent built a SQL Injection → credential extraction → TOTP guessing → admin login chain entirely on its own. The documentation's "Without credentials, the agent can only test publicly accessible pages" appears to exclude cases where the agent exploits other vulnerabilities to gain access.
+
+However, this succeeded because the TOTP secret was a well-known test value (RFC 6238 example). With a random production TOTP secret, guessing would be infeasible, and providing credentials would be necessary.
+
+**2. Credentials provide reliable authenticated access**
+
+Condition A's success depended on the attack chain. Without SQL Injection, the agent couldn't have reached authenticated pages. Conditions B/C guarantee authenticated testing regardless of which vulnerabilities exist — this is the real value of providing credentials.
+
+**3. Multiple roles had limited impact in this test**
+
+Conditions B and C produced nearly identical results. The privilege escalation vulnerability (#5) was a complete absence of role checking, detectable with any authenticated user. More complex RBAC models (specific operations restricted to admin) would likely benefit more from multi-role testing.
+
+## Summary
+
+- **The agent autonomously builds attack chains** — SQL Injection → credential extraction → TOTP guessing → admin login, all without human guidance. This behavior resembles a penetration tester rather than a simple vulnerability scanner
+- **2FA (TOTP) login flows are fully supported** — Include `totpSecret` in the Secrets Manager JSON and describe the login steps in the `description` field. The agent generates TOTP codes automatically
+- **Providing credentials is recommended as insurance** — Even though the agent may chain its way in, credentials ensure reliable authenticated testing. Secrets Manager integration is straightforward and production-safe
+- **Multi-role effectiveness depends on RBAC complexity** — Single vs multiple roles showed no difference in this test, but more granular permission models would likely benefit from multi-role configuration
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">Resource deletion</summary>
+
+```bash title="Terminal"
+REGION=ap-northeast-1
+
+# EC2
+aws ec2 terminate-instances --region $REGION --instance-ids <instance-id>
+aws ec2 wait instance-terminated --region $REGION --instance-ids <instance-id>
+aws ec2 delete-security-group --region $REGION --group-id <sg-id>
+
+# Secrets Manager
+aws secretsmanager delete-secret --region $REGION \
+  --secret-id "security-agent/auth-test/testuser" --force-delete-without-recovery
+aws secretsmanager delete-secret --region $REGION \
+  --secret-id "security-agent/auth-test/admin" --force-delete-without-recovery
+
+# IAM inline policy
+aws iam delete-role-policy --role-name SecurityAgentPentestRole \
+  --policy-name SecurityAgentSecretsAccess
+
+# Target Domain
+aws securityagent delete-target-domain --region $REGION \
+  --target-domain-id <target-domain-id>
+
+# CloudWatch logs
+for LOG in /aws/securityagent/pentest-verification/pt-<pentest-a> \
+           /aws/securityagent/pentest-verification/pt-<pentest-b> \
+           /aws/securityagent/pentest-verification/pt-<pentest-c>; do
+  aws logs delete-log-group --region $REGION --log-group-name "$LOG"
+done
+```
+
+Agent Space is retained for future verifications.
+
+</details>
