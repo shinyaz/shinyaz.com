@@ -45,7 +45,238 @@ Same Flask + pyotp app from Part 4 (5 planted vulnerabilities, TOTP 2FA enabled)
 <details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
 <summary className="cursor-pointer font-medium">Full source code (app.py)</summary>
 
-Same source code as Part 4. See [Part 4](/en/blog/2026/04/05/aws-security-agent-auth-flow) for the complete listing.
+Built with Flask + pyotp. Set `TOTP_ENABLED=true` to enable 2FA. The TOTP secret is `JBSWY3DPEHPK3PXP` (the RFC 6238 test value, base32 of "Hello!"), shared across all accounts.
+
+```python title="app.py"
+from flask import Flask, request, jsonify, session, redirect, render_template_string
+import sqlite3, os, pyotp
+
+app = Flask(__name__)
+app.secret_key = "insecure-secret-key-for-testing"
+DB_PATH = "/tmp/auth_vuln.db"
+TOTP_SECRET = "JBSWY3DPEHPK3PXP"
+
+def get_db():
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+def init_db():
+    conn = get_db()
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY, username TEXT UNIQUE,
+            password TEXT, role TEXT DEFAULT 'user', email TEXT, phone TEXT);
+        CREATE TABLE IF NOT EXISTS products (
+            id INTEGER PRIMARY KEY, name TEXT, category TEXT, price REAL);
+        CREATE TABLE IF NOT EXISTS comments (
+            id INTEGER PRIMARY KEY, user_id INTEGER,
+            content TEXT, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);
+        DELETE FROM users; DELETE FROM products; DELETE FROM comments;
+        INSERT INTO users (id, username, password, role, email, phone) VALUES
+            (1, 'admin', 'admin123', 'admin', 'admin@example.com', '555-0100'),
+            (2, 'testuser', 'testpass123', 'user', 'test@example.com', '555-0200'),
+            (3, 'alice', 'alice123', 'user', 'alice@example.com', '555-0300');
+        INSERT INTO products (id, name, category, price) VALUES
+            (1, 'Laptop', 'electronics', 999.99), (2, 'Phone', 'electronics', 699.99),
+            (3, 'Desk', 'furniture', 299.99), (4, 'Chair', 'furniture', 199.99);
+        INSERT INTO comments (user_id, content) VALUES
+            (1, 'Welcome to the dashboard!'), (2, 'This is a test comment.');
+    """)
+    conn.commit()
+    conn.close()
+
+LAYOUT_HEAD = """<!DOCTYPE html><html><head><title>Auth Vuln App</title></head><body>
+<nav>
+  <a href="/">Home</a> | <a href="/search">Search</a> |
+  <a href="/api/products">Products API</a> |
+  {% if session.get('user_id') %}
+    <a href="/dashboard">Dashboard</a> |
+    <a href="/profile/{{ session['user_id'] }}">Profile</a> |
+    {% if session.get('role') == 'admin' %}<a href="/admin/users">Admin</a> |{% endif %}
+    <a href="/logout">Logout ({{ session['username'] }})</a>
+  {% else %}<a href="/login">Login</a>{% endif %}
+</nav><hr>"""
+LAYOUT_FOOT = "</body></html>"
+
+HOME_PAGE = LAYOUT_HEAD + """
+<h1>Auth Vuln App</h1>
+<h2>Public Pages</h2>
+<ul>
+  <li><a href="/search">Search Products</a></li>
+  <li><a href="/api/products">Products API</a></li>
+  <li><a href="/api/products?category=electronics">Electronics</a></li>
+</ul>
+<h2>Authenticated Pages</h2>
+<ul>
+  <li><a href="/dashboard">Dashboard</a> (requires login)</li>
+  <li><a href="/profile/1">User Profile</a> (requires login)</li>
+  <li><a href="/admin/users">Admin Panel</a> (requires admin)</li>
+</ul>""" + LAYOUT_FOOT
+
+LOGIN_PAGE = LAYOUT_HEAD + """
+<h1>Login</h1>
+{% if error %}<p style="color:red">{{ error }}</p>{% endif %}
+<form method="POST" action="/login">
+  <label>Username: <input type="text" name="username"></label><br>
+  <label>Password: <input type="password" name="password"></label><br>
+  {% if totp_required %}
+    <label>2FA Code: <input type="text" name="totp_code"></label><br>
+  {% endif %}
+  <button type="submit">Login</button>
+</form>""" + LAYOUT_FOOT
+
+SEARCH_PAGE = LAYOUT_HEAD + """
+<h1>Search Products</h1>
+<form method="GET" action="/search">
+  <input type="text" name="q" value="{{ query }}">
+  <button type="submit">Search</button>
+</form>
+{% if query %}
+  <h2>Results for: {{ query | safe }}</h2>
+  <ul>{% for p in results %}<li>{{ p['name'] }} - ${{ p['price'] }}</li>{% endfor %}</ul>
+{% endif %}""" + LAYOUT_FOOT
+
+DASHBOARD_PAGE = LAYOUT_HEAD + """
+<h1>Dashboard</h1><p>Welcome, {{ session['username'] }}!</p>
+<h2>Comments</h2>
+<form method="POST" action="/dashboard/comment">
+  <textarea name="content" rows="3" cols="40"></textarea><br>
+  <button type="submit">Post Comment</button>
+</form>
+<ul>{% for c in comments %}<li>{{ c['content'] | safe }}</li>{% endfor %}</ul>
+""" + LAYOUT_FOOT
+
+PROFILE_PAGE = LAYOUT_HEAD + """
+<h1>User Profile</h1>
+<table>
+  <tr><td>ID</td><td>{{ user['id'] }}</td></tr>
+  <tr><td>Username</td><td>{{ user['username'] }}</td></tr>
+  <tr><td>Email</td><td>{{ user['email'] }}</td></tr>
+  <tr><td>Phone</td><td>{{ user['phone'] }}</td></tr>
+  <tr><td>Role</td><td>{{ user['role'] }}</td></tr>
+</table>""" + LAYOUT_FOOT
+
+ADMIN_PAGE = LAYOUT_HEAD + """
+<h1>Admin - User Management</h1>
+<table border="1">
+  <tr><th>ID</th><th>Username</th><th>Email</th><th>Role</th></tr>
+  {% for u in users %}
+  <tr><td>{{ u['id'] }}</td><td><a href="/profile/{{ u['id'] }}">{{ u['username'] }}</a></td>
+      <td>{{ u['email'] }}</td><td>{{ u['role'] }}</td></tr>
+  {% endfor %}
+</table>""" + LAYOUT_FOOT
+
+@app.route("/")
+def index():
+    return render_template_string(HOME_PAGE)
+
+@app.route("/search")
+def search():
+    query = request.args.get("q", "")
+    results = []
+    if query:
+        conn = get_db()
+        results = conn.execute("SELECT * FROM products WHERE name LIKE ?", (f"%{query}%",)).fetchall()
+        conn.close()
+    return render_template_string(SEARCH_PAGE, query=query, results=results)
+
+@app.route("/api/products")
+def api_products():
+    category = request.args.get("category", "")
+    conn = get_db()
+    if category:
+        query = f"SELECT * FROM products WHERE category = '{category}'"
+        try:
+            results = conn.execute(query).fetchall()
+        except Exception as e:
+            conn.close()
+            return jsonify({"error": str(e)}), 500
+    else:
+        results = conn.execute("SELECT * FROM products").fetchall()
+    conn.close()
+    return jsonify([dict(r) for r in results])
+
+TOTP_ENABLED = os.environ.get("TOTP_ENABLED", "false").lower() == "true"
+
+@app.route("/login", methods=["GET", "POST"])
+def login():
+    if request.method == "GET":
+        return render_template_string(LOGIN_PAGE, error=None, totp_required=TOTP_ENABLED)
+    username = request.form.get("username", "")
+    password = request.form.get("password", "")
+    conn = get_db()
+    user = conn.execute("SELECT * FROM users WHERE username = ? AND password = ?",
+                        (username, password)).fetchone()
+    conn.close()
+    if not user:
+        return render_template_string(LOGIN_PAGE, error="Invalid credentials",
+                                      totp_required=TOTP_ENABLED), 401
+    if TOTP_ENABLED:
+        totp_code = request.form.get("totp_code", "")
+        totp = pyotp.TOTP(TOTP_SECRET)
+        if not totp.verify(totp_code, valid_window=1):
+            return render_template_string(LOGIN_PAGE, error="Invalid 2FA code",
+                                          totp_required=True), 401
+    session["user_id"] = user["id"]
+    session["username"] = user["username"]
+    session["role"] = user["role"]
+    return redirect("/dashboard")
+
+@app.route("/logout")
+def logout():
+    session.clear()
+    return redirect("/")
+
+@app.route("/profile/<int:user_id>")
+def profile(user_id):
+    if "user_id" not in session:
+        return redirect("/login")
+    conn = get_db()
+    user = conn.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+    conn.close()
+    if not user:
+        return "User not found", 404
+    return render_template_string(PROFILE_PAGE, user=dict(user))
+
+@app.route("/dashboard")
+def dashboard():
+    if "user_id" not in session:
+        return redirect("/login")
+    conn = get_db()
+    comments = conn.execute("SELECT * FROM comments ORDER BY created_at DESC").fetchall()
+    conn.close()
+    return render_template_string(DASHBOARD_PAGE, comments=comments)
+
+@app.route("/dashboard/comment", methods=["POST"])
+def post_comment():
+    if "user_id" not in session:
+        return redirect("/login")
+    content = request.form.get("content", "")
+    conn = get_db()
+    conn.execute("INSERT INTO comments (user_id, content) VALUES (?, ?)",
+                 (session["user_id"], content))
+    conn.commit()
+    conn.close()
+    return redirect("/dashboard")
+
+@app.route("/admin/users")
+def admin_users():
+    if "user_id" not in session:
+        return redirect("/login")
+    conn = get_db()
+    users = conn.execute("SELECT * FROM users").fetchall()
+    conn.close()
+    return render_template_string(ADMIN_PAGE, users=users)
+
+@app.route("/.well-known/aws/securityagent-domain-verification.json")
+def verify():
+    return jsonify({"token": "<verification-token>"})
+
+if __name__ == "__main__":
+    init_db()
+    app.run(host="0.0.0.0", port=5000, debug=False)
+```
 
 </details>
 
