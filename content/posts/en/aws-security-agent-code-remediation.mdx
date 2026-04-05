@@ -28,8 +28,7 @@ Official docs: [Remediate a penetration test finding](https://docs.aws.amazon.co
 Code Remediation has several constraints:
 
 - **us-east-1 only** — Code Remediation is currently available only in us-east-1
-- **GitHub integration required** — Install the AWS Security Agent GitHub App and connect repositories to the Agent Space
-- **Private repos → PR creation, Public repos → downloadable diff file**
+- **GitHub integration required** — Install the AWS Security Agent GitHub App and connect repositories to the Agent Space. For private repos, PRs are created directly in GitHub. For public repos, fixes are provided as downloadable diff files instead of PRs, to avoid exposing security details publicly
 - **VPC-to-GitHub access required** — The agent's test environment needs internet access (via NAT Gateway) to pull source code from GitHub
 
 Parts 1–4 used ap-northeast-1. This article uses us-east-1.

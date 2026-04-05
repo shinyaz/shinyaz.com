@@ -28,8 +28,7 @@ seriesOrder: 5
 Code Remediation には以下の制約がある。
 
 - **us-east-1 のみ** — Code Remediation は現時点で us-east-1 リージョンでのみ利用可能
-- **GitHub 連携が必須** — AWS Security Agent GitHub App をインストールし、リポジトリを Agent Space に接続する必要がある
-- **Private リポジトリ → PR 作成、Public リポジトリ → diff ファイルダウンロード**
+- **GitHub 連携が必須** — AWS Security Agent GitHub App をインストールし、リポジトリを Agent Space に接続する必要がある。Private リポジトリの場合は GitHub に直接 PR が作成される。Public リポジトリの場合はセキュリティ上の理由から PR ではなく diff ファイルのダウンロードとなる
 - **VPC から GitHub へのアクセスが必要** — Agent のテスト環境からソースコードを取得するため、NAT Gateway 等でインターネットアクセスを確保する必要がある
 
 第1〜4回は ap-northeast-1 で実施したが、本記事は us-east-1 で実施する。
