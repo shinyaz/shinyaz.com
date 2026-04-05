@@ -287,8 +287,7 @@ PR #2 と同じパターン。コメント表示の `{{ c['content'] | safe }}` 
 - **NAT Gateway が必要** — Agent のテスト環境はプライベートサブネットで起動するため、GitHub へのアクセスには NAT Gateway が必要。これは追加コスト（NAT Gateway の時間課金 + データ転送）を伴う
 - **us-east-1 限定は実用上の制約** — 既存の Agent Space が別リージョンにある場合、Remediation のためだけに us-east-1 で環境を再構築する必要がある
 
-<details>
-<summary className="cursor-pointer font-medium">クリーンアップ</summary>
+## クリーンアップ
 
 ```bash title="Terminal"
 REGION=us-east-1
@@ -319,5 +318,3 @@ aws securityagent delete-target-domain --region $REGION \
 # GitHub リポジトリ
 gh repo delete <your-org>/auth-vuln-app --yes
 ```
-
-</details>

@@ -508,8 +508,7 @@ Conditions B and C produced nearly identical results. The privilege escalation v
 - **Providing credentials is recommended as insurance** — Even though the agent may chain its way in, credentials ensure reliable authenticated testing. Secrets Manager integration is straightforward and production-safe
 - **Multi-role effectiveness depends on RBAC complexity** — Single vs multiple roles showed no difference in this test, but more granular permission models would likely benefit from multi-role configuration
 
-<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
-<summary className="cursor-pointer font-medium">Resource deletion</summary>
+## Cleanup
 
 ```bash title="Terminal"
 REGION=ap-northeast-1
@@ -542,5 +541,3 @@ done
 ```
 
 Agent Space is retained for future verifications.
-
-</details>

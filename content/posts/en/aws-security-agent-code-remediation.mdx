@@ -285,8 +285,7 @@ All 7 fixes were technically accurate. Only PR #4 (Default Credentials, +70/-30)
 - **NAT Gateway required** — The agent's test environment runs in a private subnet, requiring a NAT Gateway for GitHub access. This adds cost (NAT Gateway hourly + data transfer)
 - **us-east-1 limitation is a practical constraint** — If your Agent Space is in another region, you need to rebuild the environment in us-east-1 just for Remediation
 
-<details>
-<summary className="cursor-pointer font-medium">Cleanup</summary>
+## Cleanup
 
 ```bash title="Terminal"
 REGION=us-east-1
@@ -317,5 +316,3 @@ aws securityagent delete-target-domain --region $REGION \
 # GitHub repo
 gh repo delete <your-org>/auth-vuln-app --yes
 ```
-
-</details>

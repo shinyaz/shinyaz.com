@@ -512,8 +512,7 @@ Agent は 2FA 付きログインフォームを突破し、認証後のページ
 - **認証情報の提供は「保険」として推奨** — 攻撃チェーンに依存せず確実に認証後のページをテストするために、認証情報の提供が推奨される。Secrets Manager 経由での提供は設定も簡単で、本番環境でも安全に運用できる
 - **複数ロールの効果は RBAC の複雑さに依存する** — 今回の検証では単一ロールと複数ロールで差が出なかったが、より複雑な権限モデルでは複数ロールの提供が有効と考えられる
 
-<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
-<summary className="cursor-pointer font-medium">リソース削除手順</summary>
+## クリーンアップ
 
 ```bash title="Terminal"
 REGION=ap-northeast-1
@@ -549,5 +548,3 @@ aws s3 rb "s3://auth-vuln-app-deploy-<account-id>" --force
 ```
 
 Agent Space は次回の検証でも再利用するため削除しない。
-
-</details>
