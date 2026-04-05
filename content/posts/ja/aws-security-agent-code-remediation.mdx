@@ -289,6 +289,9 @@ PR #2 と同じパターン。コメント表示の `{{ c['content'] | safe }}` 
 
 ## クリーンアップ
 
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">リソース削除手順</summary>
+
 ```bash title="Terminal"
 REGION=us-east-1
 
@@ -318,3 +321,5 @@ aws securityagent delete-target-domain --region $REGION \
 # GitHub リポジトリ
 gh repo delete <your-org>/auth-vuln-app --yes
 ```
+
+</details>

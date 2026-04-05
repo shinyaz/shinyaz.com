@@ -287,6 +287,9 @@ All 7 fixes were technically accurate. Only PR #4 (Default Credentials, +70/-30)
 
 ## Cleanup
 
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">Resource deletion</summary>
+
 ```bash title="Terminal"
 REGION=us-east-1
 
@@ -316,3 +319,5 @@ aws securityagent delete-target-domain --region $REGION \
 # GitHub repo
 gh repo delete <your-org>/auth-vuln-app --yes
 ```
+
+</details>

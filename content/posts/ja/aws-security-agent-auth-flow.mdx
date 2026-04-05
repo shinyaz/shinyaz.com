@@ -514,6 +514,9 @@ Agent は 2FA 付きログインフォームを突破し、認証後のページ
 
 ## クリーンアップ
 
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">リソース削除手順</summary>
+
 ```bash title="Terminal"
 REGION=ap-northeast-1
 
@@ -548,3 +551,5 @@ aws s3 rb "s3://auth-vuln-app-deploy-<account-id>" --force
 ```
 
 Agent Space は次回の検証でも再利用するため削除しない。
+
+</details>
