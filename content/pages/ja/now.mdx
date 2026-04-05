@@ -1,36 +1,47 @@
 ---
 title: "Now"
 description: "今やっていること・取り組んでいること"
-lastUpdated: "2026-03-29"
+lastUpdated: "2026-04-05"
 ---
 
 ## 注力していること
 
 - AWS でソリューションアーキテクトとして金融業界のお客様を技術支援中
-- **AWS Payment Cryptography** を深掘り中 — 鍵管理、CVV/PIN/ARQC 操作、TR-31 鍵交換のハンズオンシリーズを執筆
-- **Strands Agents SDK** を集中的に検証 — 入門・実践・マルチエージェント・デプロイの各シリーズで30本以上を公開
+- **AWS Security Agent** を集中検証中 — ペネトレーションテスト（REST/GraphQL）、認証フロー対応、自動コード修正（Code Remediation）の品質評価まで5本のシリーズを公開
+- **EKS ArgoCD Capability** を検証中 — マネージド GitOps 環境の構築から ApplicationSet による複数環境デプロイまで
+- **Strands Agents SDK** の実践・デプロイシリーズを継続執筆中
 
 ## 執筆中のシリーズ
 
-- **AWS Payment Cryptography 実践ガイド** — Issuer/Acquirer 操作、SDK Tips、鍵交換
-- **Strands Agents SDK マルチエージェント** — Swarm、Graph、Nested パターンと比較
-- **Strands Agents SDK デプロイ** — Docker、Lambda、AgentCore、OpenTelemetry によるオブザーバビリティ
-- **Aurora Blue/Green 実践検証** — ダウンタイム計測、JDBC プラグイン比較、MySQL vs PostgreSQL の挙動差
+- **AWS Security Agent** — REST/GraphQL ペンテスト、ソースコード提供の影響、認証フロー、Code Remediation（5本）
+- **EKS ArgoCD Capability** — eksctl/CLI 構築、ApplicationSet、CodeCommit 連携（4本）
+- **AgentCore CLI 実践** — デプロイ、Gateway、Memory、Evaluations、統合構築（5本）
+- **Strands Agents SDK 実践** — Guardrails、メトリクス、セッション管理、Structured Output（5本）
+- **AWS Payment Cryptography 実践ガイド** — Issuer/Acquirer 操作、SDK Tips、鍵交換（5本）
+- **Aurora Blue/Green 実践検証** — ダウンタイム計測、JDBC プラグイン比較、MySQL vs PostgreSQL の挙動差（4本）
 
 ## 学んでいること
 
+- AWS Security Agent のペネトレーションテストと自動修正ワークフロー
+- EKS 上のマネージド GitOps（ArgoCD Capability）
 - マルチエージェントオーケストレーションパターン（Swarm、Graph、A2A プロトコル）
 - AWS 上の決済暗号と HSM 操作
-- Lambda と低レイヤ向けの Rust
-- Network Firewall のフォワードプロキシと TLS インターセプション
+- Lambda と低レイヤ向けの Rust（TLS レイテンシ分析、Managed Instances 検証）
+
+## 最近書いたもの
+
+- CloudWatch Query Studio で PromQL による横断クエリ
+- Aurora DSQL の Rust コネクタで IAM 認証・OCC リトライを自動化
+- Lambda Rust の初回リクエスト 900ms の正体（TLS ハンドシェイク）
+- AWS DevOps Agent シリーズ（5本）
 
 ## 読んでいるもの
 
+- AWS Security Agent ドキュメントと CWE/OWASP リファレンス
 - AWS Payment Cryptography ドキュメントと PCI PIN Security Requirements
 - Strands Agents SDK のソースコードと設計ドキュメント
-- AI エージェントの評価とガードレールに関する論文
 
 ## 生活
 
 - 神奈川在住
-- 日々の学びを TIL として記録中（80件超）
+- 日々の学びを TIL として記録中（105件超）
