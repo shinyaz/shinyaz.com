@@ -12,7 +12,7 @@ tags: ["aws", "vpc", "security", "encryption", "networking"]
 
 On November 21, 2025, AWS [announced VPC Encryption Controls](https://aws.amazon.com/about-aws/whats-new/2025/11/aws-vpc-encryption-controls/) — a security feature that lets you audit (monitor) and enforce encryption-in-transit for all traffic within and across VPCs. As of March 1, 2026, the feature [transitioned to paid pricing](https://aws.amazon.com/about-aws/whats-new/2026/03/vpc-encryption-controls-pricing/) at $0.15/h per non-empty VPC in us-east-1.
 
-VPC Encryption Controls has near-zero cost to enable in monitor mode, but migrating to enforce mode involves an invisible bottleneck: VPC endpoint ENI migration. The size of this gap varies by workload, making monitor mode the most rational first step — this is the hypothesis we test in this article.
+VPC Encryption Controls has near-zero cost to enable in monitor mode, but migrating to enforce mode is an asynchronous process that takes time and can fail. The size of this gap varies by workload, making monitor mode the most rational first step — this is the hypothesis we test in this article.
 
 This article verifies both monitor and enforce modes hands-on, showing concrete commands, outputs, and timing at each step. By the end, you'll be able to assess your own environment's encryption posture and decide whether enforce migration is worth the effort. See the official documentation at [Enforce VPC encryption in transit](https://docs.aws.amazon.com/vpc/latest/userguide/vpc-encryption-controls.html).
 
@@ -24,6 +24,8 @@ Prerequisites:
 Skip to [Verification 1](#verification-1-visualizing-encryption-status-with-monitor-mode) if you only want the results.
 
 ## VPC Encryption Controls Overview
+
+VPC Encryption Controls leverages both [AWS Nitro System](https://docs.aws.amazon.com/ec2/latest/instancetypes/ec2-nitro-instances.html) hardware-level encryption and application-layer encryption (TLS) to control encryption within VPCs. The Nitro System is AWS's custom hardware and software combination that automatically encrypts traffic between supported instances using AES-256-GCM.
 
 VPC Encryption Controls operates in two modes.
 
@@ -55,34 +57,151 @@ The test environment consists of:
 - Private subnet: `10.100.2.0/24` (us-east-1a)
 - Security group: HTTP(80), HTTPS(443), SSH(22), ICMP restricted to VPC CIDR
 - SSM VPC endpoints: ssm, ssmmessages, ec2messages
+- Internet Gateway (used in Enforce verification)
 
-Three EC2 instances:
+### VPC, Subnet, and Internet Gateway
 
-| Role | Instance Type | Nitro | IP |
-| --- | --- | --- | --- |
-| Web server | m7g.medium (Graviton3) | ✓ | 10.100.2.110 |
-| Client A | m7g.medium (Graviton3) | ✓ | 10.100.2.173 |
-| Client B | t2.micro (Xen) | ✗ | 10.100.2.139 |
+```bash title="Terminal"
+# VPC
+VPC_ID=$(aws ec2 create-vpc \
+  --cidr-block 10.100.0.0/16 \
+  --tag-specifications 'ResourceType=vpc,Tags=[{Key=Name,Value=vpc-enc-verify}]' \
+  --query 'Vpc.VpcId' --output text)
 
-The server runs Python's built-in HTTP server on ports 80 (HTTP) and 443 (HTTPS with self-signed cert), since the private subnet has no internet access for package installation.
+# DNS settings (required for VPC endpoint Private DNS)
+aws ec2 modify-vpc-attribute --vpc-id $VPC_ID --enable-dns-hostnames '{"Value":true}'
+aws ec2 modify-vpc-attribute --vpc-id $VPC_ID --enable-dns-support '{"Value":true}'
 
-```python title="https_server.py"
-import http.server, ssl, threading
+# Private subnet
+PRIVATE_SUBNET_ID=$(aws ec2 create-subnet \
+  --vpc-id $VPC_ID --cidr-block 10.100.2.0/24 \
+  --availability-zone us-east-1a \
+  --tag-specifications 'ResourceType=subnet,Tags=[{Key=Name,Value=enc-verify-private}]' \
+  --query 'Subnet.SubnetId' --output text)
 
-def run_http():
-    s = http.server.HTTPServer(('0.0.0.0', 80), http.server.SimpleHTTPRequestHandler)
-    s.serve_forever()
-
-def run_https():
-    s = http.server.HTTPServer(('0.0.0.0', 443), http.server.SimpleHTTPRequestHandler)
-    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-    ctx.load_cert_chain('/tmp/server.crt', '/tmp/server.key')
-    s.socket = ctx.wrap_socket(s.socket, server_side=True)
-    s.serve_forever()
-
-threading.Thread(target=run_http, daemon=True).start()
-run_https()
+# Internet Gateway (used in Enforce verification)
+IGW_ID=$(aws ec2 create-internet-gateway \
+  --tag-specifications 'ResourceType=internet-gateway,Tags=[{Key=Name,Value=enc-verify-igw}]' \
+  --query 'InternetGateway.InternetGatewayId' --output text)
+aws ec2 attach-internet-gateway --internet-gateway-id $IGW_ID --vpc-id $VPC_ID
 ```
+
+### Security Group
+
+```bash title="Terminal"
+SG_ID=$(aws ec2 create-security-group \
+  --group-name enc-verify-sg \
+  --description "Allow HTTP/HTTPS/SSH for encryption verification" \
+  --vpc-id $VPC_ID \
+  --query 'GroupId' --output text)
+
+aws ec2 authorize-security-group-ingress \
+  --group-id $SG_ID \
+  --ip-permissions \
+    '[{"IpProtocol":"tcp","FromPort":80,"ToPort":80,"IpRanges":[{"CidrIp":"10.100.0.0/16"}]},
+      {"IpProtocol":"tcp","FromPort":443,"ToPort":443,"IpRanges":[{"CidrIp":"10.100.0.0/16"}]},
+      {"IpProtocol":"tcp","FromPort":22,"ToPort":22,"IpRanges":[{"CidrIp":"10.100.0.0/16"}]},
+      {"IpProtocol":"icmp","FromPort":-1,"ToPort":-1,"IpRanges":[{"CidrIp":"10.100.0.0/16"}]}]'
+```
+
+### IAM Roles (SSM + Flow Logs)
+
+```bash title="Terminal (SSM)"
+aws iam create-role --role-name enc-verify-ssm-role \
+  --assume-role-policy-document '{
+    "Version":"2012-10-17",
+    "Statement":[{"Effect":"Allow","Principal":{"Service":"ec2.amazonaws.com"},"Action":"sts:AssumeRole"}]
+  }'
+aws iam attach-role-policy --role-name enc-verify-ssm-role \
+  --policy-arn arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+
+aws iam create-instance-profile --instance-profile-name enc-verify-ssm-profile
+aws iam add-role-to-instance-profile \
+  --instance-profile-name enc-verify-ssm-profile --role-name enc-verify-ssm-role
+```
+
+```bash title="Terminal (Flow Logs)"
+aws iam create-role --role-name enc-verify-flow-logs-role \
+  --assume-role-policy-document '{
+    "Version":"2012-10-17",
+    "Statement":[{"Effect":"Allow","Principal":{"Service":"vpc-flow-logs.amazonaws.com"},"Action":"sts:AssumeRole"}]
+  }'
+aws iam put-role-policy --role-name enc-verify-flow-logs-role \
+  --policy-name flow-logs-publish \
+  --policy-document '{
+    "Version":"2012-10-17",
+    "Statement":[{"Effect":"Allow","Action":["logs:CreateLogGroup","logs:CreateLogStream","logs:PutLogEvents","logs:DescribeLogGroups","logs:DescribeLogStreams"],"Resource":"*"}]
+  }'
+```
+
+### SSM VPC Endpoints
+
+Required for SSM access from private subnet without internet.
+
+```bash title="Terminal"
+for SVC in ssm ssmmessages ec2messages; do
+  aws ec2 create-vpc-endpoint \
+    --vpc-id $VPC_ID \
+    --vpc-endpoint-type Interface \
+    --service-name com.amazonaws.us-east-1.$SVC \
+    --subnet-ids $PRIVATE_SUBNET_ID \
+    --security-group-ids $SG_ID \
+    --private-dns-enabled
+done
+```
+
+### EC2 Instance Launch
+
+```bash title="Terminal (AMI lookup)"
+ARM_AMI=$(aws ec2 describe-images --owners amazon \
+  --filters 'Name=name,Values=al2023-ami-2023.*-arm64' 'Name=state,Values=available' \
+  --query 'sort_by(Images,&CreationDate)[-1].ImageId' --output text)
+
+X86_AMI=$(aws ec2 describe-images --owners amazon \
+  --filters 'Name=name,Values=al2023-ami-2023.*-x86_64' 'Name=state,Values=available' \
+  --query 'sort_by(Images,&CreationDate)[-1].ImageId' --output text)
+```
+
+```bash title="Terminal (launch instances)"
+# Web server (Nitro, m7g.medium)
+aws ec2 run-instances --image-id $ARM_AMI --instance-type m7g.medium \
+  --subnet-id $PRIVATE_SUBNET_ID --security-group-ids $SG_ID \
+  --iam-instance-profile Name=enc-verify-ssm-profile \
+  --tag-specifications 'ResourceType=instance,Tags=[{Key=Name,Value=enc-verify-server-nitro}]'
+
+# Client A (Nitro, m7g.medium)
+aws ec2 run-instances --image-id $ARM_AMI --instance-type m7g.medium \
+  --subnet-id $PRIVATE_SUBNET_ID --security-group-ids $SG_ID \
+  --iam-instance-profile Name=enc-verify-ssm-profile \
+  --tag-specifications 'ResourceType=instance,Tags=[{Key=Name,Value=enc-verify-client-nitro}]'
+
+# Client B (non-Nitro, t2.micro)
+aws ec2 run-instances --image-id $X86_AMI --instance-type t2.micro \
+  --subnet-id $PRIVATE_SUBNET_ID --security-group-ids $SG_ID \
+  --iam-instance-profile Name=enc-verify-ssm-profile \
+  --tag-specifications 'ResourceType=instance,Tags=[{Key=Name,Value=enc-verify-client-non-nitro}]'
+```
+
+Wait 2-3 minutes for instances to reach running state and register with SSM. Verify with `aws ssm describe-instance-information`.
+
+### Starting the Web Server
+
+Start HTTP/HTTPS server on the server instance via SSM.
+
+```bash title="Terminal"
+SERVER_ID=i-XXXXXXXXX  # Replace with your server instance ID
+
+aws ssm send-command --instance-ids $SERVER_ID \
+  --document-name AWS-RunShellScript \
+  --parameters 'commands=[
+    "openssl req -x509 -nodes -days 1 -newkey rsa:2048 -keyout /tmp/server.key -out /tmp/server.crt -subj /CN=enc-verify 2>/dev/null",
+    "cat > /tmp/https_server.py << PYEOF\nimport http.server, ssl, threading\ndef run_http():\n    s = http.server.HTTPServer((\"0.0.0.0\", 80), http.server.SimpleHTTPRequestHandler)\n    s.serve_forever()\ndef run_https():\n    s = http.server.HTTPServer((\"0.0.0.0\", 443), http.server.SimpleHTTPRequestHandler)\n    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)\n    ctx.load_cert_chain(\"/tmp/server.crt\", \"/tmp/server.key\")\n    s.socket = ctx.wrap_socket(s.socket, server_side=True)\n    s.serve_forever()\nthreading.Thread(target=run_http, daemon=True).start()\nrun_https()\nPYEOF",
+    "nohup python3 /tmp/https_server.py > /tmp/server.log 2>&1 &",
+    "sleep 2 && curl -s -o /dev/null -w %{http_code} http://localhost && curl -sk -o /dev/null -w %{http_code} https://localhost"
+  ]'
+```
+
+Output of `200200` confirms both HTTP and HTTPS are working.
 
 </details>
 
@@ -110,7 +229,11 @@ State transitioned to `available` in about 1 minute. No impact on existing traff
 
 ### Creating Flow Logs
 
+Create a CloudWatch Logs log group first, then create Flow Logs with a custom format including the `encryption-status` field.
+
 ```bash title="Terminal"
+aws logs create-log-group --log-group-name /vpc/enc-verify-flow-logs
+
 aws ec2 create-flow-logs \
   --resource-type VPC \
   --resource-ids vpc-09456d794ff62c982 \
@@ -134,20 +257,45 @@ Four traffic patterns were generated:
 
 Results appeared in Flow Logs after about 3 minutes.
 
+```bash title="Terminal (generate traffic via SSM)"
+# Nitro client
+aws ssm send-command --instance-ids $NITRO_CLIENT_ID \
+  --document-name AWS-RunShellScript \
+  --parameters 'commands=[
+    "for i in $(seq 1 30); do curl -s -o /dev/null http://10.100.2.110; done",
+    "for i in $(seq 1 30); do curl -sk -o /dev/null https://10.100.2.110; done"
+  ]'
+
+# Non-Nitro client
+aws ssm send-command --instance-ids $NON_NITRO_CLIENT_ID \
+  --document-name AWS-RunShellScript \
+  --parameters 'commands=[
+    "for i in $(seq 1 30); do curl -s -o /dev/null http://10.100.2.110; done",
+    "for i in $(seq 1 30); do curl -sk -o /dev/null https://10.100.2.110; done"
+  ]'
+```
+
+```bash title="Terminal (query Flow Logs)"
+aws logs filter-log-events \
+  --log-group-name /vpc/enc-verify-flow-logs \
+  --filter-pattern "10.100.2.110" \
+  --limit 50 \
+  --query 'events[*].message' --output text
+```
+
 ```text title="Output (Nitro client → server, HTTP port 80)"
 egress 1 10.100.2.173 10.100.2.110 56738 80 6 1 -
 egress 1 10.100.2.173 10.100.2.110 56750 80 6 1 -
 ```
+
+Each field corresponds to the `--log-format` order: `flow-direction` / `traffic-path` / `srcaddr` / `dstaddr` / `srcport` / `dstport` / `protocol` (6=TCP) / `encryption-status` / `reject-reason`. The second-to-last `1` is the encryption-status, indicating Nitro encryption. The final `-` is reject-reason (no rejection).
 
 ```text title="Output (Non-Nitro client → server, HTTP port 80)"
 ingress - 10.100.2.139 10.100.2.110 45186 80 6 1 -
 ingress - 10.100.2.139 10.100.2.110 45210 80 6 1 -
 ```
 
-```text title="Output (Non-Nitro client → server, HTTPS port 443)"
-ingress - 10.100.2.139 10.100.2.110 57972 443 6 1 -
-ingress - 10.100.2.139 10.100.2.110 57868 443 6 1 -
-```
+HTTPS (port 443) traffic also showed `encryption-status` of `1` for both Nitro and non-Nitro clients.
 
 ### Unexpected Result: All Traffic Shows encryption-status 1
 
@@ -155,20 +303,86 @@ All four patterns returned `encryption-status` of `1` (Nitro encryption). The ex
 
 | Pattern | Expected | Actual |
 | --- | --- | --- |
-| A: Nitro → HTTP | 1 | **1** ✓ |
-| B: Nitro → HTTPS | 3 | **1** ✗ |
-| C: Non-Nitro → HTTP | 0 | **1** ✗ |
-| D: Non-Nitro → HTTPS | 2 | **1** ✗ |
+| A: Nitro (m7g) → HTTP | 1 | **1** ✓ |
+| B: Nitro (m7g) → HTTPS | 3 | **1** ✗ |
+| C: Non-Nitro (t2) → HTTP | 0 | **1** ✗ |
+| D: Non-Nitro (t2) → HTTPS | 2 | **1** ✗ |
 
-Two key findings emerged:
+The t2.micro returning `1` instead of `0` was particularly unexpected. The AWS blog used t4g.medium and recorded `0`. To investigate, we ran an additional test under the exact same conditions as the blog (m7g.medium + t4g.medium, HTTP only).
 
-**Finding 1: If either side of the communication is Nitro, encryption-status is 1.** Traffic from t2.micro (non-Nitro) was recorded as `1` because the destination server is m7g (Nitro). Nitro encryption is applied unidirectionally by the Nitro hardware on one side. Even with non-Nitro instances in your VPC, traffic is encrypted as long as the peer is Nitro.
+### Additional Test: Blog-Identical Conditions (t4g.medium)
 
-**Finding 2: encryption-status 2 (application-layer encryption) does not apply to regular HTTPS.** Re-reading the documentation confirms that `2` is limited to "TCP port 443 for interface endpoint to AWS service" and "TCP port 443 for gateway endpoint." Self-signed HTTPS between EC2 instances does not register as `2`. AWS determines encryption status by endpoint type and port, not by inspecting packet contents.
+A separate VPC was created with the same instance type combination as the blog. The setup follows the same steps as Verification 1 (VPC + subnet + SSM endpoints + Encryption Controls), with only the instance types changed.
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">Additional test setup steps</summary>
+
+Create VPC, subnet, SG, and SSM endpoints using the same steps as the main setup, then launch two instances:
+
+```bash title="Terminal"
+# Server (Nitro v4, m7g.medium)
+aws ec2 run-instances --image-id $ARM_AMI --instance-type m7g.medium \
+  --subnet-id $PRIVATE_SUBNET_ID --security-group-ids $SG_ID \
+  --iam-instance-profile Name=enc-verify-ssm-profile \
+  --tag-specifications 'ResourceType=instance,Tags=[{Key=Name,Value=blog-server-m7g}]'
+
+# Client (Nitro v2, t4g.medium)
+aws ec2 run-instances --image-id $ARM_AMI --instance-type t4g.medium \
+  --subnet-id $PRIVATE_SUBNET_ID --security-group-ids $SG_ID \
+  --iam-instance-profile Name=enc-verify-ssm-profile \
+  --tag-specifications 'ResourceType=instance,Tags=[{Key=Name,Value=blog-client-t4g}]'
+```
+
+Start HTTP server and generate traffic via SSM:
+
+```bash title="Terminal"
+# Start HTTP server on server instance
+aws ssm send-command --instance-ids $SERVER_ID \
+  --document-name AWS-RunShellScript \
+  --parameters 'commands=["nohup python3 -m http.server 80 > /tmp/http.log 2>&1 &"]'
+
+# Generate traffic from each client
+aws ssm send-command --instance-ids $CLIENT_ID \
+  --document-name AWS-RunShellScript \
+  --parameters 'commands=["for i in $(seq 1 30); do curl -s -o /dev/null http://SERVER_IP; done"]'
+```
+
+</details>
+
+| Client | Instance Type | Nitro Version | encryption-status |
+| --- | --- | --- | --- |
+| m7g.medium | Nitro v4 (encryption supported) | **1** |
+| t4g.medium | Nitro v2 (encryption not supported) | **0** |
+
+```text title="Output (t4g.medium → m7g.medium server, HTTP port 80)"
+egress 1 10.0.128.91 10.0.128.31 55906 80 6 0 -
+egress 1 10.0.128.91 10.0.128.31 55772 80 6 0 -
+```
+
+```text title="Output (m7g.medium → m7g.medium server, HTTP port 80)"
+egress 1 10.0.128.22 10.0.128.31 58172 80 6 1 -
+egress 1 10.0.128.22 10.0.128.31 58148 80 6 1 -
+```
+
+The blog's results were reproduced. t4g.medium (Nitro v2) traffic shows `0`, m7g.medium (Nitro v4) traffic shows `1`.
+
+### Findings
+
+These two rounds of testing yielded the following findings:
+
+**Finding 1: encryption-status depends on Nitro version.** Nitro v3 and later (e.g. m7g) support encryption in transit and record `1`. Nitro v2 (e.g. t4g) does not support encryption and records `0`. This matches the documentation stating that [Nitro v3 and later support Encryption in transit](https://docs.aws.amazon.com/ec2/latest/instancetypes/ec2-nitro-instances.html).
+
+**Finding 2: Why t2.micro (Xen-based, non-Nitro) returned `1` is unknown.** While t4g (Nitro v2) returns `0` as expected, t2 (non-Nitro) returned `1` — counterintuitive. `get-vpc-resources-blocking-encryption-enforcement` also did not flag t2.micro as a blocking resource. The exact cause is unidentified, but internal infrastructure migration after monitor mode activation may be a factor.
+
+**Finding 3: encryption-status 2 (application-layer encryption) does not apply to regular HTTPS.** Re-reading the documentation confirms that `2` is limited to "TCP port 443 for interface endpoint to AWS service" and "TCP port 443 for gateway endpoint." Self-signed HTTPS between EC2 instances does not register as `2`. AWS determines encryption status by endpoint type and port, not by inspecting packet contents.
 
 ## Verification 2: Enforce Mode Migration and Blocking Behavior
 
+With encryption status now visible via monitor mode, the next step is attempting to enforce encryption by switching to enforce mode.
+
 ### Identifying Blocking Resources
+
+Before switching to enforce mode, you need to identify resources that block encryption enforcement.
 
 ```bash title="Terminal"
 aws ec2 get-vpc-resources-blocking-encryption-enforcement \
@@ -187,9 +401,11 @@ aws ec2 get-vpc-resources-blocking-encryption-enforcement \
 }
 ```
 
-Only the Internet Gateway was flagged. The t2.micro (non-Nitro) was not detected as a blocking resource — consistent with Finding 1.
+Only the Internet Gateway was flagged. The t2.micro (non-Nitro) was not detected as a blocking resource. Combined with the encryption-status `1` observed in Verification 1, AWS may be internally treating it as encryption-compliant, though the exact reason is unknown.
 
 ### Switching to Enforce Mode
+
+Switch to enforce mode with an IGW exclusion. Internet Gateways carry traffic outside the AWS network where Nitro encryption cannot apply, so they require an exclusion in enforce mode. Only 8 resource types can be excluded: Internet Gateway, NAT Gateway, Egress-only IGW, VPC Peering, Virtual Private Gateway, Lambda, VPC Lattice, and EFS.
 
 ```bash title="Terminal"
 aws ec2 modify-vpc-encryption-control \
@@ -202,7 +418,20 @@ The command returns immediately with `State: enforce-in-progress`. Enforce mode 
 
 ### enforce-failed After 15 Minutes
 
-Polling every 60 seconds showed the transition failed after approximately 15 minutes:
+Poll the status every 60 seconds:
+
+```bash title="Terminal (status polling)"
+while true; do
+  STATUS=$(aws ec2 describe-vpc-encryption-controls \
+    --vpc-ids $VPC_ID \
+    --query 'VpcEncryptionControls[0].[Mode,State]' --output text)
+  echo "$(date +%H:%M:%S) - $STATUS"
+  echo "$STATUS" | grep -q "available\|failed" && break
+  sleep 60
+done
+```
+
+The transition failed after approximately 15 minutes:
 
 ```text title="Output (polling results)"
 19:44:33 - monitor  enforce-in-progress
@@ -215,13 +444,69 @@ The error message says "Failed due to one or more non-compliant resources," but 
 
 ### Still Fails Without IGW
 
-After detaching the IGW entirely and confirming zero blocking resources, enforce was retried. It failed again after 15 minutes.
+After detaching the IGW and confirming zero blocking resources, enforce was retried — and failed again after 15 minutes.
 
-### Root Cause: VPC Endpoint ENI Migration
+```bash title="Terminal"
+aws ec2 detach-internet-gateway \
+  --internet-gateway-id igw-03f9ce2d3fb1b1155 \
+  --vpc-id vpc-09456d794ff62c982
 
-The VPC contained three SSM VPC endpoint ENIs. The documentation states that NLB, ALB, Fargate, and EKS automatically migrate to encryption-capable hardware when monitor mode is enabled, but VPC endpoint ENI migration is not explicitly documented. In this test, VPC endpoint ENIs appear to be the internal bottleneck blocking enforce mode — invisible to `get-vpc-resources-blocking-encryption-enforcement` but preventing the transition.
+aws ec2 get-vpc-resources-blocking-encryption-enforcement \
+  --vpc-id vpc-09456d794ff62c982
+# → NonCompliantResources: []
 
-This is a critical finding for production environments. VPCs with many VPC endpoints may experience significantly longer enforce migration times or repeated failures.
+aws ec2 modify-vpc-encryption-control \
+  --vpc-encryption-control-id vpcec-070c7cd71ca25ecc8 \
+  --mode enforce
+# → enforce-failed again after ~15 minutes
+```
+
+The blocking resources API returns empty, yet enforce fails. The remaining resources in the VPC were EC2 instances (m7g + t2) and 3 SSM VPC endpoint ENIs.
+
+### Root Cause Confirmed: VPC Endpoint ENIs
+
+To isolate the cause, a new VPC was created with m7g.medium server + t4g.medium client + 3 SSM VPC endpoints. Enforce failed after ~15 minutes in this environment as well. Next, the SSM VPC endpoints (ssm, ssmmessages, ec2messages) were deleted and enforce was retried.
+
+```bash title="Terminal"
+# Delete VPC endpoints
+aws ec2 delete-vpc-endpoints \
+  --vpc-endpoint-ids $SSM_VPCE_ID $SSMMSG_VPCE_ID $EC2MSG_VPCE_ID
+
+# Wait for ENIs to be released (~2 minutes)
+# Retry enforce
+aws ec2 modify-vpc-encryption-control \
+  --vpc-encryption-control-id $VPCEC_ID \
+  --mode enforce
+```
+
+It succeeded after approximately 15 minutes.
+
+```text title="Output (polling after VPC endpoint deletion)"
+21:40:32 - monitor  enforce-in-progress
+...
+21:54:55 - enforce  available
+```
+
+VPC endpoint ENIs were blocking the enforce transition. The documentation states that NLB, ALB, Fargate, and EKS automatically migrate when monitor mode is enabled, but says nothing about VPC endpoint ENI migration. In this test, enforce continued to fail for about 1 hour after monitor mode activation while VPC endpoints were present. It's possible that migration simply takes longer, but `get-vpc-resources-blocking-encryption-enforcement` does not detect them, making it difficult to determine whether to wait or delete.
+
+### Enforce Mode Blocking Behavior
+
+With enforce mode active, launching an encryption-incompatible instance type (t4g.medium) was attempted.
+
+```bash title="Terminal"
+aws ec2 run-instances --image-id $ARM_AMI --instance-type t4g.medium \
+  --subnet-id $PRIVATE_SUBNET_ID --security-group-ids $SG_ID \
+  --tag-specifications 'ResourceType=instance,Tags=[{Key=Name,Value=enforce-test-t4g}]'
+```
+
+```text title="Output"
+An error occurred (DisallowedByVpcEncryptionControl) when calling the RunInstances operation:
+Instance type does not support required VPC encryption
+```
+
+t4g.medium (Nitro v2, no encryption support) was blocked with `DisallowedByVpcEncryptionControl`. Changing only `--instance-type m7g.medium` in the same command launched successfully.
+
+For production environments using VPC endpoints, enforce migration requires temporarily deleting and recreating VPC endpoints, or waiting for ENI migration to complete — though no API exists to check migration status.
 
 ## Monitor vs Enforce: Migration Decision Points
 
@@ -233,8 +518,8 @@ This is a critical finding for production environments. VPCs with many VPC endpo
 | Impact on existing traffic | None | Blocks unencrypted traffic |
 | Prerequisites | None | Identify/migrate blocking resources, configure exclusions |
 | Flow Logs encryption-status | ✓ Available | ✓ Available |
-| Non-Nitro instance launch | Allowed | Blocked |
-| VPC endpoint impact | None | ENI migration required (time-consuming) |
+| Non-Nitro instance launch | Allowed | Blocked (`DisallowedByVpcEncryptionControl` error) |
+| VPC endpoint impact | None | ENIs block enforce transition (deletion required) |
 
 ### Pricing
 
@@ -253,9 +538,9 @@ Whether this is justified depends on compliance requirements. For HIPAA or PCI D
 ## Summary
 
 - **Monitor mode can be deployed immediately** — Activation takes about 1 minute with zero impact on existing traffic. Safe for production environments since it only adds `encryption-status` to Flow Logs
-- **Encryption status is determined unidirectionally, not per instance pair** — If either side is Nitro, traffic is recorded as `1`. Non-Nitro instances mixed in your VPC still get encrypted traffic when communicating with Nitro peers
+- **encryption-status depends on Nitro version** — Nitro v3+ (e.g. m7g) records `1`, Nitro v2 (e.g. t4g) records `0`. However, t2.micro (non-Nitro) was observed returning `1`, so per-instance-type behavior should be verified in your own environment
 - **encryption-status 2 is PrivateLink only** — Regular HTTPS traffic between EC2 instances does not register as `2`. AWS determines status by endpoint type and port, not packet inspection
-- **Enforce mode migration is async and takes 15+ minutes** — VPC endpoint ENI migration can be an invisible bottleneck. Resources not detected by `get-vpc-resources-blocking-encryption-enforcement` may still block the transition internally. Build buffer time into migration plans
+- **Enforce mode migration is blocked by VPC endpoint ENIs** — Enforce failed repeatedly with VPC endpoints present. After deleting VPC endpoints, enforce succeeded in about 15 minutes. `get-vpc-resources-blocking-encryption-enforcement` does not detect VPC endpoint ENIs, making root cause identification difficult. Environments using VPC endpoints need a migration plan that includes temporary deletion and recreation
 
 ## Cleanup
 
@@ -282,8 +567,6 @@ aws logs delete-log-group --log-group-name /vpc/enc-verify-flow-logs
 # Delete networking resources
 aws ec2 delete-security-group --group-id sg-087c5ea932b375258
 aws ec2 delete-subnet --subnet-id subnet-0fbfc4d4b0df3b641
-aws ec2 delete-subnet --subnet-id subnet-0c619dd812037c29e
-aws ec2 delete-route-table --route-table-id rtb-0fe25577847e44133
 aws ec2 delete-internet-gateway --internet-gateway-id igw-03f9ce2d3fb1b1155
 aws ec2 delete-vpc --vpc-id vpc-09456d794ff62c982
 
