@@ -1,0 +1,391 @@
+---
+title: "VPC Encryption Controls を実機検証 — Monitor モードの即日導入から Enforce 移行の落とし穴まで"
+description: "VPC Encryption Controls の Monitor/Enforce 両モードを実機検証。Flow Logs の encryption-status の実態、Enforce 移行に15分以上かかる非同期処理、VPC エンドポイント ENI マイグレーションの落とし穴を計測データとともに報告する。"
+date: "2026-04-06"
+published: true
+featured: false
+categories: [infrastructure]
+tags: ["aws", "vpc", "security", "encryption", "networking"]
+---
+
+## はじめに
+
+2025年11月21日、AWS は [VPC Encryption Controls](https://aws.amazon.com/about-aws/whats-new/2025/11/aws-vpc-encryption-controls/) を発表した。VPC 内およびVPC 間のトラフィック暗号化状況を監査（monitor）し、暗号化を強制（enforce）できるセキュリティ機能である。2026年3月1日からは[有料化](https://aws.amazon.com/about-aws/whats-new/2026/03/vpc-encryption-controls-pricing/)され、非空 VPC あたり $0.15/h（us-east-1）の課金が発生する。
+
+VPC Encryption Controls は monitor モードの導入コストがほぼゼロである一方、enforce モードへの移行には VPC エンドポイントの ENI マイグレーションという見えないボトルネックがある。このギャップの大きさはワークロードごとに異なるため、まず monitor で現状を把握することが最も合理的な第一歩になる——これが本記事の仮説である。
+
+本記事では monitor/enforce の両モードを実機検証し、各ステップの具体的なコマンド・出力・所要時間を示す。読者は自環境の暗号化状況を棚卸しし、enforce 移行の要否と工数を判断できるようになる。公式ドキュメントは [Enforce VPC encryption in transit](https://docs.aws.amazon.com/vpc/latest/userguide/vpc-encryption-controls.html) を参照。
+
+前提条件:
+
+- AWS CLI 設定済み（EC2, VPC, IAM, CloudWatch Logs の権限）
+- 検証リージョン: us-east-1
+
+セットアップだけ見たい場合は[検証環境のセットアップ](#検証環境のセットアップ)、結果だけ見たい場合は[検証 1](#検証-1-monitor-モードで暗号化ステータスを可視化する)に進んでほしい。
+
+## VPC Encryption Controls の概要
+
+VPC Encryption Controls は 2 つのモードで動作する。
+
+| モード | 動作 | 既存 VPC への適用 |
+| --- | --- | --- |
+| Monitor | Flow Logs に `encryption-status` フィールドを追加し、暗号化状況を可視化 | 直接有効化可能 |
+| Enforce | 非暗号化トラフィックをブロックし、非対応リソースの作成を防止 | Monitor 経由でのみ移行可能 |
+
+`encryption-status` は以下の値を取る:
+
+| 値 | 意味 |
+| --- | --- |
+| 0 | 非暗号化 |
+| 1 | Nitro ハードウェア暗号化 |
+| 2 | アプリケーション層暗号化（PrivateLink エンドポイント経由の TLS） |
+| 3 | Nitro + アプリケーション層の両方 |
+| - | 不明または Encryption Controls 無効 |
+
+料金は VPC あたりの時間課金で、リージョンにより異なる。詳細は [Monitor vs Enforce: 移行判断のポイント](#monitor-vs-enforce-移行判断のポイント) で考察する。
+
+## 検証環境のセットアップ
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">VPC・サブネット・セキュリティグループ・EC2 インスタンスの作成手順</summary>
+
+検証環境は以下の構成で構築した。
+
+- VPC: `10.100.0.0/16`
+- プライベートサブネット: `10.100.2.0/24`（us-east-1a）
+- セキュリティグループ: HTTP(80), HTTPS(443), SSH(22), ICMP を VPC CIDR に限定
+- SSM 用 VPC エンドポイント: ssm, ssmmessages, ec2messages
+
+```bash title="Terminal (VPC 作成)"
+aws ec2 create-vpc \
+  --cidr-block 10.100.0.0/16 \
+  --tag-specifications 'ResourceType=vpc,Tags=[{Key=Name,Value=vpc-enc-verify}]'
+```
+
+```bash title="Terminal (サブネット作成)"
+aws ec2 create-subnet \
+  --vpc-id vpc-XXXXXXXXX \
+  --cidr-block 10.100.2.0/24 \
+  --availability-zone us-east-1a \
+  --tag-specifications 'ResourceType=subnet,Tags=[{Key=Name,Value=enc-verify-private}]'
+```
+
+```bash title="Terminal (セキュリティグループ)"
+aws ec2 create-security-group \
+  --group-name enc-verify-sg \
+  --description "Allow HTTP/HTTPS/SSH for encryption verification" \
+  --vpc-id vpc-XXXXXXXXX
+
+aws ec2 authorize-security-group-ingress \
+  --group-id sg-XXXXXXXXX \
+  --ip-permissions \
+    '[{"IpProtocol":"tcp","FromPort":80,"ToPort":80,"IpRanges":[{"CidrIp":"10.100.0.0/16"}]},
+      {"IpProtocol":"tcp","FromPort":443,"ToPort":443,"IpRanges":[{"CidrIp":"10.100.0.0/16"}]},
+      {"IpProtocol":"tcp","FromPort":22,"ToPort":22,"IpRanges":[{"CidrIp":"10.100.0.0/16"}]},
+      {"IpProtocol":"icmp","FromPort":-1,"ToPort":-1,"IpRanges":[{"CidrIp":"10.100.0.0/16"}]}]'
+```
+
+3 台の EC2 インスタンスを起動した。
+
+| 役割 | インスタンスタイプ | Nitro | IP |
+| --- | --- | --- | --- |
+| Web サーバー | m7g.medium (Graviton3) | ✓ | 10.100.2.110 |
+| クライアント A | m7g.medium (Graviton3) | ✓ | 10.100.2.173 |
+| クライアント B | t2.micro (Xen) | ✗ | 10.100.2.139 |
+
+サーバーには Python の組み込み HTTP サーバーで HTTP(80) と HTTPS(443) を起動した。プライベートサブネットのためパッケージインストールが不可能だったため、nginx ではなく Python を使用している。
+
+```python title="https_server.py"
+import http.server, ssl, threading
+
+def run_http():
+    s = http.server.HTTPServer(('0.0.0.0', 80), http.server.SimpleHTTPRequestHandler)
+    s.serve_forever()
+
+def run_https():
+    s = http.server.HTTPServer(('0.0.0.0', 443), http.server.SimpleHTTPRequestHandler)
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    ctx.load_cert_chain('/tmp/server.crt', '/tmp/server.key')
+    s.socket = ctx.wrap_socket(s.socket, server_side=True)
+    s.serve_forever()
+
+threading.Thread(target=run_http, daemon=True).start()
+run_https()
+```
+
+</details>
+
+## 検証 1: Monitor モードで暗号化ステータスを可視化する
+
+### Encryption Controls の有効化
+
+```bash title="Terminal"
+aws ec2 create-vpc-encryption-control \
+  --vpc-id vpc-09456d794ff62c982 \
+  --tag-specifications 'ResourceType=vpc-encryption-control,Tags=[{Key=Name,Value=enc-verify-control}]'
+```
+
+```text title="Output"
+{
+    "VpcEncryptionControl": {
+        "VpcId": "vpc-09456d794ff62c982",
+        "VpcEncryptionControlId": "vpcec-070c7cd71ca25ecc8",
+        "Mode": "monitor",
+        "State": "creating",
+        "StateMessage": "creating"
+    }
+}
+```
+
+約1分後に `State` が `available` に遷移した。既存のトラフィックへの影響はなく、即座に有効化できる。
+
+### Flow Logs の作成
+
+`encryption-status` フィールドを含むカスタムフォーマットで Flow Logs を作成する。
+
+```bash title="Terminal"
+aws ec2 create-flow-logs \
+  --resource-type VPC \
+  --resource-ids vpc-09456d794ff62c982 \
+  --traffic-type ALL \
+  --log-destination-type cloud-watch-logs \
+  --log-group-name /vpc/enc-verify-flow-logs \
+  --deliver-logs-permission-arn arn:aws:iam::381492023699:role/enc-verify-flow-logs-role \
+  --log-format '${flow-direction} ${traffic-path} ${srcaddr} ${dstaddr} ${srcport} ${dstport} ${protocol} ${encryption-status} ${reject-reason}'
+```
+
+### トラフィック生成と結果
+
+4 パターンのトラフィックを生成した。
+
+| パターン | クライアント | プロトコル | 期待する encryption-status |
+| --- | --- | --- | --- |
+| A | Nitro (m7g) | HTTP (80) | 1 (Nitro 暗号化) |
+| B | Nitro (m7g) | HTTPS (443) | 3 (Nitro + TLS) |
+| C | 非 Nitro (t2) | HTTP (80) | 0 (非暗号化) |
+| D | 非 Nitro (t2) | HTTPS (443) | 2 (TLS のみ) |
+
+```bash title="Terminal (Nitro クライアントからのトラフィック生成)"
+# HTTP
+for i in $(seq 1 30); do curl -s -o /dev/null http://10.100.2.110; done
+# HTTPS
+for i in $(seq 1 30); do curl -sk -o /dev/null https://10.100.2.110; done
+```
+
+約3分後に Flow Logs に結果が反映された。
+
+```text title="Output (Nitro クライアント → サーバー, HTTP port 80)"
+egress 1 10.100.2.173 10.100.2.110 56738 80 6 1 -
+egress 1 10.100.2.173 10.100.2.110 56750 80 6 1 -
+egress 1 10.100.2.173 10.100.2.110 56684 80 6 1 -
+```
+
+```text title="Output (Nitro クライアント → サーバー, HTTPS port 443)"
+egress 1 10.100.2.173 10.100.2.110 52636 443 6 1 -
+egress 1 10.100.2.173 10.100.2.110 52542 443 6 1 -
+egress 1 10.100.2.173 10.100.2.110 52490 443 6 1 -
+```
+
+```text title="Output (非 Nitro クライアント → サーバー, HTTP port 80)"
+ingress - 10.100.2.139 10.100.2.110 45186 80 6 1 -
+ingress - 10.100.2.139 10.100.2.110 45210 80 6 1 -
+ingress - 10.100.2.139 10.100.2.110 45280 80 6 1 -
+```
+
+```text title="Output (非 Nitro クライアント → サーバー, HTTPS port 443)"
+ingress - 10.100.2.139 10.100.2.110 57972 443 6 1 -
+ingress - 10.100.2.139 10.100.2.110 57868 443 6 1 -
+ingress - 10.100.2.139 10.100.2.110 57940 443 6 1 -
+```
+
+### 予想外の結果: 全トラフィックが encryption-status 1
+
+4 パターン全てで `encryption-status` が `1`（Nitro 暗号化）だった。期待していた `0`、`2`、`3` は一切出現しなかった。
+
+| パターン | 期待値 | 実測値 |
+| --- | --- | --- |
+| A: Nitro → HTTP | 1 | **1** ✓ |
+| B: Nitro → HTTPS | 3 | **1** ✗ |
+| C: 非 Nitro → HTTP | 0 | **1** ✗ |
+| D: 非 Nitro → HTTPS | 2 | **1** ✗ |
+
+この結果から 2 つの重要な知見が得られた。
+
+**知見 1: 通信の片方が Nitro であれば encryption-status は 1 になる。** t2.micro（非 Nitro）からのトラフィックも、宛先のサーバーが m7g（Nitro）であるため `1` と記録された。Nitro の暗号化はインスタンスペア単位ではなく、Nitro 側のハードウェアが片方向で暗号化を適用する。つまり、VPC 内に 1 台でも非 Nitro インスタンスがあっても、通信相手が Nitro であれば暗号化ステータスは `1` になる。
+
+**知見 2: encryption-status 2（アプリケーション層暗号化）は一般的な HTTPS では記録されない。** ドキュメントを再確認すると、`2` は「TCP port 443 for interface endpoint to AWS service」と「TCP port 443 for gateway endpoint」に限定されている。つまり、PrivateLink 経由の AWS サービスアクセスのみが `2` として記録され、EC2 インスタンス間の自己署名証明書による HTTPS は `2` にならない。AWS はパケットの中身を検査せず、ポートとエンドポイントの種類で判定している。
+
+## 検証 2: Enforce モードへの移行とブロック挙動の確認
+
+### ブロッキングリソースの特定
+
+```bash title="Terminal"
+aws ec2 get-vpc-resources-blocking-encryption-enforcement \
+  --vpc-id vpc-09456d794ff62c982
+```
+
+```json title="Output"
+{
+    "NonCompliantResources": [
+        {
+            "Id": "igw-03f9ce2d3fb1b1155",
+            "Type": "internet-gateway",
+            "IsExcludable": true
+        }
+    ]
+}
+```
+
+ブロッキングリソースは Internet Gateway のみだった。t2.micro（非 Nitro）はブロッキングリソースとして検出されなかった。これはシナリオ 1 の知見 1 と整合する——通信相手が Nitro であれば暗号化が成立するため、t2.micro 自体は「暗号化をブロックするリソース」とは見なされない。
+
+### Enforce モードへの切り替え
+
+IGW の除外を設定しつつ enforce モードに切り替える。
+
+```bash title="Terminal"
+aws ec2 modify-vpc-encryption-control \
+  --vpc-encryption-control-id vpcec-070c7cd71ca25ecc8 \
+  --mode enforce \
+  --internet-gateway-exclusion enable
+```
+
+```json title="Output"
+{
+    "VpcEncryptionControl": {
+        "Mode": "monitor",
+        "State": "enforce-in-progress",
+        "StateMessage": "modifying",
+        "ResourceExclusions": {
+            "InternetGateway": {
+                "State": "enabling",
+                "StateMessage": "in-progress"
+            }
+        }
+    }
+}
+```
+
+注目すべきは、コマンド実行直後の `Mode` がまだ `monitor` で、`State` が `enforce-in-progress` である点だ。enforce への切り替えは非同期処理であり、即座には完了しない。
+
+### 15分後に enforce-failed
+
+60秒ごとにステータスをポーリングした結果、約15分後に `enforce-failed` となった。
+
+```text title="Output (ポーリング結果)"
+19:44:33 - monitor  enforce-in-progress
+19:45:35 - monitor  enforce-in-progress
+...（中略）...
+19:58:55 - monitor  enforce-failed
+```
+
+```text title="Output (失敗メッセージ)"
+Failed due to one or more non-compliant resources.
+Use GetVpcResourcesBlockingEncryptionEnforcement to discover the blocking resources.
+```
+
+しかし、`get-vpc-resources-blocking-encryption-enforcement` を再実行しても IGW のみが表示される。IGW の除外は指定済みなのに失敗している。
+
+### IGW をデタッチしても失敗
+
+IGW をデタッチしてブロッキングリソースをゼロにした状態で再試行した。
+
+```bash title="Terminal"
+aws ec2 detach-internet-gateway \
+  --internet-gateway-id igw-03f9ce2d3fb1b1155 \
+  --vpc-id vpc-09456d794ff62c982
+
+aws ec2 get-vpc-resources-blocking-encryption-enforcement \
+  --vpc-id vpc-09456d794ff62c982
+# → NonCompliantResources: []
+```
+
+ブロッキングリソースが空の状態で enforce を再試行したが、再び約15分後に `enforce-failed` となった。
+
+### 原因の推定: VPC エンドポイントの ENI マイグレーション
+
+VPC 内の ENI を確認すると、SSM 用の VPC エンドポイント ENI が 3 つ存在していた。
+
+```text title="Output"
+eni-0c84115b618a78a59 | vpc_endpoint | VPC Endpoint Interface vpce-0af9e55053d66697c  (ssm)
+eni-0d2911f6af6402eb6 | vpc_endpoint | VPC Endpoint Interface vpce-09b65419d5598c9a9  (ssmmessages)
+eni-0b13c6f5ea732619e | vpc_endpoint | VPC Endpoint Interface vpce-0e76869f0adbce959  (ec2messages)
+```
+
+ドキュメントには「monitor モードを有効化すると、NLB、ALB、Fargate、EKS が自動的に暗号化対応ハードウェアにマイグレーションされる」と記載されているが、VPC エンドポイントの ENI マイグレーションについては明示的な記載がない。今回の検証では、VPC エンドポイントの ENI が enforce モードへの移行をブロックしている可能性が高い。`get-vpc-resources-blocking-encryption-enforcement` では検出されないが、内部的にはマイグレーションが完了していないリソースとして扱われていると推定される。
+
+これは実運用で重要な知見である。VPC エンドポイントを多数使用している環境では、enforce モードへの移行に想定以上の時間がかかる可能性がある。
+
+## Monitor vs Enforce: 移行判断のポイント
+
+### 比較テーブル
+
+| 観点 | Monitor | Enforce |
+| --- | --- | --- |
+| 有効化の所要時間 | 約1分 | 15分以上（非同期、失敗の可能性あり） |
+| 既存トラフィックへの影響 | なし | 非暗号化トラフィックがブロックされる |
+| 必要な事前準備 | なし | ブロッキングリソースの特定・移行・除外設定 |
+| Flow Logs の encryption-status | ✓ 利用可能 | ✓ 利用可能 |
+| 非 Nitro インスタンスの起動 | 可能 | ブロックされる |
+| VPC エンドポイントの影響 | なし | ENI マイグレーションが必要（時間がかかる） |
+
+### 料金の考察
+
+VPC Encryption Controls の料金は非空 VPC あたりの時間課金である。
+
+| リージョン | 時間単価 | 月額（730h） |
+| --- | --- | --- |
+| us-east-1 | $0.15 | $109.50 |
+| ap-northeast-1 (東京) | 料金表に未掲載 | — |
+| eu-west-1 (アイルランド) | $0.16 | $116.80 |
+
+VPC が 10 個ある環境では月額 $1,095 になる。Transit Gateway の暗号化サポートを有効化すると、TGW に接続された全 VPC に課金が発生する点にも注意が必要である。
+
+この料金が妥当かどうかは、コンプライアンス要件の厳しさによる。HIPAA や PCI DSS で暗号化証跡が求められる環境では、手動での暗号化監査コスト（人件費 + ツール費）と比較して判断すべきである。monitor モードだけでも Flow Logs に暗号化ステータスが記録されるため、監査証跡としての価値は十分にある。
+
+## まとめ
+
+- **Monitor モードは即日導入できる** — 有効化は約1分、既存トラフィックへの影響ゼロ。Flow Logs に `encryption-status` が追加されるだけなので、本番環境でも安全に有効化できる
+- **encryption-status の判定はインスタンスペアではなく片方向** — 通信の片方が Nitro であれば `1` が記録される。非 Nitro インスタンスが混在していても、通信相手が Nitro なら暗号化は成立する
+- **encryption-status 2 は PrivateLink 経由のみ** — 一般的な HTTPS トラフィックは `2` にならない。AWS はパケットの中身ではなく、エンドポイントの種類とポートで判定している
+- **Enforce モードへの移行は非同期で15分以上かかる** — VPC エンドポイントの ENI マイグレーションがボトルネックになる可能性がある。`get-vpc-resources-blocking-encryption-enforcement` で検出されないリソースが内部的にブロックする場合があり、移行計画には余裕を持たせるべきである
+
+## クリーンアップ
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">検証リソースの削除手順</summary>
+
+```bash title="Terminal"
+# Encryption Controls の削除
+aws ec2 delete-vpc-encryption-control \
+  --vpc-encryption-control-id vpcec-070c7cd71ca25ecc8
+
+# EC2 インスタンスの終了
+aws ec2 terminate-instances \
+  --instance-ids i-0ae5ecc423253d10a i-0a103bc51557301f1 i-05598f623192f9fed
+
+# VPC エンドポイントの削除
+aws ec2 delete-vpc-endpoints \
+  --vpc-endpoint-ids vpce-0af9e55053d66697c vpce-09b65419d5598c9a9 vpce-0e76869f0adbce959
+
+# Flow Logs の削除
+aws ec2 delete-flow-logs --flow-log-ids fl-020b63347a112dc03
+aws logs delete-log-group --log-group-name /vpc/enc-verify-flow-logs
+
+# セキュリティグループ・サブネット・VPC の削除
+aws ec2 delete-security-group --group-id sg-087c5ea932b375258
+aws ec2 delete-subnet --subnet-id subnet-0fbfc4d4b0df3b641
+aws ec2 delete-subnet --subnet-id subnet-0c619dd812037c29e
+aws ec2 delete-route-table --route-table-id rtb-0fe25577847e44133
+aws ec2 delete-internet-gateway --internet-gateway-id igw-03f9ce2d3fb1b1155
+aws ec2 delete-vpc --vpc-id vpc-09456d794ff62c982
+
+# IAM リソースの削除
+aws iam delete-role-policy --role-name enc-verify-flow-logs-role --policy-name flow-logs-publish
+aws iam delete-role --role-name enc-verify-flow-logs-role
+aws iam detach-role-policy --role-name enc-verify-ssm-role --policy-arn arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+aws iam remove-role-from-instance-profile --instance-profile-name enc-verify-ssm-profile --role-name enc-verify-ssm-role
+aws iam delete-instance-profile --instance-profile-name enc-verify-ssm-profile
+aws iam delete-role --role-name enc-verify-ssm-role
+```
+
+</details>
