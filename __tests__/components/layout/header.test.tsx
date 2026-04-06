@@ -24,8 +24,8 @@ describe("Header", () => {
   it("renders navigation links", () => {
     render(<Header locale="en" />);
     expect(screen.getByText("Blog")).toBeDefined();
-    expect(screen.getByText("Projects")).toBeDefined();
-    expect(screen.getByText("Uses")).toBeDefined();
+    expect(screen.getByText("TIL")).toBeDefined();
+    expect(screen.getByText("Series")).toBeDefined();
     expect(screen.getByText("Now")).toBeDefined();
     expect(screen.getByText("About")).toBeDefined();
   });
