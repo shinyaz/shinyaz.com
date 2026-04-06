@@ -42,8 +42,8 @@ describe("MobileNav", () => {
     fireEvent.click(screen.getByRole("button", { name: "Menu" }));
 
     expect(screen.getByText("Blog")).toBeDefined();
-    expect(screen.getByText("Projects")).toBeDefined();
-    expect(screen.getByText("Uses")).toBeDefined();
+    expect(screen.getByText("TIL")).toBeDefined();
+    expect(screen.getByText("Series")).toBeDefined();
     expect(screen.getByText("Now")).toBeDefined();
     expect(screen.getByText("About")).toBeDefined();
     expect(screen.getByLabelText("Search")).toBeDefined();
@@ -55,6 +55,8 @@ describe("MobileNav", () => {
 
     const blogLink = screen.getByText("Blog").closest("a");
     expect(blogLink?.getAttribute("href")).toBe("/en/blog");
+    const seriesLink = screen.getByText("Series").closest("a");
+    expect(seriesLink?.getAttribute("href")).toBe("/en/series");
     const nowLink = screen.getByText("Now").closest("a");
     expect(nowLink?.getAttribute("href")).toBe("/en/now");
     const aboutLink = screen.getByText("About").closest("a");

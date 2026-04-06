@@ -20,8 +20,8 @@ test.describe("Mobile Navigation", () => {
     await page.getByRole("button", { name: "Menu" }).click();
     const drawer = page.locator("body > nav");
     await expect(drawer.getByRole("link", { name: "Blog" })).toBeVisible();
-    await expect(drawer.getByRole("link", { name: "Projects" })).toBeVisible();
-    await expect(drawer.getByRole("link", { name: "Uses" })).toBeVisible();
+    await expect(drawer.getByRole("link", { name: "TIL" })).toBeVisible();
+    await expect(drawer.getByRole("link", { name: "Series" })).toBeVisible();
     await expect(drawer.getByRole("link", { name: "About" })).toBeVisible();
   });
 

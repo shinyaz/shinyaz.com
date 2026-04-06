@@ -69,7 +69,7 @@ describe("Footer", () => {
     render(<Footer locale="ja" />);
     const rssIcon = screen.getByLabelText("RSS Feed");
     expect(rssIcon.getAttribute("href")).toBe("/ja/feed.xml");
-    const colophonLink = screen.getByText("Colophon");
+    const colophonLink = screen.getByText("サイト構成");
     expect(colophonLink.getAttribute("href")).toBe("/ja/colophon");
   });
 });
