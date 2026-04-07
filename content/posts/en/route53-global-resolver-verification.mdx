@@ -14,7 +14,7 @@ On March 9, 2026, AWS announced the [general availability of Amazon Route 53 Glo
 
 Global Resolver is an internet-reachable anycast DNS resolver. While the existing VPC Resolver (formerly Route 53 Resolver) is limited to VPC-internal access or connections via VPN/Direct Connect, Global Resolver can be used directly from on-premises, branch offices, and remote clients. It includes DNS filtering (malware, phishing, DGA detection) and encrypted DNS (DoH/DoT), enabling centralized DNS security management for distributed environments.
 
-However, the minimum configuration (2 Regions + DNS filtering) costs approximately **$3,650/month** ($5.00/hour × 730 hours). Compared to a single VPC Resolver endpoint (~$183/month), that's roughly 20x the cost — though this is a rough comparison since achieving equivalent functionality (multi-region + DNS filtering) with VPC Resolver would require multiple endpoints plus DNS Firewall, adding to the cost. A 30-day free trial (2 Regions + filtering + 1 billion queries) is available, and this verification was completed within the trial period.
+However, the minimum configuration (2 Regions + DNS filtering) costs approximately **\$3,650/month** (\$5.00/hour × 730 hours). Compared to a single VPC Resolver endpoint (~\$183/month), that's roughly 20x the cost — though this is a rough comparison since achieving equivalent functionality (multi-region + DNS filtering) with VPC Resolver would require multiple endpoints plus DNS Firewall, adding to the cost. A 30-day free trial (2 Regions + filtering + 1 billion queries) is available, and this verification was completed within the trial period.
 
 This article walks through creating a Global Resolver, configuring IP ACL authentication (Do53), DNS filtering, and token authentication (DoH) via CLI, measuring propagation times at each step. By the end, you'll have enough data to complete a PoC and decide whether Global Resolver fits your environment. Private hosted zone resolution is out of scope — the focus is on public domain resolution and filtering.
 
@@ -476,10 +476,10 @@ Global Resolver pricing:
 
 | Configuration | Hourly Rate | Monthly Estimate |
 | --- | --- | --- |
-| 2 Regions + filtering | $5.00/h | **$3,650** |
-| 2 Regions (no filtering) | $4.50/h | $3,285 |
-| 5 Regions + filtering | $9.50/h | $6,935 |
-| VPC Resolver endpoint, 1 endpoint with 2 ENIs (reference) | $0.25/h | $183 |
+| 2 Regions + filtering | \$5.00/h | **\$3,650** |
+| 2 Regions (no filtering) | \$4.50/h | \$3,285 |
+| 5 Regions + filtering | \$9.50/h | \$6,935 |
+| VPC Resolver endpoint, 1 endpoint with 2 ENIs (reference) | \$0.25/h | \$183 |
 
 Global Resolver is a good fit when:
 - You need unified DNS security policies across multiple remote client locations
