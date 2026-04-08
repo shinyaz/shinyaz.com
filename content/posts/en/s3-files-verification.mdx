@@ -1,0 +1,565 @@
+---
+title: "Hands-on with S3 Files — Measuring Sync Latency and Read Performance of S3's New File System"
+description: "Verify S3 Files from file system creation to mount, bidirectional sync delay measurement, and read performance. Includes comparison with EFS, Mountpoint for S3, and FSx for Lustre, plus measured data for selection decisions."
+date: "2026-04-08"
+published: true
+featured: false
+categories: [infrastructure]
+tags: ["aws", "s3", "s3-files", "efs", "storage", "nfs"]
+---
+
+## Introduction
+
+On April 7, 2026, AWS [announced the general availability of Amazon S3 Files](https://aws.amazon.com/about-aws/whats-new/2026/04/amazon-s3-files/). This new feature lets you mount S3 buckets as NFS v4.1+ file systems, enabling simultaneous read/write access from multiple compute resources.
+
+AWS offers several ways to access S3 data through a file system interface. Here's how S3 Files compares to existing options:
+
+| Aspect | S3 Files | Mountpoint for S3 | Amazon EFS | FSx for Lustre |
+|---|---|---|---|---|
+| Protocol | NFS v4.1+ | FUSE | NFS v4.1 | Lustre / POSIX |
+| Write support | ○ (bidirectional sync) | △ (new files by default; overwrite/delete via flags; no partial modification) | ○ | ○ |
+| Data location | S3 bucket | S3 bucket | EFS storage | FSx storage |
+| Multi-client access | ○ (NFS shared) | ○ (read-focused) | ○ | ○ |
+| S3 auto-sync | Bidirectional | N/A (direct S3 access) | None | S3 import available |
+| Primary use case | Shared read/write to S3 data | Read-heavy S3 workloads | General-purpose shared FS | HPC / ML training |
+| Data migration needed | No | No | Yes | S3 import available |
+
+The key differentiator of S3 Files is that it provides full file system semantics (read, write, delete, rename) on S3 bucket data with automatic bidirectional synchronization. Mountpoint for S3 only supports new file creation by default — overwrite and delete require startup flags, and partial modification of existing files is not possible. S3 Files supports all standard file operations out of the box.
+
+However, bidirectional sync comes with an export (FS→S3) batching window of approximately 60 seconds. This latency characteristic directly affects workload suitability. This article verifies S3 Files from setup through sync delay measurement and read performance, providing concrete data for deciding when to choose S3 Files.
+
+See the official documentation at [Working with Amazon S3 Files](https://docs.aws.amazon.com/AmazonS3/latest/userguide/s3-files.html).
+
+Prerequisites:
+
+- AWS CLI v2 (`s3files:*`, `s3:*`, `iam:*`, `ec2:*` permissions)
+- Test region: ap-northeast-1 (Tokyo)
+- EC2 instance (Amazon Linux 2023, t3.medium)
+
+Skip to [Verification 1](#verification-1-file-system-creation-mount-and-basic-operations) if you only want the results.
+
+## Environment Setup
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">S3 bucket, IAM roles, EC2, security groups, and file system creation</summary>
+
+Replace `<account-id>` with your AWS account ID and `<bucket-name>` with your chosen bucket name throughout.
+
+Required resources:
+
+| Resource | Purpose |
+|---|---|
+| S3 general purpose bucket (versioning enabled) | Data store for the file system |
+| IAM role (file system) | For S3 Files to read/write the S3 bucket |
+| IAM role (EC2) | For EC2 to connect to the file system |
+| Security groups × 2 | NFS traffic (TCP 2049) between EC2 and mount target |
+| EC2 instance | Mount target for the file system |
+
+### S3 Bucket
+
+```bash title="Terminal"
+BUCKET="<bucket-name>"
+REGION="ap-northeast-1"
+
+aws s3api create-bucket \
+  --bucket $BUCKET \
+  --region $REGION \
+  --create-bucket-configuration LocationConstraint=$REGION
+
+aws s3api put-bucket-versioning \
+  --bucket $BUCKET \
+  --versioning-configuration Status=Enabled
+```
+
+S3 Files **requires versioning**. Changes from the file system are synced to the S3 bucket as new object versions.
+
+### IAM Role (File System)
+
+The trust policy uses `elasticfilesystem.amazonaws.com` as the principal — S3 Files is built on Amazon EFS technology under the hood.
+
+```bash title="Terminal (file system role)"
+ACCOUNT_ID="<account-id>"
+
+aws iam create-role \
+  --role-name S3FilesVerifyFSRole \
+  --assume-role-policy-document '{
+    "Version": "2012-10-17",
+    "Statement": [{
+      "Effect": "Allow",
+      "Principal": {"Service": "elasticfilesystem.amazonaws.com"},
+      "Action": "sts:AssumeRole",
+      "Condition": {
+        "StringEquals": {"aws:SourceAccount": "'$ACCOUNT_ID'"},
+        "ArnLike": {"aws:SourceArn": "arn:aws:s3files:'$REGION':'$ACCOUNT_ID':file-system/*"}
+      }
+    }]
+  }'
+```
+
+The inline policy grants S3 bucket access and EventBridge rule management. EventBridge is used to notify the file system of S3 bucket changes.
+
+```bash title="Terminal (inline policy)"
+aws iam put-role-policy \
+  --role-name S3FilesVerifyFSRole \
+  --policy-name S3FilesVerifyFSPolicy \
+  --policy-document '{
+    "Version": "2012-10-17",
+    "Statement": [
+      {
+        "Sid": "S3BucketPermissions",
+        "Effect": "Allow",
+        "Action": ["s3:ListBucket", "s3:ListBucketVersions"],
+        "Resource": "arn:aws:s3:::'$BUCKET'",
+        "Condition": {"StringEquals": {"aws:ResourceAccount": "'$ACCOUNT_ID'"}}
+      },
+      {
+        "Sid": "S3ObjectPermissions",
+        "Effect": "Allow",
+        "Action": ["s3:AbortMultipartUpload", "s3:DeleteObject*", "s3:GetObject*", "s3:List*", "s3:PutObject*"],
+        "Resource": "arn:aws:s3:::'$BUCKET'/*",
+        "Condition": {"StringEquals": {"aws:ResourceAccount": "'$ACCOUNT_ID'"}}
+      },
+      {
+        "Sid": "EventBridgeManage",
+        "Effect": "Allow",
+        "Action": ["events:DeleteRule", "events:DisableRule", "events:EnableRule", "events:PutRule", "events:PutTargets", "events:RemoveTargets"],
+        "Condition": {"StringEquals": {"events:ManagedBy": "elasticfilesystem.amazonaws.com"}},
+        "Resource": ["arn:aws:events:*:*:rule/DO-NOT-DELETE-S3-Files*"]
+      },
+      {
+        "Sid": "EventBridgeRead",
+        "Effect": "Allow",
+        "Action": ["events:DescribeRule", "events:ListRuleNamesByTarget", "events:ListRules", "events:ListTargetsByRule"],
+        "Resource": ["arn:aws:events:*:*:rule/*"]
+      }
+    ]
+  }'
+```
+
+### IAM Role (EC2)
+
+```bash title="Terminal (EC2 role)"
+aws iam create-role \
+  --role-name S3FilesVerifyEC2Role \
+  --assume-role-policy-document '{
+    "Version": "2012-10-17",
+    "Statement": [{
+      "Effect": "Allow",
+      "Principal": {"Service": "ec2.amazonaws.com"},
+      "Action": "sts:AssumeRole"
+    }]
+  }'
+
+# Attach managed policies
+aws iam attach-role-policy --role-name S3FilesVerifyEC2Role \
+  --policy-arn arn:aws:iam::aws:policy/AmazonS3FilesClientFullAccess
+aws iam attach-role-policy --role-name S3FilesVerifyEC2Role \
+  --policy-arn arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+
+# S3 bucket read access (required for S3 Files read optimization)
+aws iam put-role-policy \
+  --role-name S3FilesVerifyEC2Role \
+  --policy-name S3FilesVerifyEC2S3Policy \
+  --policy-document '{
+    "Version": "2012-10-17",
+    "Statement": [
+      {"Effect": "Allow", "Action": ["s3:GetObject", "s3:GetObjectVersion"], "Resource": "arn:aws:s3:::'$BUCKET'/*"},
+      {"Effect": "Allow", "Action": "s3:ListBucket", "Resource": "arn:aws:s3:::'$BUCKET'"}
+    ]
+  }'
+
+# Create instance profile
+aws iam create-instance-profile --instance-profile-name S3FilesVerifyEC2Profile
+aws iam add-role-to-instance-profile \
+  --instance-profile-name S3FilesVerifyEC2Profile \
+  --role-name S3FilesVerifyEC2Role
+```
+
+### Security Groups
+
+```bash title="Terminal"
+VPC_ID=$(aws ec2 describe-vpcs --filters Name=isDefault,Values=true \
+  --query 'Vpcs[0].VpcId' --output text --region $REGION)
+
+EC2_SG=$(aws ec2 create-security-group \
+  --group-name s3files-verify-ec2-sg \
+  --description "S3 Files verify - EC2" \
+  --vpc-id $VPC_ID --region $REGION \
+  --query 'GroupId' --output text)
+
+MT_SG=$(aws ec2 create-security-group \
+  --group-name s3files-verify-mt-sg \
+  --description "S3 Files verify - mount target" \
+  --vpc-id $VPC_ID --region $REGION \
+  --query 'GroupId' --output text)
+
+# Allow NFS (TCP 2049)
+aws ec2 authorize-security-group-egress --group-id $EC2_SG --region $REGION \
+  --ip-permissions "IpProtocol=tcp,FromPort=2049,ToPort=2049,UserIdGroupPairs=[{GroupId=$MT_SG}]"
+aws ec2 authorize-security-group-ingress --group-id $MT_SG --region $REGION \
+  --ip-permissions "IpProtocol=tcp,FromPort=2049,ToPort=2049,UserIdGroupPairs=[{GroupId=$EC2_SG}]"
+
+echo "EC2_SG=$EC2_SG  MT_SG=$MT_SG"
+```
+
+### EC2 Instance
+
+```bash title="Terminal"
+SUBNET_ID=$(aws ec2 describe-subnets \
+  --filters Name=vpc-id,Values=$VPC_ID Name=availability-zone,Values=${REGION}a \
+  --query 'Subnets[0].SubnetId' --output text --region $REGION)
+
+AMI_ID=$(aws ssm get-parameters-by-path \
+  --path /aws/service/ami-amazon-linux-latest \
+  --query "Parameters[?contains(Name,'al2023-ami-kernel-default-x86_64')].Value" \
+  --output text --region $REGION)
+
+INSTANCE_ID=$(aws ec2 run-instances \
+  --image-id $AMI_ID \
+  --instance-type t3.medium \
+  --subnet-id $SUBNET_ID \
+  --security-group-ids $EC2_SG \
+  --iam-instance-profile Name=S3FilesVerifyEC2Profile \
+  --metadata-options HttpTokens=required \
+  --tag-specifications 'ResourceType=instance,Tags=[{Key=Name,Value=s3files-verify}]' \
+  --query 'Instances[0].InstanceId' --output text --region $REGION)
+
+aws ec2 wait instance-running --instance-ids $INSTANCE_ID --region $REGION
+echo "INSTANCE_ID=$INSTANCE_ID"
+```
+
+### efs-utils v3.0.0 Installation
+
+S3 Files requires `amazon-efs-utils` **v3.0.0 or later**. Connect to EC2 via SSM and run the official installer:
+
+```bash title="Terminal (on EC2)"
+curl -s https://amazon-efs-utils.aws.com/efs-utils-installer.sh | sudo sh -s -- --install
+```
+
+```text title="Output"
+Installed:
+  amazon-efs-utils-3.0.0-1.amzn2023.x86_64
+```
+
+**Important:** The standard Amazon Linux 2023 repository only has v2.4.2. If you install v2.x first via `sudo yum install amazon-efs-utils`, the installer script may not upgrade it. **Run the installer script on a fresh instance without efs-utils pre-installed.**
+
+</details>
+
+## Verification 1: File System Creation, Mount, and Basic Operations
+
+### Creating the File System
+
+Using the variables defined in setup (`$BUCKET`, `$REGION`, `$ACCOUNT_ID`):
+
+```bash title="Terminal"
+FS_ID=$(aws s3files create-file-system \
+  --region $REGION \
+  --bucket arn:aws:s3:::$BUCKET \
+  --role-arn arn:aws:iam::${ACCOUNT_ID}:role/S3FilesVerifyFSRole \
+  --query 'fileSystemId' --output text)
+echo "FS_ID=$FS_ID"
+```
+
+```text title="Output"
+FS_ID=fs-0cb138350950ff4e5
+```
+
+The file system became `available` **instantly** — effectively zero seconds for creation.
+
+### Creating the Mount Target
+
+```bash title="Terminal"
+MT_ID=$(aws s3files create-mount-target \
+  --region $REGION \
+  --file-system-id $FS_ID \
+  --subnet-id $SUBNET_ID \
+  --security-groups $MT_SG \
+  --query 'mountTargetId' --output text)
+echo "MT_ID=$MT_ID"
+
+# Wait until available
+while true; do
+  STATUS=$(aws s3files list-mount-targets --region $REGION \
+    --file-system-id $FS_ID --query 'mountTargets[0].status' --output text)
+  echo "$(date +%T) - $STATUS"
+  [ "$STATUS" = "available" ] && break
+  sleep 15
+done
+```
+
+The mount target took **approximately 3 minutes 40 seconds** to become available. The documentation states mount targets can take up to ~5 minutes to create, so 3 minutes 40 seconds is within the expected range.
+
+### Mount and Basic Operations
+
+```bash title="Terminal (on EC2)"
+sudo mkdir -p /mnt/s3files
+sudo mount -t s3files $FS_ID:/ /mnt/s3files
+```
+
+```bash title="Terminal (basic operations)"
+echo 'Hello S3 Files!' > /mnt/s3files/hello.txt
+cat /mnt/s3files/hello.txt
+mkdir -p /mnt/s3files/test-dir
+cp /mnt/s3files/hello.txt /mnt/s3files/test-dir/
+ls -la /mnt/s3files/
+```
+
+```text title="Output"
+Hello S3 Files!
+total 16
+drwxr-xr-x. 4 root root 10240 Apr  8 01:48 .
+drwxr-xr-x. 3 root root    21 Apr  8 01:48 ..
+drwx------. 2 root root 10240 Apr  8 00:01 .s3files-lost+found-fs-0cb138350950ff4e5
+-rw-r--r--. 1 root root    16 Apr  8 01:48 hello.txt
+drwxr-xr-x. 2 root root 10240 Apr  8 01:48 test-dir
+```
+
+`df -h` shows the file system size as **8.0E (8 exabytes)**. S3 Files provides virtually unlimited capacity, which is why such a large value is displayed.
+
+The `.s3files-lost+found-*` directory is automatically created. This is where file system changes are moved when conflicts occur between the file system and S3 bucket.
+
+### Verifying S3 Sync
+
+Confirm that files created on the file system are reflected in the S3 bucket. Export takes approximately 60 seconds, so wait before checking.
+
+```bash title="Terminal"
+aws s3 ls s3://$BUCKET/ --region $REGION
+```
+
+```text title="Output"
+2026-04-08 01:50:00         16 hello.txt
+2026-04-08 01:50:04          0 test-dir/
+2026-04-08 01:50:11         16 test-dir/hello.txt
+```
+
+The `hello.txt` and `test-dir/` created on the file system are reflected as objects in the S3 bucket. Directories appear as 0-byte objects (prefixes). The next verification measures exactly how long this synchronization takes.
+
+## Verification 2: Bidirectional Sync Delay Measurement
+
+The most critical characteristic of S3 Files is bidirectional synchronization. The documentation states "exports batch for approximately 60 seconds" and "imports typically within seconds." Here are the measured results.
+
+### Export (FS → S3)
+
+Files were created on the file system, and the time until they appeared in the S3 bucket was measured by polling `aws s3api head-object` every 5 seconds.
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">Export delay measurement script</summary>
+
+Run on EC2. Replace `<bucket-name>` with your bucket name.
+
+```bash title="Terminal (on EC2)"
+BUCKET="<bucket-name>"
+REGION="ap-northeast-1"
+
+for SIZE_LABEL in "1k:1024:1" "1m:1M:1" "10m:1M:10"; do
+  IFS=: read -r NAME BS COUNT <<< "$SIZE_LABEL"
+  FILE="export-${NAME}.bin"
+  dd if=/dev/urandom of=/mnt/s3files/$FILE bs=$BS count=$COUNT 2>/dev/null
+  WRITE_TIME=$(date +%s)
+  echo "$FILE written at $(date -d @$WRITE_TIME '+%H:%M:%S')"
+  while true; do
+    aws s3api head-object --bucket $BUCKET --key $FILE --region $REGION >/dev/null 2>&1 && break
+    sleep 5
+  done
+  SYNC_TIME=$(date +%s)
+  echo "$FILE synced to S3 at $(date -d @$SYNC_TIME '+%H:%M:%S') ($((SYNC_TIME - WRITE_TIME))s)"
+done
+```
+
+</details>
+
+| File Size | Export Delay |
+|---|---|
+| 1KB | 65s |
+| 1MB | 70s |
+| 10MB | 64s |
+
+**File size has virtually no impact on export delay.** As documented, S3 Files aggregates writes for approximately 60 seconds and exports them as a single S3 PUT request. This design keeps S3 request costs low even with frequent writes.
+
+### Import (S3 → FS)
+
+Objects were uploaded via the S3 API, and the time until they became visible via `ls` on the file system was measured by polling every 2 seconds.
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">Import delay measurement script</summary>
+
+```bash title="Terminal (on EC2)"
+BUCKET="<bucket-name>"
+REGION="ap-northeast-1"
+
+for SIZE_LABEL in "1k:1024:1" "1m:1M:1" "10m:1M:10"; do
+  IFS=: read -r NAME BS COUNT <<< "$SIZE_LABEL"
+  FILE="import-${NAME}.bin"
+  dd if=/dev/urandom of=/tmp/$FILE bs=$BS count=$COUNT 2>/dev/null
+  aws s3 cp /tmp/$FILE s3://$BUCKET/$FILE --region $REGION --quiet
+  UPLOAD_TIME=$(date +%s)
+  echo "$FILE uploaded at $(date -d @$UPLOAD_TIME '+%H:%M:%S')"
+  while true; do
+    ls /mnt/s3files/$FILE >/dev/null 2>&1 && break
+    sleep 2
+  done
+  SYNC_TIME=$(date +%s)
+  echo "$FILE visible in FS at $(date -d @$SYNC_TIME '+%H:%M:%S') ($((SYNC_TIME - UPLOAD_TIME))s)"
+done
+```
+
+</details>
+
+| File Size | Import Delay |
+|---|---|
+| 1KB | 60s |
+| 1MB | 30s |
+| 10MB | 30s |
+
+The 1KB file took 60 seconds to import, longer than the 30 seconds for 1MB/10MB. S3 Files detects bucket changes using S3 Event Notifications, so timing depends on event delivery. This matches the documentation's note that changes "are visible within a few seconds but can sometimes take a minute or longer."
+
+### Sync Delay Summary
+
+| Direction | Delay | Notes |
+|---|---|---|
+| Export (FS→S3) | 64–70s | ~60s batch window + sync processing |
+| Import (S3→FS) | 30–60s | Via S3 Event Notifications, variable timing |
+
+**Not suitable for near-real-time sync workloads.** Changes from the file system take at least 60 seconds to reach S3, and direct S3 uploads take 30–60 seconds to appear in the file system. Best suited for workloads that tolerate delays of a few minutes, such as log collection and batch processing.
+
+## Verification 3: Read Performance by File Size — Measuring Cache Effects
+
+S3 Files uses a two-tier read architecture. Inside the file system is a "high-performance storage" layer — a low-latency storage tier where actively used file data is cached. By default, files of 128KB or smaller are automatically imported to high-performance storage for low-latency reads. Reads of 1MB or larger are served directly from the S3 bucket for high throughput.
+
+To measure how this two-tier routing affects actual latency, files of various sizes were uploaded via the S3 API. After waiting 30 seconds for import (based on the 30–60 second import delay measured in Verification 2), cold reads and warm reads were compared.
+
+- **Cold read**: OS page cache cleared via `drop_caches` before reading. This eliminates NFS client cache and OS cache effects, measuring S3 Files' read routing performance
+- **Warm read**: Read immediately after the cold read without clearing cache. This includes OS page cache and NFS client cache effects, closer to real-world performance
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">Read performance measurement script</summary>
+
+```bash title="Terminal (on EC2)"
+BUCKET="<bucket-name>"
+REGION="ap-northeast-1"
+
+# Upload test files via S3 API
+dd if=/dev/urandom of=/tmp/read-4k.bin bs=4096 count=1 2>/dev/null
+dd if=/dev/urandom of=/tmp/read-128k.bin bs=131072 count=1 2>/dev/null
+dd if=/dev/urandom of=/tmp/read-1m.bin bs=1M count=1 2>/dev/null
+dd if=/dev/urandom of=/tmp/read-10m.bin bs=1M count=10 2>/dev/null
+for f in read-4k.bin read-128k.bin read-1m.bin read-10m.bin; do
+  aws s3 cp /tmp/$f s3://$BUCKET/$f --region $REGION --quiet
+done
+echo "Waiting 30s for import..."
+sleep 30
+
+# Cold reads (drop page cache first)
+echo "--- Cold reads ---"
+for f in read-4k.bin read-128k.bin read-1m.bin read-10m.bin; do
+  sync && echo 3 | sudo tee /proc/sys/vm/drop_caches >/dev/null
+  START=$(date +%s%N)
+  cat /mnt/s3files/$f > /dev/null
+  END=$(date +%s%N)
+  echo "Cold $f: $(( (END - START) / 1000000 ))ms"
+done
+
+# Warm reads (with cache)
+echo "--- Warm reads ---"
+for f in read-4k.bin read-128k.bin read-1m.bin read-10m.bin; do
+  START=$(date +%s%N)
+  cat /mnt/s3files/$f > /dev/null
+  END=$(date +%s%N)
+  echo "Warm $f: $(( (END - START) / 1000000 ))ms"
+done
+```
+
+</details>
+
+| File Size | Cold Read | Warm Read | Improvement |
+|---|---|---|---|
+| 4KB | 13ms | 6ms | 54% |
+| 128KB | 12ms | 8ms | 33% |
+| 1MB | 144ms | 110ms | 24% |
+| 10MB | 220ms | 5ms | 98% |
+
+### Analysis
+
+**Small files (4KB, 128KB)** show low latency for both cold and warm reads, likely due to reads being served from the high-performance storage layer. Adequate performance for config files and small data files.
+
+**1MB** shows minimal improvement from cold (144ms) to warm (110ms). This aligns with the documented behavior of "reads of 1MB or larger are served directly from S3." Direct S3 serving optimizes throughput, not latency.
+
+**10MB** shows dramatic improvement from cold (220ms) to warm (5ms). The cold read was measured after dropping the OS page cache, but the warm read was not. The 5ms value is likely served from the NFS client cache or OS page cache, rather than from S3 Files' high-performance storage layer. This suggests the improvement is due to Linux's caching hierarchy rather than S3 Files' two-tier architecture.
+
+## Limitations and Caveats
+
+Key constraints confirmed through verification and documented limitations:
+
+- **No Glacier support** — Objects in S3 Glacier Flexible Retrieval / Deep Archive cannot be accessed through the file system. Restore first
+- **Rename/move cost** — S3 has no directory concept, so directory renames execute as copy + delete for every object. A 100K-file directory rename takes minutes to reflect in S3
+- **Custom metadata not preserved** — Custom S3 object metadata is lost when files are modified through the file system
+- **efs-utils v3.0.0 installation** — The standard Amazon Linux 2023 repo only has v2.x. Use the official installer script and avoid installing v2.x first
+- **One VPC per file system** — A file system can only connect to one VPC
+- **NFS close-to-open consistency** — Strong consistency (read-after-write) is guaranteed per file, but directory listing updates depend on import delay
+
+## Summary — When to Choose S3 Files
+
+The verification confirmed these characteristics:
+
+- **Setup is straightforward** — File system creation is instant, mount target takes ~4 minutes. CLI-only workflow
+- **Export delay is stable at ~65 seconds** — Consistent regardless of file size. The 60-second batch window dominates
+- **Import delay is 30–60 seconds** — Via S3 Event Notifications, with some variability
+- **Small file reads are low-latency** — 6ms for 4KB (warm). Good for config files and small data
+
+Selection framework based on measured data:
+
+- **S3 data + shared read/write from multiple compute** → S3 Files. Ideal for AI agent shared state, ML data preparation, file-based tools accessing S3 data
+- **S3 data + read-heavy, high-throughput** → Mountpoint for S3. No sync delay, no overwrite needed
+- **No S3 data + general-purpose shared file system** → Amazon EFS
+- **HPC / GPU cluster + massive parallel I/O** → FSx for Lustre
+
+**Sync delay tolerance is the key decision factor** — Export ~65s and import 30–60s delays are a constraint for real-time workloads. For batch processing and data analytics where a few minutes of delay is acceptable, S3 Files offers the significant advantage of using your S3 bucket as a file system with zero data migration.
+
+## Cleanup
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">Resource deletion commands</summary>
+
+Delete in reverse creation order. Uses the variables defined during setup.
+
+```bash title="Terminal"
+# Terminate EC2 instance
+aws ec2 terminate-instances --instance-ids $INSTANCE_ID --region $REGION
+
+# Delete mount target
+aws s3files delete-mount-target \
+  --region $REGION \
+  --mount-target-id $MT_ID
+
+# Delete file system
+aws s3files delete-file-system \
+  --region $REGION \
+  --file-system-id $FS_ID
+
+# Delete security groups (after EC2 termination completes)
+aws ec2 wait instance-terminated --instance-ids $INSTANCE_ID --region $REGION
+aws ec2 delete-security-group --group-id $EC2_SG --region $REGION
+aws ec2 delete-security-group --group-id $MT_SG --region $REGION
+
+# Delete IAM resources
+aws iam remove-role-from-instance-profile \
+  --instance-profile-name S3FilesVerifyEC2Profile \
+  --role-name S3FilesVerifyEC2Role
+aws iam delete-instance-profile --instance-profile-name S3FilesVerifyEC2Profile
+aws iam detach-role-policy --role-name S3FilesVerifyEC2Role \
+  --policy-arn arn:aws:iam::aws:policy/AmazonS3FilesClientFullAccess
+aws iam detach-role-policy --role-name S3FilesVerifyEC2Role \
+  --policy-arn arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+aws iam delete-role-policy --role-name S3FilesVerifyEC2Role --policy-name S3FilesVerifyEC2S3Policy
+aws iam delete-role --role-name S3FilesVerifyEC2Role
+aws iam delete-role-policy --role-name S3FilesVerifyFSRole --policy-name S3FilesVerifyFSPolicy
+aws iam delete-role --role-name S3FilesVerifyFSRole
+
+# Delete S3 bucket (versioning enabled, must delete all versions)
+aws s3api list-object-versions --bucket $BUCKET --region $REGION \
+  --query '{Objects: [].{Key:Key,VersionId:VersionId}}' --output json | \
+  aws s3api delete-objects --bucket $BUCKET --region $REGION --delete file:///dev/stdin
+aws s3api delete-bucket --bucket $BUCKET --region $REGION
+```
+
+</details>

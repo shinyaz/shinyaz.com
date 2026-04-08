@@ -1,0 +1,567 @@
+---
+title: "S3 Files を実機検証 — S3 バケットをファイルシステムとしてマウントする新機能の同期遅延と読み取り性能"
+description: "S3 Files のファイルシステム作成からマウント、双方向同期の遅延計測、読み取りパフォーマンスまでを CLI で検証。EFS・Mountpoint for S3・FSx for Lustre との比較表と、実測データに基づく選択判断材料を提供する。"
+date: "2026-04-08"
+published: true
+featured: false
+categories: [infrastructure]
+tags: ["aws", "s3", "s3-files", "efs", "storage", "nfs"]
+---
+
+## はじめに
+
+2026年4月7日、AWS は [Amazon S3 Files の一般提供](https://aws.amazon.com/about-aws/whats-new/2026/04/amazon-s3-files/)を発表した。S3 バケットを NFS v4.1+ ファイルシステムとしてマウントし、複数のコンピュートリソースから同時に読み書きできる新機能である。
+
+AWS には「S3 データにファイルシステムからアクセスする」手段が複数ある。S3 Files の位置づけを理解するために、既存の選択肢と比較する。
+
+| 観点 | S3 Files | Mountpoint for S3 | Amazon EFS | FSx for Lustre |
+|---|---|---|---|---|
+| プロトコル | NFS v4.1+ | FUSE | NFS v4.1 | Lustre / POSIX |
+| 書き込み | ○（双方向同期） | △（デフォルトは新規作成のみ。フラグで上書き・削除可。部分変更は不可） | ○ | ○ |
+| データの実体 | S3 バケット | S3 バケット | EFS 独自ストレージ | FSx 独自ストレージ |
+| 複数クライアント同時アクセス | ○（NFS 共有） | ○（読み取り中心） | ○ | ○ |
+| S3 との自動同期 | 双方向自動 | 不要（S3 直接アクセス） | なし | S3 連携あり（手動/自動） |
+| 主なユースケース | S3 データへの共有読み書き | S3 データの読み取り中心 | 汎用共有ファイルシステム | HPC / ML トレーニング |
+| データ移行の要否 | 不要 | 不要 | 必要 | S3 からインポート可能 |
+
+S3 Files の差別化ポイントは「S3 バケットのデータを NFS で読み書きでき、変更が双方向に自動同期される」点である。Mountpoint for S3 はデフォルトでは新規ファイルの作成のみで、上書きや削除にはフラグが必要であり、既存ファイルの部分変更はできない。S3 Files はフルファイルシステムセマンティクス（読み書き・削除・rename）を提供する。
+
+ただし、双方向同期にはエクスポート（FS→S3）で約60秒のバッチウィンドウがある。この遅延特性がワークロード適合性を左右する。本記事では、S3 Files のセットアップから同期遅延の実測、読み取りパフォーマンスまでを CLI で検証し、S3 Files を選ぶべき場面を具体化する。
+
+公式ドキュメントは [Working with Amazon S3 Files](https://docs.aws.amazon.com/AmazonS3/latest/userguide/s3-files.html) を参照。
+
+前提条件:
+
+- AWS CLI v2（`s3files:*`、`s3:*`、`iam:*`、`ec2:*` の権限）
+- 検証リージョン: ap-northeast-1（東京）
+- EC2 インスタンス（Amazon Linux 2023、t3.medium）
+
+セットアップだけ見たい場合は[検証環境のセットアップ](#検証環境のセットアップ)、結果だけ見たい場合は[検証 1](#検証-1-ファイルシステム作成マウント基本操作)に進んでほしい。
+
+## 検証環境のセットアップ
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">S3 バケット・IAM ロール・EC2・セキュリティグループの作成手順</summary>
+
+以降のコマンドでは `<account-id>` を自身の AWS アカウント ID に、`<bucket-name>` を任意のバケット名に置き換えること。
+
+必要なリソース一覧:
+
+| リソース | 用途 |
+|---|---|
+| S3 汎用バケット（バージョニング有効） | ファイルシステムのデータストア |
+| IAM ロール（ファイルシステム用） | S3 Files が S3 バケットを読み書きするため |
+| IAM ロール（EC2 用） | EC2 からファイルシステムに接続するため |
+| セキュリティグループ × 2 | EC2 ↔ マウントターゲット間の NFS 通信（TCP 2049） |
+| EC2 インスタンス | ファイルシステムのマウント先 |
+
+### S3 バケットの作成
+
+```bash title="Terminal"
+BUCKET="<bucket-name>"
+REGION="ap-northeast-1"
+
+aws s3api create-bucket \
+  --bucket $BUCKET \
+  --region $REGION \
+  --create-bucket-configuration LocationConstraint=$REGION
+
+aws s3api put-bucket-versioning \
+  --bucket $BUCKET \
+  --versioning-configuration Status=Enabled
+```
+
+S3 Files は **バージョニングが必須**である。ファイルシステムからの変更を S3 バケットに新しいオブジェクトバージョンとして同期するためだ。
+
+### IAM ロールの作成（ファイルシステム用）
+
+S3 Files サービスが S3 バケットを操作するためのロール。信頼ポリシーのプリンシパルが `elasticfilesystem.amazonaws.com` である点に注目してほしい。S3 Files は内部的に Amazon EFS の技術基盤を使用しているためだ。
+
+```bash title="Terminal (ファイルシステム用ロール)"
+ACCOUNT_ID="<account-id>"
+
+aws iam create-role \
+  --role-name S3FilesVerifyFSRole \
+  --assume-role-policy-document '{
+    "Version": "2012-10-17",
+    "Statement": [{
+      "Effect": "Allow",
+      "Principal": {"Service": "elasticfilesystem.amazonaws.com"},
+      "Action": "sts:AssumeRole",
+      "Condition": {
+        "StringEquals": {"aws:SourceAccount": "'$ACCOUNT_ID'"},
+        "ArnLike": {"aws:SourceArn": "arn:aws:s3files:'$REGION':'$ACCOUNT_ID':file-system/*"}
+      }
+    }]
+  }'
+```
+
+インラインポリシーとして、S3 バケットへのアクセス権限と EventBridge ルールの管理権限を付与する。EventBridge は S3 バケットの変更をファイルシステムに通知するために使用される。
+
+```bash title="Terminal (インラインポリシー)"
+aws iam put-role-policy \
+  --role-name S3FilesVerifyFSRole \
+  --policy-name S3FilesVerifyFSPolicy \
+  --policy-document '{
+    "Version": "2012-10-17",
+    "Statement": [
+      {
+        "Sid": "S3BucketPermissions",
+        "Effect": "Allow",
+        "Action": ["s3:ListBucket", "s3:ListBucketVersions"],
+        "Resource": "arn:aws:s3:::'$BUCKET'",
+        "Condition": {"StringEquals": {"aws:ResourceAccount": "'$ACCOUNT_ID'"}}
+      },
+      {
+        "Sid": "S3ObjectPermissions",
+        "Effect": "Allow",
+        "Action": ["s3:AbortMultipartUpload", "s3:DeleteObject*", "s3:GetObject*", "s3:List*", "s3:PutObject*"],
+        "Resource": "arn:aws:s3:::'$BUCKET'/*",
+        "Condition": {"StringEquals": {"aws:ResourceAccount": "'$ACCOUNT_ID'"}}
+      },
+      {
+        "Sid": "EventBridgeManage",
+        "Effect": "Allow",
+        "Action": ["events:DeleteRule", "events:DisableRule", "events:EnableRule", "events:PutRule", "events:PutTargets", "events:RemoveTargets"],
+        "Condition": {"StringEquals": {"events:ManagedBy": "elasticfilesystem.amazonaws.com"}},
+        "Resource": ["arn:aws:events:*:*:rule/DO-NOT-DELETE-S3-Files*"]
+      },
+      {
+        "Sid": "EventBridgeRead",
+        "Effect": "Allow",
+        "Action": ["events:DescribeRule", "events:ListRuleNamesByTarget", "events:ListRules", "events:ListTargetsByRule"],
+        "Resource": ["arn:aws:events:*:*:rule/*"]
+      }
+    ]
+  }'
+```
+
+### IAM ロールの作成（EC2 用）
+
+```bash title="Terminal (EC2 用ロール)"
+aws iam create-role \
+  --role-name S3FilesVerifyEC2Role \
+  --assume-role-policy-document '{
+    "Version": "2012-10-17",
+    "Statement": [{
+      "Effect": "Allow",
+      "Principal": {"Service": "ec2.amazonaws.com"},
+      "Action": "sts:AssumeRole"
+    }]
+  }'
+
+# マネージドポリシーのアタッチ
+aws iam attach-role-policy --role-name S3FilesVerifyEC2Role \
+  --policy-arn arn:aws:iam::aws:policy/AmazonS3FilesClientFullAccess
+aws iam attach-role-policy --role-name S3FilesVerifyEC2Role \
+  --policy-arn arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+
+# S3 バケットへの読み取りアクセス（S3 Files の読み取り最適化に必要）
+aws iam put-role-policy \
+  --role-name S3FilesVerifyEC2Role \
+  --policy-name S3FilesVerifyEC2S3Policy \
+  --policy-document '{
+    "Version": "2012-10-17",
+    "Statement": [
+      {"Effect": "Allow", "Action": ["s3:GetObject", "s3:GetObjectVersion"], "Resource": "arn:aws:s3:::'$BUCKET'/*"},
+      {"Effect": "Allow", "Action": "s3:ListBucket", "Resource": "arn:aws:s3:::'$BUCKET'"}
+    ]
+  }'
+
+# インスタンスプロファイルの作成
+aws iam create-instance-profile --instance-profile-name S3FilesVerifyEC2Profile
+aws iam add-role-to-instance-profile \
+  --instance-profile-name S3FilesVerifyEC2Profile \
+  --role-name S3FilesVerifyEC2Role
+```
+
+### セキュリティグループの作成
+
+```bash title="Terminal"
+VPC_ID=$(aws ec2 describe-vpcs --filters Name=isDefault,Values=true \
+  --query 'Vpcs[0].VpcId' --output text --region $REGION)
+
+# EC2 用セキュリティグループ
+EC2_SG=$(aws ec2 create-security-group \
+  --group-name s3files-verify-ec2-sg \
+  --description "S3 Files verify - EC2" \
+  --vpc-id $VPC_ID --region $REGION \
+  --query 'GroupId' --output text)
+
+# マウントターゲット用セキュリティグループ
+MT_SG=$(aws ec2 create-security-group \
+  --group-name s3files-verify-mt-sg \
+  --description "S3 Files verify - mount target" \
+  --vpc-id $VPC_ID --region $REGION \
+  --query 'GroupId' --output text)
+
+# NFS ポート（TCP 2049）の許可
+aws ec2 authorize-security-group-egress --group-id $EC2_SG --region $REGION \
+  --ip-permissions "IpProtocol=tcp,FromPort=2049,ToPort=2049,UserIdGroupPairs=[{GroupId=$MT_SG}]"
+aws ec2 authorize-security-group-ingress --group-id $MT_SG --region $REGION \
+  --ip-permissions "IpProtocol=tcp,FromPort=2049,ToPort=2049,UserIdGroupPairs=[{GroupId=$EC2_SG}]"
+
+echo "EC2_SG=$EC2_SG  MT_SG=$MT_SG"
+```
+
+### EC2 インスタンスの起動
+
+```bash title="Terminal"
+SUBNET_ID=$(aws ec2 describe-subnets \
+  --filters Name=vpc-id,Values=$VPC_ID Name=availability-zone,Values=${REGION}a \
+  --query 'Subnets[0].SubnetId' --output text --region $REGION)
+
+AMI_ID=$(aws ssm get-parameters-by-path \
+  --path /aws/service/ami-amazon-linux-latest \
+  --query "Parameters[?contains(Name,'al2023-ami-kernel-default-x86_64')].Value" \
+  --output text --region $REGION)
+
+INSTANCE_ID=$(aws ec2 run-instances \
+  --image-id $AMI_ID \
+  --instance-type t3.medium \
+  --subnet-id $SUBNET_ID \
+  --security-group-ids $EC2_SG \
+  --iam-instance-profile Name=S3FilesVerifyEC2Profile \
+  --metadata-options HttpTokens=required \
+  --tag-specifications 'ResourceType=instance,Tags=[{Key=Name,Value=s3files-verify}]' \
+  --query 'Instances[0].InstanceId' --output text --region $REGION)
+
+aws ec2 wait instance-running --instance-ids $INSTANCE_ID --region $REGION
+echo "INSTANCE_ID=$INSTANCE_ID"
+```
+
+### efs-utils v3.0.0 のインストール
+
+S3 Files のマウントには `amazon-efs-utils` **v3.0.0 以上**が必要である。EC2 に SSM で接続し、公式インストーラースクリプトを実行する:
+
+```bash title="Terminal (EC2 上で実行)"
+curl -s https://amazon-efs-utils.aws.com/efs-utils-installer.sh | sudo sh -s -- --install
+```
+
+```text title="Output"
+Installed:
+  amazon-efs-utils-3.0.0-1.amzn2023.x86_64
+```
+
+**注意:** Amazon Linux 2023 の標準リポジトリには v2.4.2 が含まれている。`sudo yum install amazon-efs-utils` で先に v2.x をインストールしてしまうと、インストーラースクリプトがアップグレードしない場合がある。**efs-utils 未インストールの状態でインストーラースクリプトを実行する**のが確実である。
+
+</details>
+
+## 検証 1: ファイルシステム作成・マウント・基本操作
+
+### ファイルシステムの作成
+
+セットアップで定義した変数（`$BUCKET`, `$REGION`, `$ACCOUNT_ID`）を引き続き使用する。
+
+```bash title="Terminal"
+FS_ID=$(aws s3files create-file-system \
+  --region $REGION \
+  --bucket arn:aws:s3:::$BUCKET \
+  --role-arn arn:aws:iam::${ACCOUNT_ID}:role/S3FilesVerifyFSRole \
+  --query 'fileSystemId' --output text)
+echo "FS_ID=$FS_ID"
+```
+
+```text title="Output (筆者の環境)"
+FS_ID=fs-0cb138350950ff4e5
+```
+
+ステータスを確認すると、**即座に `available`** になった。ファイルシステム自体の作成は事実上ゼロ秒である。
+
+### マウントターゲットの作成
+
+```bash title="Terminal"
+MT_ID=$(aws s3files create-mount-target \
+  --region $REGION \
+  --file-system-id $FS_ID \
+  --subnet-id $SUBNET_ID \
+  --security-groups $MT_SG \
+  --query 'mountTargetId' --output text)
+echo "MT_ID=$MT_ID"
+
+# available になるまで待機
+while true; do
+  STATUS=$(aws s3files list-mount-targets --region $REGION \
+    --file-system-id $FS_ID --query 'mountTargets[0].status' --output text)
+  echo "$(date +%T) - $STATUS"
+  [ "$STATUS" = "available" ] && break
+  sleep 15
+done
+```
+
+マウントターゲットは `creating` → `available` まで**約3分40秒**かかった。ドキュメントでは最大約5分とされており、3分40秒は範囲内である。
+
+### マウントと基本操作
+
+```bash title="Terminal (EC2 上で実行)"
+sudo mkdir -p /mnt/s3files
+sudo mount -t s3files $FS_ID:/ /mnt/s3files
+```
+
+```bash title="Terminal (基本操作)"
+echo 'Hello S3 Files!' > /mnt/s3files/hello.txt
+cat /mnt/s3files/hello.txt
+mkdir -p /mnt/s3files/test-dir
+cp /mnt/s3files/hello.txt /mnt/s3files/test-dir/
+ls -la /mnt/s3files/
+```
+
+```text title="Output"
+Hello S3 Files!
+total 16
+drwxr-xr-x. 4 root root 10240 Apr  8 01:48 .
+drwxr-xr-x. 3 root root    21 Apr  8 01:48 ..
+drwx------. 2 root root 10240 Apr  8 00:01 .s3files-lost+found-fs-0cb138350950ff4e5
+-rw-r--r--. 1 root root    16 Apr  8 01:48 hello.txt
+drwxr-xr-x. 2 root root 10240 Apr  8 01:48 test-dir
+```
+
+`df -h` で確認すると、ファイルシステムサイズは **8.0E（8 エクサバイト）** と表示される。S3 Files は事実上無制限の容量を提供するため、このような大きな値が表示される。
+
+`.s3files-lost+found-*` ディレクトリが自動作成されている。これは S3 バケットとファイルシステム間で競合が発生した場合に、ファイルシステム側の変更が退避される場所である。
+
+### S3 バケットへの同期確認
+
+ファイルシステム上で作成したファイルが S3 バケットに反映されているかを確認する。エクスポートには約60秒かかるため、少し待ってから確認する。
+
+```bash title="Terminal"
+aws s3 ls s3://$BUCKET/ --region $REGION
+```
+
+```text title="Output"
+2026-04-08 01:50:00         16 hello.txt
+2026-04-08 01:50:04          0 test-dir/
+2026-04-08 01:50:11         16 test-dir/hello.txt
+```
+
+ファイルシステム上で作成した `hello.txt` と `test-dir/` が S3 バケットにオブジェクトとして反映されている。ディレクトリは 0 バイトのオブジェクト（プレフィックス）として表現される。この同期がどの程度の時間で行われるかを、次の検証 2 で詳しく計測する。
+
+## 検証 2: 双方向同期の遅延計測
+
+S3 Files の最も重要な特性は双方向同期である。ドキュメントでは「エクスポートは約60秒のバッチウィンドウ後」「インポートは通常数秒」とされている。実測する。
+
+### エクスポート（FS → S3）
+
+ファイルシステム上でファイルを作成し、S3 バケットに反映されるまでの時間を計測した。
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">エクスポート遅延の計測スクリプト</summary>
+
+以下を EC2 上で実行する。`BUCKET` は自身のバケット名に置き換えること。
+
+```bash title="Terminal (EC2 上で実行)"
+BUCKET="<bucket-name>"
+REGION="ap-northeast-1"
+
+for SIZE_LABEL in "1k:1024:1" "1m:1M:1" "10m:1M:10"; do
+  IFS=: read -r NAME BS COUNT <<< "$SIZE_LABEL"
+  FILE="export-${NAME}.bin"
+  dd if=/dev/urandom of=/mnt/s3files/$FILE bs=$BS count=$COUNT 2>/dev/null
+  WRITE_TIME=$(date +%s)
+  echo "$FILE written at $(date -d @$WRITE_TIME '+%H:%M:%S')"
+  while true; do
+    aws s3api head-object --bucket $BUCKET --key $FILE --region $REGION >/dev/null 2>&1 && break
+    sleep 5
+  done
+  SYNC_TIME=$(date +%s)
+  echo "$FILE synced to S3 at $(date -d @$SYNC_TIME '+%H:%M:%S') ($((SYNC_TIME - WRITE_TIME))s)"
+done
+```
+
+</details>
+
+| ファイルサイズ | エクスポート遅延 |
+|---|---|
+| 1KB | 65秒 |
+| 1MB | 70秒 |
+| 10MB | 64秒 |
+
+**ファイルサイズによる差はほぼない。** ドキュメント通り、S3 Files は書き込み後約60秒間変更を集約し、1回の S3 PUT リクエストとしてエクスポートする。この設計により、頻繁な書き込みでも S3 リクエストコストが抑えられる。
+
+### インポート（S3 → FS）
+
+S3 API でオブジェクトをアップロードし、ファイルシステム上で `ls` で確認できるまでの時間を計測した。
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">インポート遅延の計測スクリプト</summary>
+
+```bash title="Terminal (EC2 上で実行)"
+BUCKET="<bucket-name>"
+REGION="ap-northeast-1"
+
+for SIZE_LABEL in "1k:1024:1" "1m:1M:1" "10m:1M:10"; do
+  IFS=: read -r NAME BS COUNT <<< "$SIZE_LABEL"
+  FILE="import-${NAME}.bin"
+  dd if=/dev/urandom of=/tmp/$FILE bs=$BS count=$COUNT 2>/dev/null
+  aws s3 cp /tmp/$FILE s3://$BUCKET/$FILE --region $REGION --quiet
+  UPLOAD_TIME=$(date +%s)
+  echo "$FILE uploaded at $(date -d @$UPLOAD_TIME '+%H:%M:%S')"
+  while true; do
+    ls /mnt/s3files/$FILE >/dev/null 2>&1 && break
+    sleep 2
+  done
+  SYNC_TIME=$(date +%s)
+  echo "$FILE visible in FS at $(date -d @$SYNC_TIME '+%H:%M:%S') ($((SYNC_TIME - UPLOAD_TIME))s)"
+done
+```
+
+</details>
+
+| ファイルサイズ | インポート遅延 |
+|---|---|
+| 1KB | 60秒 |
+| 1MB | 30秒 |
+| 10MB | 30秒 |
+
+1KB ファイルのインポートが 60秒と、1MB/10MB の 30秒より遅い結果になった。S3 Files は S3 Event Notifications を使用して S3 バケットの変更を検知するため、イベント配信のタイミングに依存する。ドキュメントの「通常数秒だが、1分以上かかることもある」という記述と一致する。
+
+### 同期遅延のまとめ
+
+| 方向 | 遅延 | 備考 |
+|---|---|---|
+| エクスポート（FS→S3） | 64〜70秒 | 約60秒のバッチウィンドウ + 同期処理 |
+| インポート（S3→FS） | 30〜60秒 | S3 Event Notifications 経由、タイミングにばらつきあり |
+
+**ニアリアルタイムの同期を期待するワークロードには向かない。** ファイルシステム上での変更が S3 に反映されるまで最低60秒、S3 への直接アップロードがファイルシステムに見えるまで30〜60秒かかる。ログ収集やバッチ処理のように、数分の遅延が許容されるワークロードに適している。
+
+## 検証 3: ファイルサイズで変わる読み取り性能 — キャッシュ効果の実測
+
+S3 Files は2層の読み取りアーキテクチャを持つ。ファイルシステム内部には「高性能ストレージ」と呼ばれる低レイテンシのストレージ層があり、アクティブに使用されるファイルのデータがここにキャッシュされる。デフォルトでは 128KB 以下のファイルが高性能ストレージに自動インポートされ、低レイテンシで読み取れる。一方、1MB 以上の読み取りは S3 バケットから直接配信され、高スループットを実現する。
+
+この2層ルーティングが実際のレイテンシにどう影響するかを計測した。S3 API で各サイズのファイルをアップロードし、検証 2 で確認したインポート遅延（30〜60秒）を考慮して 30 秒待機した後、コールド読み取りとウォーム読み取りのレイテンシを比較した。
+
+- **コールド読み取り**: OS のページキャッシュを `drop_caches` でクリアしてから読み取り。NFS クライアントキャッシュや OS キャッシュの影響を排除し、S3 Files の読み取りルーティングの性能を計測する
+- **ウォーム読み取り**: コールド読み取りの直後にキャッシュクリアなしで再度読み取り。OS のページキャッシュや NFS クライアントキャッシュの効果を含む、実運用に近い性能を計測する
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">読み取りパフォーマンスの計測スクリプト</summary>
+
+```bash title="Terminal (EC2 上で実行)"
+BUCKET="<bucket-name>"
+REGION="ap-northeast-1"
+
+# テストファイルを S3 API でアップロード
+dd if=/dev/urandom of=/tmp/read-4k.bin bs=4096 count=1 2>/dev/null
+dd if=/dev/urandom of=/tmp/read-128k.bin bs=131072 count=1 2>/dev/null
+dd if=/dev/urandom of=/tmp/read-1m.bin bs=1M count=1 2>/dev/null
+dd if=/dev/urandom of=/tmp/read-10m.bin bs=1M count=10 2>/dev/null
+for f in read-4k.bin read-128k.bin read-1m.bin read-10m.bin; do
+  aws s3 cp /tmp/$f s3://$BUCKET/$f --region $REGION --quiet
+done
+echo "Waiting 30s for import..."
+sleep 30
+
+# コールド読み取り（ページキャッシュをドロップ）
+echo "--- Cold reads ---"
+for f in read-4k.bin read-128k.bin read-1m.bin read-10m.bin; do
+  sync && echo 3 | sudo tee /proc/sys/vm/drop_caches >/dev/null
+  START=$(date +%s%N)
+  cat /mnt/s3files/$f > /dev/null
+  END=$(date +%s%N)
+  echo "Cold $f: $(( (END - START) / 1000000 ))ms"
+done
+
+# ウォーム読み取り（キャッシュあり）
+echo "--- Warm reads ---"
+for f in read-4k.bin read-128k.bin read-1m.bin read-10m.bin; do
+  START=$(date +%s%N)
+  cat /mnt/s3files/$f > /dev/null
+  END=$(date +%s%N)
+  echo "Warm $f: $(( (END - START) / 1000000 ))ms"
+done
+```
+
+</details>
+
+| ファイルサイズ | コールド読み取り | ウォーム読み取り | 改善率 |
+|---|---|---|---|
+| 4KB | 13ms | 6ms | 54% |
+| 128KB | 12ms | 8ms | 33% |
+| 1MB | 144ms | 110ms | 24% |
+| 10MB | 220ms | 5ms | 98% |
+
+### 結果の分析
+
+**小ファイル（4KB, 128KB）** はコールド・ウォームともに低レイテンシで、高性能ストレージ層からの読み取りによるものと考えられる。設定ファイルや小さなデータファイルの読み書きには十分な性能である。
+
+**1MB** はコールド 144ms → ウォーム 110ms と、改善幅が小さい。ドキュメントの「1MB以上の読み取りは S3 から直接配信」という仕様と一致する。S3 直接配信はスループット最適化であり、レイテンシの改善は限定的である。
+
+**10MB** はコールド 220ms → ウォーム 5ms と劇的に改善した。コールド読み取りでは OS のページキャッシュをドロップしてから計測しているが、ウォーム読み取りではドロップしていない。5ms という値は、NFS クライアントキャッシュまたは OS のページキャッシュから返された結果と考えられる。S3 Files の高性能ストレージ層の効果というよりも、Linux のキャッシュ階層の効果である可能性が高い。
+
+## 制約と注意点
+
+検証を通じて確認した制約と、ドキュメントに記載されている主な制限事項をまとめる。
+
+- **Glacier ストレージクラス非対応** — S3 Glacier Flexible Retrieval / Deep Archive のオブジェクトはファイルシステムからアクセスできない。事前に復元が必要
+- **rename / move のコスト** — S3 にはディレクトリの概念がないため、ディレクトリの rename はすべてのオブジェクトのコピー + 削除として実行される。10万ファイルのディレクトリ rename は S3 バケットへの反映に数分かかる
+- **カスタムメタデータの非保持** — ファイルシステム経由で変更したオブジェクトのカスタム S3 メタデータは保持されない
+- **efs-utils v3.0.0 のインストール** — Amazon Linux 2023 の標準リポジトリには v2.x しかない。公式インストーラースクリプトを使用し、v2.x を先にインストールしないこと
+- **VPC あたり1つ** — 1つのファイルシステムは1つの VPC にのみ接続できる
+- **NFS close-to-open 一貫性** — 強い一貫性（read-after-write）はファイル単位で保証されるが、ディレクトリリスティングの反映にはインポート遅延がある
+
+## まとめ — S3 Files を選ぶべき場面
+
+検証の結果、S3 Files は以下の特性を持つことが確認できた:
+
+- **セットアップは簡単** — ファイルシステム作成は即座、マウントターゲット作成は約4分。CLI で完結する
+- **エクスポート遅延は約65秒で安定** — ファイルサイズによらず一定。60秒のバッチウィンドウが支配的
+- **インポート遅延は30〜60秒** — S3 Event Notifications 経由のため、ばらつきがある
+- **小ファイルの読み取りは低レイテンシ** — 4KB で 6ms（ウォーム）。設定ファイルや小さなデータの読み書きに適する
+
+これらの実測データを踏まえた選択判断:
+
+- **S3 にデータがあり、複数コンピュートから読み書きしたい** — S3 Files が最適。AI エージェントの共有ステート、ML データ前処理、ファイルベースツールからの S3 データアクセスに向く
+- **S3 にデータがあり、読み取り中心で高スループットが必要** — Mountpoint for S3 が適切。既存ファイルの上書きが不要なら、FUSE ベースで同期遅延もない
+- **S3 にデータがなく、汎用の共有ファイルシステムが必要** — Amazon EFS を選択
+- **HPC / GPU クラスタで大規模並列 I/O が必要** — FSx for Lustre が最適
+
+**同期遅延が許容できるかが最大の判断ポイント** — エクスポート約65秒・インポート30〜60秒の遅延は、リアルタイム性が求められるワークロードには制約となる。一方、バッチ処理やデータ分析のように数分の遅延が許容される場面では、S3 Files は「データ移行なしで S3 バケットをそのままファイルシステムとして使える」という大きな利点を提供する。
+
+## クリーンアップ
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">リソース削除コマンド</summary>
+
+作成と逆順で削除する。セットアップで定義した変数を使用する。
+
+```bash title="Terminal"
+# EC2 インスタンスの削除
+aws ec2 terminate-instances --instance-ids $INSTANCE_ID --region $REGION
+
+# マウントターゲットの削除
+aws s3files delete-mount-target \
+  --region $REGION \
+  --mount-target-id $MT_ID
+
+# ファイルシステムの削除
+aws s3files delete-file-system \
+  --region $REGION \
+  --file-system-id $FS_ID
+
+# セキュリティグループの削除（EC2 終了完了後に実行）
+aws ec2 wait instance-terminated --instance-ids $INSTANCE_ID --region $REGION
+aws ec2 delete-security-group --group-id $EC2_SG --region $REGION
+aws ec2 delete-security-group --group-id $MT_SG --region $REGION
+
+# IAM リソースの削除
+aws iam remove-role-from-instance-profile \
+  --instance-profile-name S3FilesVerifyEC2Profile \
+  --role-name S3FilesVerifyEC2Role
+aws iam delete-instance-profile --instance-profile-name S3FilesVerifyEC2Profile
+aws iam detach-role-policy --role-name S3FilesVerifyEC2Role \
+  --policy-arn arn:aws:iam::aws:policy/AmazonS3FilesClientFullAccess
+aws iam detach-role-policy --role-name S3FilesVerifyEC2Role \
+  --policy-arn arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+aws iam delete-role-policy --role-name S3FilesVerifyEC2Role --policy-name S3FilesVerifyEC2S3Policy
+aws iam delete-role --role-name S3FilesVerifyEC2Role
+aws iam delete-role-policy --role-name S3FilesVerifyFSRole --policy-name S3FilesVerifyFSPolicy
+aws iam delete-role --role-name S3FilesVerifyFSRole
+
+# S3 バケットの削除（バージョニング有効のため全バージョン削除が必要）
+aws s3api list-object-versions --bucket $BUCKET --region $REGION \
+  --query '{Objects: [].{Key:Key,VersionId:VersionId}}' --output json | \
+  aws s3api delete-objects --bucket $BUCKET --region $REGION --delete file:///dev/stdin
+aws s3api delete-bucket --bucket $BUCKET --region $REGION
+```
+
+</details>
