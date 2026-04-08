@@ -1,0 +1,31 @@
+---
+title: "amazon-efs-utils v2.x がインストール済みだと公式インストーラーで v3.0.0 にアップグレードされない"
+description: "S3 Files に必要な amazon-efs-utils v3.0.0 を公式インストーラースクリプトでインストールしようとしたが、v2.x が既に入っていると v3.0.0 にならなかった。未インストール状態で実行すれば解決する。"
+date: "2026-04-08"
+published: true
+tags: ["aws", "s3-files", "efs", "amazon-linux"]
+---
+
+S3 Files のマウントには `amazon-efs-utils` v3.0.0 以上が必要だが、Amazon Linux 2023 の標準リポジトリには v2.4.2 しかない。公式ドキュメントに従い[インストーラースクリプト](https://docs.aws.amazon.com/AmazonS3/latest/userguide/s3-files-prereq-policies.html)を実行すれば v3.0.0 が入る——はずだった。
+
+先に `sudo yum install amazon-efs-utils` で v2.4.2 をインストールしていた EC2 インスタンスでインストーラーを実行したところ、v2.4.2 のまま変わらなかった。`mount -t s3files` は `unknown filesystem type 's3files'` で失敗する。
+
+```bash title="Terminal"
+# v2.x がインストール済みの状態
+curl -s https://amazon-efs-utils.aws.com/efs-utils-installer.sh | sudo sh -s -- --install
+rpm -q amazon-efs-utils
+# → amazon-efs-utils-2.4.2-1.amzn2023.x86_64  ← 変わらない
+```
+
+efs-utils が未インストールの新しいインスタンスで同じスクリプトを実行したら、v3.0.0 が正常にインストールされた。
+
+```bash title="Terminal"
+# 未インストール状態で実行
+curl -s https://amazon-efs-utils.aws.com/efs-utils-installer.sh | sudo sh -s -- --install
+rpm -q amazon-efs-utils
+# → amazon-efs-utils-3.0.0-1.amzn2023.x86_64  ← OK
+```
+
+インストーラースクリプトは独自の yum リポジトリ（`efs-utils`）を追加して v3.0.0 を提供するが、標準リポジトリの `amazonlinux` から v2.x が既にインストールされていると、アップグレードではなくスキップされるようだ。S3 Files を使う場合は、**efs-utils 未インストールの状態でインストーラースクリプトを実行する**のが確実である。
+
+検証の詳細は [S3 Files を実機検証](/ja/blog/2026/04/08/s3-files-verification) を参照。

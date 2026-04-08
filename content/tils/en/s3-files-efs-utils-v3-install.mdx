@@ -1,0 +1,31 @@
+---
+title: "amazon-efs-utils v2.x blocks the official installer from upgrading to v3.0.0"
+description: "The official efs-utils installer script doesn't upgrade to v3.0.0 when v2.x is already installed from the Amazon Linux 2023 repo. Run the installer on a fresh instance without efs-utils pre-installed."
+date: "2026-04-08"
+published: true
+tags: ["aws", "s3-files", "efs", "amazon-linux"]
+---
+
+S3 Files requires `amazon-efs-utils` v3.0.0+, but the standard Amazon Linux 2023 repo only has v2.4.2. The [official installer script](https://docs.aws.amazon.com/AmazonS3/latest/userguide/s3-files-prereq-policies.html) should install v3.0.0 — but it didn't work when v2.x was already present.
+
+On an EC2 instance where I'd previously run `sudo yum install amazon-efs-utils` (v2.4.2), the installer script left v2.4.2 in place. `mount -t s3files` failed with `unknown filesystem type 's3files'`.
+
+```bash title="Terminal"
+# With v2.x already installed
+curl -s https://amazon-efs-utils.aws.com/efs-utils-installer.sh | sudo sh -s -- --install
+rpm -q amazon-efs-utils
+# → amazon-efs-utils-2.4.2-1.amzn2023.x86_64  ← unchanged
+```
+
+Running the same script on a fresh instance without efs-utils installed worked fine.
+
+```bash title="Terminal"
+# On a fresh instance
+curl -s https://amazon-efs-utils.aws.com/efs-utils-installer.sh | sudo sh -s -- --install
+rpm -q amazon-efs-utils
+# → amazon-efs-utils-3.0.0-1.amzn2023.x86_64  ← OK
+```
+
+The installer adds a custom `efs-utils` yum repo that provides v3.0.0, but when v2.x from the `amazonlinux` repo is already installed, it appears to skip rather than upgrade. If you need S3 Files, **run the installer script on a fresh instance without efs-utils pre-installed**.
+
+See [Hands-on with S3 Files](/en/blog/2026/04/08/s3-files-verification) for the full verification.
