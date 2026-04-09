@@ -22,11 +22,11 @@ tags: ["aws", "eks", "kubernetes", "auto-scaling", "warm-pool", "performance"]
 
 | poolState | 状態 | 維持コスト（t3.medium/月） | スケールアウト時の動作 |
 | --- | --- | --- | --- |
-| Running | 起動中 | 〜$30（インスタンス + EBS） | そのままクラスターに参加 |
-| Stopped | 停止中 | 〜$8（EBS のみ） | 起動 → クラスターに参加 |
-| Hibernated | 休止中 | 〜$8（EBS + RAM） | RAM 復元 → クラスターに参加 |
+| Running | 起動中 | 〜$32（インスタンス + EBS） | そのままクラスターに参加 |
+| Stopped | 停止中 | 〜$2（EBS のみ） | 起動 → クラスターに参加 |
+| Hibernated | 休止中 | 〜$2（EBS + RAM） | RAM 復元 → クラスターに参加 |
 
-※ コスト概算は t3.medium の ap-northeast-1 価格に基づく。インスタンスタイプにより異なる。
+※ コスト概算は t3.medium（gp3 20GB）の ap-northeast-1 価格に基づく。インスタンスタイプやディスクサイズにより異なる。
 
 前提条件:
 
@@ -80,9 +80,17 @@ aws iam attach-role-policy --role-name eks-warmpool-verify-node-role \
 
 3つのノードグループを作成する。コールドスタート用（ウォームプールなし）、Stopped ウォームプール用、Running ウォームプール用。
 
+```bash title="Terminal (変数の準備)"
+# アカウント ID を取得
+ACCOUNT_ID=$(aws sts get-caller-identity --query 'Account' --output text)
+NODE_ROLE="arn:aws:iam::${ACCOUNT_ID}:role/eks-warmpool-verify-node-role"
+
+# クラスターのプライベートサブネットを取得
+SUBNETS=$(aws eks describe-cluster --name $CLUSTER --region $REGION \
+  --query 'cluster.resourcesVpcConfig.subnetIds' --output text)
+```
+
 ```bash title="Terminal (ノードグループ作成)"
-NODE_ROLE="arn:aws:iam::<ACCOUNT_ID>:role/eks-warmpool-verify-node-role"
-SUBNETS="subnet-xxx subnet-yyy subnet-zzz"  # プライベートサブネット
 
 # 1. コールドスタート（ウォームプールなし）
 aws eks create-nodegroup \
@@ -114,7 +122,7 @@ aws eks create-nodegroup \
 ウォームプールの設定パラメータ:
 
 - `enabled=true` — ウォームプールを有効化
-- `maxGroupPreparedCapacity=4` — ウォームプール + ASG の合計インスタンス上限
+- `maxGroupPreparedCapacity=4` — ウォームプール + ASG の合計インスタンス上限。desiredSize=2 の場合、ウォームプールには 4-2=2 台が配置される
 - `minSize=1` — ウォームプールの最小インスタンス数
 - `poolState=Stopped|Running` — ウォームプール内のインスタンス状態
 - `reuseOnScaleIn=true` — スケールイン時にインスタンスをウォームプールに返却
@@ -148,6 +156,29 @@ aws autoscaling describe-warm-pool --auto-scaling-group-name $ASG --region $REGI
 
 3パターンのスケールアウト時間を計測する。各パターンで `desiredSize` を 2→3 に変更し、新ノードが `kubectl get nodes` で Ready になるまでの経過時間を記録した。
 
+以下のポーリングスクリプトで計測を行った。`NODEGROUP` を各ノードグループ名に置き換えて使用する。
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">計測用ポーリングスクリプト</summary>
+
+```bash title="Terminal (計測スクリプト)"
+NODEGROUP="ng-cold-start"  # ng-warm-stopped / ng-warm-running に置き換え
+START_TIME=$(date +%s)
+
+while true; do
+  READY=$(kubectl get nodes --selector="eks.amazonaws.com/nodegroup=$NODEGROUP" \
+    --no-headers 2>/dev/null | grep " Ready " | wc -l)
+  TOTAL=$(kubectl get nodes --selector="eks.amazonaws.com/nodegroup=$NODEGROUP" \
+    --no-headers 2>/dev/null | wc -l)
+  ELAPSED=$(( $(date +%s) - START_TIME ))
+  echo "$(date +%T) [${ELAPSED}s] Nodes: $TOTAL total, $READY ready"
+  [ "$READY" -ge 3 ] && echo "=== New node Ready! ===" && break
+  sleep 5
+done
+```
+
+</details>
+
 ### (a) コールドスタート（ウォームプールなし）
 
 ```bash title="Terminal"
@@ -166,7 +197,7 @@ aws eks update-nodegroup-config \
 17:31:26 [62s] Nodes: 3 total, 3 ready  ← Ready
 ```
 
-**結果: 62秒**。EC2 インスタンスの起動（約40秒）+ EKS ブートストラップ（kubelet 起動、CNI 設定、ノード登録）に約20秒。
+**結果: 62秒**。ログの内訳を見ると、42秒でノードが出現（EC2 インスタンスの起動完了 + kubelet 起動開始）し、そこから20秒で Ready になった（CNI 設定、ノード登録完了）。
 
 ### (b) Stopped ウォームプール
 
@@ -185,7 +216,7 @@ aws eks update-nodegroup-config \
 17:32:25 [48s] Nodes: 3 total, 3 ready  ← Ready
 ```
 
-**結果: 48秒**。コールドスタートより14秒（23%）短縮。Stopped インスタンスの起動（OS は初期化済みなので再起動のみ）が速い分だけ短縮されている。
+**結果: 48秒**。コールドスタートより14秒（23%）短縮。ウォームプールのインスタンスは OS 初期化済みの状態で停止しているため、コールドスタートのようなフル起動シーケンスが不要になり、その分が短縮に寄与していると考えられる。
 
 ### (c) Running ウォームプール
 
@@ -202,11 +233,13 @@ aws eks update-nodegroup-config \
 17:33:04 [28s] Nodes: 3 total, 3 ready  ← Ready
 ```
 
-**結果: 28秒**。コールドスタートより34秒（55%）短縮。インスタンスは既に起動済みなので、EKS ブートストラップ（クラスター参加 + CNI 設定）のみで Ready になる。
+**結果: 28秒**。コールドスタートより34秒（55%）短縮。Running インスタンスは既に起動済みのため、EC2 起動と OS 初期化のステップをスキップできる。残りの28秒は主に EKS ブートストラップ（クラスター参加 + CNI 設定）に費やされていると考えられる。
 
 ## 検証 2: reuseOnScaleIn の動作と再スケールアウト速度
 
 検証 1 で Stopped ウォームプールのベースライン時間（48秒）を計測した。検証 2 では `reuseOnScaleIn=true` の環境でスケールイン→再スケールアウトのサイクルを確認し、再利用インスタンスの速度を比較する。
+
+検証 1 で ng-warm-stopped の desiredSize は 3 になっている。ここから 3→2 にスケールインする。
 
 ### スケールイン: インスタンスのウォームプール返却
 
@@ -219,7 +252,22 @@ aws eks update-nodegroup-config \
   --region ap-northeast-1
 ```
 
-スケールインの過程を観察すると、以下のステップで進行した。
+スケールインの過程を観察すると、以下のステップで進行した。ウォームプールの状態遷移は以下のコマンドで確認できる。
+
+```bash title="Terminal (ウォームプール状態の観察)"
+# ASG 名を取得（セットアップ時に取得済みの場合は省略）
+ASG=$(aws eks describe-nodegroup --cluster-name eks-sandbox --nodegroup-name ng-warm-stopped \
+  --region ap-northeast-1 --query 'nodegroup.resources.autoScalingGroups[0].name' --output text)
+
+# ノード状態とウォームプール状態を定期的に確認
+while true; do
+  echo "--- $(date +%T) ---"
+  kubectl get nodes --selector='eks.amazonaws.com/nodegroup=ng-warm-stopped' --no-headers
+  aws autoscaling describe-warm-pool --auto-scaling-group-name $ASG --region ap-northeast-1 \
+    --query 'Instances[].{Id:InstanceId,State:LifecycleState}' --output table
+  sleep 15
+done
+```
 
 ```text title="Output (スケールイン過程)"
 17:33:43 ノード: Ready,SchedulingDisabled  ← ドレイン開始
@@ -228,7 +276,7 @@ aws eks update-nodegroup-config \
 17:49:40 ウォームプール: Warmed:Stopped  ← 返却完了
 ```
 
-**スケールイン開始から返却完了まで約16分**。これは EKS が ASG に自動設定する `Terminate-LC-Hook`（ハートビートタイムアウト 1800秒 = 30分）によるドレイン待ちが原因である。ノードのドレインが完了してもライフサイクルフックの完了通知を待つため、実際のドレイン時間より長くなる。
+**スケールイン開始から返却完了まで約16分**。EKS は ASG に `Terminate-LC-Hook`（ハートビートタイムアウト 1800秒 = 30分）を自動設定しており、ノードのドレイン自体は約1分で完了したにもかかわらず、ライフサイクルフックの処理完了まで待機が発生した。なお、ドキュメントでは「EKS API 経由でウォームプールを設定し、EC2 Auto Scaling API で直接変更しないこと」と記載されているため、このタイムアウト値をユーザーが調整することは推奨されていない。
 
 ```bash title="Terminal (ライフサイクルフック確認)"
 aws autoscaling describe-lifecycle-hooks \
@@ -276,13 +324,28 @@ aws eks update-nodegroup-config \
 17:50:28 [35s] Nodes: 3 total, 3 ready  ← Ready
 ```
 
-**結果: 35秒**。初回の Stopped ウォームプール（48秒）より13秒速い。再利用インスタンスは OS の初期化だけでなく EKS 関連の設定もキャッシュされているため、ブートストラップが高速化されている。
+**結果: 35秒**。初回の Stopped ウォームプール（48秒）より13秒速い。初回はインスタンス起動後に kubelet がクラスターに初めて参加するため、TLS ブートストラップ（証明書発行）やノードオブジェクトの新規登録が必要になる。再利用インスタンスではこれらがキャッシュされており、クラスター参加が高速化されたと考えられる。
 
 ## 検証 3: Pending Pod 起因のスケールアウト — Pod Running までの時間
 
 検証 1-2 は手動で `desiredSize` を変更した。検証 3 では、実運用に近いシナリオとして Pending Pod が存在する状態でスケールアウトし、Pod が Running になるまでの時間を計測する。
 
+検証 2 の再スケールアウトで ng-warm-stopped の desiredSize は 3 になっている。まず 2 に戻す。
+
+```bash title="Terminal (desiredSize を 2 に戻す)"
+aws eks update-nodegroup-config \
+  --cluster-name eks-sandbox --nodegroup-name ng-warm-stopped \
+  --scaling-config minSize=2,maxSize=5,desiredSize=2 \
+  --region ap-northeast-1
+# ウォームプールのインスタンスが Warmed:Stopped に戻るまで待つ（約16分）
+```
+
+desiredSize が 2 に戻り、ウォームプールに Stopped インスタンスが2つある状態で検証を開始する。
+
 まず、既存の2ノードをリソース要求の大きい Pod で埋め、3つ目の Pod を Pending にした。
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">Pod マニフェスト（filler-pod × 2 + pending-pod × 1）</summary>
 
 ```bash title="Terminal (Pod 作成)"
 # 既存ノードを埋める Pod × 2 + Pending になる Pod × 1
@@ -334,6 +397,10 @@ spec:
 EOF
 ```
 
+</details>
+
+t3.medium は 2 vCPU / 4 GiB で allocatable は約 1930m CPU だが、各ノードにはシステム Pod が動作しているため、1500m CPU を要求する Pod は1ノードに1つしか配置できない。結果として filler-pod-1 のみが Running になり、filler-pod-2 と pending-pod は Pending になった。
+
 ```text title="Output (Pod 状態)"
 NAME           READY   STATUS    AGE
 filler-pod-1   1/1     Running   6s
@@ -341,7 +408,7 @@ filler-pod-2   0/1     Pending   6s
 pending-pod    0/1     Pending   6s
 ```
 
-Stopped ウォームプールから2ノードを追加するスケールアウトを実行した。
+Pending Pod が2つあるため、2ノードの追加が必要。Stopped ウォームプールから desiredSize を 2→4 に変更してスケールアウトを実行した。
 
 ```bash title="Terminal"
 aws eks update-nodegroup-config \
@@ -359,37 +426,37 @@ aws eks update-nodegroup-config \
 17:54:34 [67s] Running: 3/3  ← 全 Pod Running
 ```
 
-**結果: 67秒**（全 Pod Running まで）。内訳はノード Ready まで約48秒 + Pod スケジューリング + イメージプルに約19秒。Cluster Autoscaler を使う場合は、Pending Pod 検知→ASG desiredSize 変更のオーバーヘッド（通常 30-60秒）がさらに加わる。
+**結果: 67秒**（全 Pod Running まで）。内訳はノード Ready まで約48秒 + Pod スケジューリング + イメージプルに約19秒。Cluster Autoscaler を使う場合は、Pending Pod 検知→ASG desiredSize 変更のオーバーヘッドがさらに加わる（本記事では未計測）。
 
 ## 総合比較: poolState × スケーリング方式の組み合わせ
 
 | パターン | ノード Ready までの時間 | 維持コスト概算（1インスタンス/月） | 備考 |
 | --- | --- | --- | --- |
 | コールドスタート（ウォームプールなし） | 62秒 | $0 | ベースライン |
-| Stopped ウォームプール（初回） | 48秒（-23%） | 〜$8（EBS のみ） | OS 再起動のみ |
-| Running ウォームプール（初回） | 28秒（-55%） | 〜$30（インスタンス + EBS） | ブートストラップのみ |
-| reuseOnScaleIn 再利用（Stopped） | 35秒（-44%） | 〜$8（EBS のみ） | EKS 設定キャッシュ効果 |
-| Stopped + Pod Running まで | 67秒 | 〜$8（EBS のみ） | イメージプル含む |
+| Stopped ウォームプール（初回） | 48秒（-23%） | 〜$2（EBS のみ） | OS 再起動のみ |
+| Running ウォームプール（初回） | 28秒（-55%） | 〜$32（インスタンス + EBS） | ブートストラップのみ |
+| reuseOnScaleIn 再利用（Stopped） | 35秒（-44%） | 〜$2（EBS のみ） | 再利用による高速化（推測: ブートストラップのキャッシュ） |
+| Stopped + Pod Running まで | 67秒 | 〜$2（EBS のみ） | イメージプル含む |
 
 ### poolState 選択の判断基準
 
 計測結果から、以下の判断フレームワークを提示する。
 
 - **Running を選ぶべきケース** — スケールアウトの速度が最優先で、30秒以内にノードを追加したい場合。インスタンス課金が継続するため、ウォームプールのサイズは最小限に抑える。バースト頻度が高く、1回あたりの遅延コストが大きいワークロード向け
-- **Stopped を選ぶべきケース** — コスト効率を重視し、50秒程度のスケールアウト時間を許容できる場合。EBS 課金のみなので Running の約 1/4 のコスト。バースト頻度が低〜中程度のワークロード向け
+- **Stopped を選ぶべきケース** — コスト効率を重視し、50秒程度のスケールアウト時間を許容できる場合。EBS 課金のみなので Running の約 1/16 のコスト。バースト頻度が低〜中程度のワークロード向け
 - **reuseOnScaleIn を有効にすべきケース** — スケールイン/アウトが頻繁に発生する場合。再利用インスタンスは初回 Stopped より13秒速い。ただし、スケールイン→ウォームプール返却に約16分かかるため、短時間のバーストが連続する場合は効果が薄い
 
 ### ウォームプールを導入しないほうが良いケース
 
-- t3.medium のようなブート時間が短いインスタンスタイプでは、コールドスタートとの差が14-34秒にとどまる。カスタム AMI やユーザーデータで初期化が重いワークロードほど効果が大きい
-- ウォームプールはカスタム AMI をサポートしない（EKS 最適化 AMI のみ）。カスタム AMI を使用している場合は利用できない
+- t3.medium のようなブート時間が短いインスタンスタイプでは、コールドスタートとの差が14-34秒にとどまる。ユーザーデータで初期化が重いワークロード（大量のパッケージインストールやデータダウンロード）ほど効果が大きい
+- ウォームプールはカスタム AMI をサポートしない（EKS 最適化 AMI のみ）。カスタム AMI を使用している場合は利用できない。初期化処理はユーザーデータ（launch template）で行う必要がある
 - Bottlerocket AMI では Hibernated 状態と reuseOnScaleIn が使えない
 
 ## まとめ
 
 - **Running は速いが高い** — 28秒でノード追加できるが、インスタンス課金が継続する。速度要件が厳しいワークロードに限定して使うべき
 - **Stopped はバランスが良い** — 48秒で EBS 課金のみ。多くのワークロードではこれで十分
-- **reuseOnScaleIn は16分のドレイン待ちがボトルネック** — 再スケールアウトは35秒と速いが、ウォームプールへの返却に16分かかる。EKS が自動設定するライフサイクルフック（1800秒タイムアウト）が原因で、この値はユーザーが変更できない
+- **reuseOnScaleIn は16分のドレイン待ちがボトルネック** — 再スケールアウトは35秒と速いが、ウォームプールへの返却に16分かかった。EKS が自動設定するライフサイクルフック（1800秒タイムアウト）が関与しており、ドキュメントではこの値の手動変更は推奨されていない
 - **Pod Running までの時間はノード Ready + イメージプル** — ノードが Ready になっても Pod が Running になるまで追加で約19秒かかる。イメージのプリプルやイメージサイズの最適化も合わせて検討すべき
 
 <details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
@@ -425,7 +492,7 @@ aws iam detach-role-policy --role-name eks-warmpool-verify-node-role \
 aws iam detach-role-policy --role-name eks-warmpool-verify-node-role \
   --policy-arn arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly
 aws iam delete-role-policy --role-name eks-warmpool-verify-node-role \
-  --policy-name ClusterAutoscalerPolicy
+  --policy-name ClusterAutoscalerPolicy 2>/dev/null  # 追加した場合のみ
 aws iam delete-role --role-name eks-warmpool-verify-node-role
 ```
 
