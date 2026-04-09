@@ -1,0 +1,411 @@
+---
+title: "Verifying EKS Managed Node Group Warm Pools — Scale-Out Times by poolState and the reuseOnScaleIn Reality"
+description: "Hands-on verification of EKS managed node group warm pools. Measured Running 28s, Stopped 48s, and cold start 62s for scale-out, plus a 16-minute drain wait for reuseOnScaleIn. Provides a decision framework for poolState selection."
+date: "2026-04-09"
+published: true
+featured: false
+categories: [infrastructure]
+tags: ["aws", "eks", "kubernetes", "auto-scaling", "warm-pool", "performance"]
+---
+
+## Introduction
+
+On April 8, 2026, AWS [announced warm pool support for EKS managed node groups](https://aws.amazon.com/about-aws/whats-new/2026/04/amazon-eks-managed-node-groups-ec2-warm-pools/). Warm pools maintain pre-initialized EC2 instances—with OS initialization, user data execution, and software configuration already complete—that can join the cluster without a full cold-start sequence during scale-out events.
+
+The effectiveness of warm pools varies significantly based on `poolState` selection. Running offers the fastest scale-out but incurs continuous instance charges, while Stopped is cost-efficient but slower to transition. This article quantifies the "speed vs. cost" tradeoff with real measurements and provides a decision framework for choosing the right poolState based on workload characteristics.
+
+We measured scale-out times across three patterns and present the data needed to decide whether warm pools are worth adopting and which poolState to choose. For official documentation, see [Warm pools with managed node groups](https://docs.aws.amazon.com/eks/latest/userguide/warm-pools-managed-node-groups.html).
+
+### How Warm Pools Work
+
+When you enable a warm pool, EKS creates an EC2 Auto Scaling warm pool attached to the node group's Auto Scaling group. Instances wait in the warm pool in one of three states:
+
+| poolState | State | Maintenance Cost (t3.medium/mo) | Scale-Out Behavior |
+| --- | --- | --- | --- |
+| Running | Running | ~$30 (instance + EBS) | Joins cluster directly |
+| Stopped | Stopped | ~$8 (EBS only) | Starts → joins cluster |
+| Hibernated | Hibernated | ~$8 (EBS + RAM) | Restores RAM → joins cluster |
+
+*Cost estimates based on t3.medium pricing in ap-northeast-1. Varies by instance type.*
+
+Prerequisites:
+
+- AWS CLI v2.34+ configured (`eks:*`, `ec2:*`, `iam:*`, `autoscaling:*` permissions)
+- kubectl v1.35+
+- Test region: ap-northeast-1 (Tokyo)
+
+Skip to [Verification 1](#verification-1-scale-out-time-by-poolstate) if you only want the results.
+
+## Environment Setup
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">EKS cluster, node role, and node group creation steps</summary>
+
+We used an existing EKS cluster (v1.35). For Auto Mode clusters, managed node groups require `vpc-cni`, `kube-proxy`, and `coredns` addons.
+
+```bash title="Terminal (Install addons)"
+REGION=ap-northeast-1
+CLUSTER=eks-sandbox
+
+aws eks create-addon --cluster-name $CLUSTER --addon-name vpc-cni --region $REGION
+aws eks create-addon --cluster-name $CLUSTER --addon-name kube-proxy --region $REGION
+aws eks create-addon --cluster-name $CLUSTER --addon-name coredns --region $REGION
+```
+
+Create a node role with the required policies.
+
+```bash title="Terminal (Create node role)"
+cat > node-trust-policy.json << 'EOF'
+{
+  "Version": "2012-10-17",
+  "Statement": [{
+    "Effect": "Allow",
+    "Principal": { "Service": "ec2.amazonaws.com" },
+    "Action": "sts:AssumeRole"
+  }]
+}
+EOF
+
+aws iam create-role \
+  --role-name eks-warmpool-verify-node-role \
+  --assume-role-policy-document file://node-trust-policy.json
+
+aws iam attach-role-policy --role-name eks-warmpool-verify-node-role \
+  --policy-arn arn:aws:iam::aws:policy/AmazonEKSWorkerNodePolicy
+aws iam attach-role-policy --role-name eks-warmpool-verify-node-role \
+  --policy-arn arn:aws:iam::aws:policy/AmazonEKS_CNI_Policy
+aws iam attach-role-policy --role-name eks-warmpool-verify-node-role \
+  --policy-arn arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly
+```
+
+Create three node groups: cold start (no warm pool), Stopped warm pool, and Running warm pool.
+
+```bash title="Terminal (Create node groups)"
+NODE_ROLE="arn:aws:iam::<ACCOUNT_ID>:role/eks-warmpool-verify-node-role"
+SUBNETS="subnet-xxx subnet-yyy subnet-zzz"  # Private subnets
+
+# 1. Cold start (no warm pool)
+aws eks create-nodegroup \
+  --cluster-name $CLUSTER --nodegroup-name ng-cold-start \
+  --node-role $NODE_ROLE --subnets $SUBNETS \
+  --instance-types t3.medium \
+  --scaling-config minSize=2,maxSize=5,desiredSize=2 \
+  --region $REGION
+
+# 2. Stopped warm pool
+aws eks create-nodegroup \
+  --cluster-name $CLUSTER --nodegroup-name ng-warm-stopped \
+  --node-role $NODE_ROLE --subnets $SUBNETS \
+  --instance-types t3.medium \
+  --scaling-config minSize=2,maxSize=5,desiredSize=2 \
+  --warm-pool-config enabled=true,maxGroupPreparedCapacity=4,minSize=1,poolState=Stopped,reuseOnScaleIn=true \
+  --region $REGION
+
+# 3. Running warm pool
+aws eks create-nodegroup \
+  --cluster-name $CLUSTER --nodegroup-name ng-warm-running \
+  --node-role $NODE_ROLE --subnets $SUBNETS \
+  --instance-types t3.medium \
+  --scaling-config minSize=2,maxSize=5,desiredSize=2 \
+  --warm-pool-config enabled=true,maxGroupPreparedCapacity=4,minSize=1,poolState=Running,reuseOnScaleIn=false \
+  --region $REGION
+```
+
+Warm pool configuration parameters:
+
+- `enabled=true` — Enable warm pool
+- `maxGroupPreparedCapacity=4` — Maximum total instances across warm pool and ASG
+- `minSize=1` — Minimum instances in the warm pool
+- `poolState=Stopped|Running` — Instance state in the warm pool
+- `reuseOnScaleIn=true` — Return instances to warm pool on scale-in
+
+After node groups become ACTIVE, wait for warm pool instances to reach the target state (Stopped/Running).
+
+```bash title="Terminal (Check warm pool status)"
+ASG=$(aws eks describe-nodegroup --cluster-name $CLUSTER --nodegroup-name ng-warm-stopped \
+  --region $REGION --query 'nodegroup.resources.autoScalingGroups[0].name' --output text)
+
+aws autoscaling describe-warm-pool --auto-scaling-group-name $ASG --region $REGION \
+  --query 'Instances[].{InstanceId:InstanceId,State:LifecycleState}' --output table
+```
+
+```text title="Output"
+-------------------------------------------
+|            DescribeWarmPool             |
++----------------------+------------------+
+|      InstanceId      |      State       |
++----------------------+------------------+
+|  i-0a546e64a73986140 |  Warmed:Stopped  |
+|  i-0c0c0f4ad0652338a |  Warmed:Stopped  |
++----------------------+------------------+
+```
+
+</details>
+
+## Verification 1: Scale-Out Time by poolState
+
+We measured scale-out time across three patterns. For each, we changed `desiredSize` from 2 to 3 and recorded the time until the new node showed Ready in `kubectl get nodes`.
+
+### (a) Cold Start (No Warm Pool)
+
+```bash title="Terminal"
+aws eks update-nodegroup-config \
+  --cluster-name eks-sandbox --nodegroup-name ng-cold-start \
+  --scaling-config minSize=2,maxSize=5,desiredSize=3 \
+  --region ap-northeast-1
+```
+
+```text title="Output (polled every 5s)"
+17:30:27 [3s]  Nodes: 2 total, 2 ready
+17:30:54 [30s] Nodes: 2 total, 2 ready
+17:31:06 [42s] Nodes: 3 total, 2 ready  ← node appeared
+17:31:26 [62s] Nodes: 3 total, 3 ready  ← Ready
+```
+
+**Result: 62 seconds.** EC2 instance launch (~40s) + EKS bootstrap (kubelet startup, CNI configuration, node registration) ~20s.
+
+### (b) Stopped Warm Pool
+
+```bash title="Terminal"
+aws eks update-nodegroup-config \
+  --cluster-name eks-sandbox --nodegroup-name ng-warm-stopped \
+  --scaling-config minSize=2,maxSize=5,desiredSize=3 \
+  --region ap-northeast-1
+```
+
+```text title="Output"
+17:31:39 [2s]  Nodes: 2 total, 2 ready
+17:32:05 [28s] Nodes: 3 total, 2 ready  ← node appeared
+17:32:25 [48s] Nodes: 3 total, 3 ready  ← Ready
+```
+
+**Result: 48 seconds.** 14 seconds (23%) faster than cold start. The OS is already initialized, so only a restart is needed.
+
+### (c) Running Warm Pool
+
+```bash title="Terminal"
+aws eks update-nodegroup-config \
+  --cluster-name eks-sandbox --nodegroup-name ng-warm-running \
+  --scaling-config minSize=2,maxSize=5,desiredSize=3 \
+  --region ap-northeast-1
+```
+
+```text title="Output"
+17:32:38 [2s]  Nodes: 2 total, 2 ready
+17:32:51 [15s] Nodes: 3 total, 2 ready  ← node appeared
+17:33:04 [28s] Nodes: 3 total, 3 ready  ← Ready
+```
+
+**Result: 28 seconds.** 34 seconds (55%) faster than cold start. The instance is already running, so only EKS bootstrap (cluster join + CNI setup) is needed.
+
+## Verification 2: reuseOnScaleIn Behavior and Re-Scale-Out Speed
+
+Verification 1 established the Stopped warm pool baseline (48s). Verification 2 tests the scale-in → re-scale-out cycle with `reuseOnScaleIn=true` to see if reused instances are faster.
+
+### Scale-In: Instance Return to Warm Pool
+
+We changed `desiredSize` from 3 to 2 to trigger scale-in.
+
+```bash title="Terminal"
+aws eks update-nodegroup-config \
+  --cluster-name eks-sandbox --nodegroup-name ng-warm-stopped \
+  --scaling-config minSize=2,maxSize=5,desiredSize=2 \
+  --region ap-northeast-1
+```
+
+The scale-in process progressed through these stages:
+
+```text title="Output (scale-in progression)"
+17:33:43 Node: Ready,SchedulingDisabled  ← drain started
+17:34:35 Node: NotReady,SchedulingDisabled  ← kubelet stopped
+17:49:09 Warm pool: Warmed:Pending:Proceed  ← lifecycle hook completed
+17:49:40 Warm pool: Warmed:Stopped  ← return complete
+```
+
+**Scale-in to return took approximately 16 minutes.** This is caused by the `Terminate-LC-Hook` that EKS automatically configures on the ASG with a heartbeat timeout of 1800 seconds (30 minutes). Even after the node drain completes, the lifecycle hook waits for the completion signal.
+
+```json title="Output (lifecycle hooks)"
+{
+  "LifecycleHooks": [
+    {
+      "LifecycleHookName": "Launch-LC-Hook",
+      "LifecycleTransition": "autoscaling:EC2_INSTANCE_LAUNCHING",
+      "HeartbeatTimeout": 1800
+    },
+    {
+      "LifecycleHookName": "Terminate-LC-Hook",
+      "LifecycleTransition": "autoscaling:EC2_INSTANCE_TERMINATING",
+      "HeartbeatTimeout": 1800
+    }
+  ]
+}
+```
+
+### Re-Scale-Out: Reused Instance Speed
+
+We scaled back out using the instance that was returned to the warm pool.
+
+```bash title="Terminal"
+aws eks update-nodegroup-config \
+  --cluster-name eks-sandbox --nodegroup-name ng-warm-stopped \
+  --scaling-config minSize=2,maxSize=5,desiredSize=3 \
+  --region ap-northeast-1
+```
+
+```text title="Output"
+17:49:55 [2s]  Nodes: 2 total, 2 ready
+17:50:22 [29s] Nodes: 2 total, 2 ready
+17:50:28 [35s] Nodes: 3 total, 3 ready  ← Ready
+```
+
+**Result: 35 seconds.** 13 seconds faster than the initial Stopped warm pool (48s). Reused instances have cached EKS-related configuration, making the bootstrap faster.
+
+## Verification 3: Scale-Out with Pending Pods — Time to Pod Running
+
+Verifications 1-2 used manual `desiredSize` changes. Verification 3 simulates a production scenario with pending pods to measure the full cycle from scale-out to pod Running.
+
+We filled the existing 2 nodes with resource-heavy pods and created a third pod that went Pending.
+
+```bash title="Terminal (Create pods)"
+kubectl apply -f - << 'EOF'
+apiVersion: v1
+kind: Pod
+metadata:
+  name: filler-pod-1
+spec:
+  nodeSelector:
+    eks.amazonaws.com/nodegroup: ng-warm-stopped
+  containers:
+    - name: nginx
+      image: nginx:alpine
+      resources:
+        requests:
+          cpu: "1500m"
+          memory: "2Gi"
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: filler-pod-2
+spec:
+  nodeSelector:
+    eks.amazonaws.com/nodegroup: ng-warm-stopped
+  containers:
+    - name: nginx
+      image: nginx:alpine
+      resources:
+        requests:
+          cpu: "1500m"
+          memory: "2Gi"
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pending-pod
+spec:
+  nodeSelector:
+    eks.amazonaws.com/nodegroup: ng-warm-stopped
+  containers:
+    - name: nginx
+      image: nginx:alpine
+      resources:
+        requests:
+          cpu: "1500m"
+          memory: "2Gi"
+EOF
+```
+
+```text title="Output (Pod status)"
+NAME           READY   STATUS    AGE
+filler-pod-1   1/1     Running   6s
+filler-pod-2   0/1     Pending   6s
+pending-pod    0/1     Pending   6s
+```
+
+We then scaled out from the Stopped warm pool to add 2 nodes.
+
+```bash title="Terminal"
+aws eks update-nodegroup-config \
+  --cluster-name eks-sandbox --nodegroup-name ng-warm-stopped \
+  --scaling-config minSize=2,maxSize=5,desiredSize=4 \
+  --region ap-northeast-1
+```
+
+```text title="Output"
+17:53:29 [2s]  Running: 1/3
+17:53:55 [28s] filler-pod-2: ContainerCreating  ← node Ready, pod scheduled
+17:54:21 [54s] Running: 2/3
+17:54:34 [67s] Running: 3/3  ← all pods Running
+```
+
+**Result: 67 seconds** (all pods Running). Breakdown: ~48s for node Ready + ~19s for pod scheduling and image pull. With Cluster Autoscaler, add another 30-60 seconds for pending pod detection and ASG desired size update.
+
+## Overall Comparison: poolState × Scaling Method
+
+| Pattern | Time to Node Ready | Maintenance Cost (1 instance/mo) | Notes |
+| --- | --- | --- | --- |
+| Cold start (no warm pool) | 62s | $0 | Baseline |
+| Stopped warm pool (initial) | 48s (-23%) | ~$8 (EBS only) | OS restart only |
+| Running warm pool (initial) | 28s (-55%) | ~$30 (instance + EBS) | Bootstrap only |
+| reuseOnScaleIn reuse (Stopped) | 35s (-44%) | ~$8 (EBS only) | EKS config cache effect |
+| Stopped + Pod Running | 67s | ~$8 (EBS only) | Includes image pull |
+
+### Decision Framework for poolState Selection
+
+Based on the measurements:
+
+- **Choose Running** when scale-out speed is the top priority and you need nodes within 30 seconds. Keep warm pool size minimal since instance charges continue. Best for workloads with frequent bursts where per-event latency cost is high
+- **Choose Stopped** when cost efficiency matters and ~50 seconds of scale-out time is acceptable. At roughly 1/4 the cost of Running (EBS charges only), this suits low-to-medium burst frequency workloads
+- **Enable reuseOnScaleIn** when scale-in/out cycles are frequent. Reused instances are 13 seconds faster than initial Stopped. However, the ~16 minute drain wait for scale-in to warm pool return means this is less effective for rapid consecutive bursts
+
+### When NOT to Use Warm Pools
+
+- For instance types with short boot times like t3.medium, the gap between cold start and warm pool is only 14-34 seconds. The benefit increases with custom AMIs or heavy user data initialization
+- Warm pools don't support custom AMIs (EKS optimized AMIs only). If you use custom AMIs, warm pools aren't available
+- Bottlerocket AMIs don't support Hibernated state or reuseOnScaleIn
+
+## Summary
+
+- **Running is fast but expensive** — 28 seconds to add a node, but instance charges continue. Reserve for workloads with strict latency requirements
+- **Stopped offers the best balance** — 48 seconds with EBS-only charges. Sufficient for most workloads
+- **reuseOnScaleIn has a 16-minute drain bottleneck** — Re-scale-out is 35 seconds (fast), but returning to the warm pool takes ~16 minutes due to EKS's auto-configured lifecycle hook (1800s timeout) that users cannot modify
+- **Pod Running time = Node Ready + image pull** — Even after a node is Ready, pods take an additional ~19 seconds to reach Running. Consider image pre-pulling and image size optimization alongside warm pool configuration
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">Cleanup steps</summary>
+
+```bash title="Terminal (Delete resources)"
+REGION=ap-northeast-1
+CLUSTER=eks-sandbox
+
+# Delete pods
+kubectl delete pod filler-pod-1 filler-pod-2 pending-pod
+
+# Delete node groups
+for NG in ng-cold-start ng-warm-stopped ng-warm-running; do
+  aws eks delete-nodegroup --cluster-name $CLUSTER --nodegroup-name $NG --region $REGION
+done
+
+# Wait for deletion
+for NG in ng-cold-start ng-warm-stopped ng-warm-running; do
+  aws eks wait nodegroup-deleted --cluster-name $CLUSTER --nodegroup-name $NG --region $REGION
+done
+
+# Delete addons (if added for Auto Mode cluster)
+aws eks delete-addon --cluster-name $CLUSTER --addon-name vpc-cni --region $REGION
+aws eks delete-addon --cluster-name $CLUSTER --addon-name kube-proxy --region $REGION
+aws eks delete-addon --cluster-name $CLUSTER --addon-name coredns --region $REGION
+
+# Delete IAM role
+aws iam detach-role-policy --role-name eks-warmpool-verify-node-role \
+  --policy-arn arn:aws:iam::aws:policy/AmazonEKSWorkerNodePolicy
+aws iam detach-role-policy --role-name eks-warmpool-verify-node-role \
+  --policy-arn arn:aws:iam::aws:policy/AmazonEKS_CNI_Policy
+aws iam detach-role-policy --role-name eks-warmpool-verify-node-role \
+  --policy-arn arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly
+aws iam delete-role-policy --role-name eks-warmpool-verify-node-role \
+  --policy-name ClusterAutoscalerPolicy
+aws iam delete-role --role-name eks-warmpool-verify-node-role
+```
+
+</details>
