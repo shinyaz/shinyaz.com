@@ -1,0 +1,18 @@
+---
+title: "RDS Proxy 経由の Blue/Green Switchover では AdminShutdown ではなく SSL 切断が発生する"
+description: "Aurora PostgreSQL の Blue/Green Switchover 中、ドキュメントでは AdminShutdown エラーが記載されているが、RDS Proxy 経由では SSL connection has been closed unexpectedly が発生する。エラーハンドリングの設計時に注意が必要。"
+date: "2026-04-10"
+published: true
+tags: ["aws", "aurora", "postgresql", "rds-proxy", "blue-green-deployment"]
+---
+
+[RDS Proxy 経由の Blue/Green Switchover を検証](/ja/blog/2026/04/10/aurora-blue-green-rds-proxy-switchover)していて気づいた。ドキュメントでは Aurora PostgreSQL の Switchover 中のエラーとして `AdminShutdown: terminating connection due to administrator command` が記載されているが、RDS Proxy 経由では別のエラーが返ってきた。
+
+```text title="Output"
+SSL connection has been closed unexpectedly
+connection to server was lost
+```
+
+ドキュメントの `AdminShutdown` は Blue が read-only モードに入った後にクライアントが直接受け取るエラーだ。RDS Proxy 経由の場合、Proxy が過渡期にクライアント接続を維持したまま内部で Blue にルーティングを継続し、Switchover 完了を検知した時点で接続をドロップすると考えられる。そのため、クライアントが受け取るのは `AdminShutdown` ではなく SSL 切断になる。
+
+アプリケーション側のエラーハンドリングで `AdminShutdown` だけを捕捉していると、RDS Proxy 経由の Switchover を検出できない。接続プールのヘルスチェックや、SSL/接続切断系のエラーも含めてリトライ対象にしておく必要がある。
