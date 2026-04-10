@@ -1,0 +1,37 @@
+---
+title: "Agent Registry AGENT_SKILLS record has different parameter names in CLI vs REST API"
+description: "AWS Agent Registry CLI uses skillMd (dict with inlineContent) while REST API uses skillMarkdown (string). descriptorType is AGENT_SKILLS, not SKILL."
+date: "2026-04-10"
+published: true
+tags: ["aws", "agentcore", "agent-registry"]
+---
+
+Tried creating an AGENT_SKILLS record in Agent Registry via CLI using the REST API docs as reference. Got parameter validation errors.
+
+The CLI and REST API use different parameter names and structures:
+
+- `descriptorType`: `AGENT_SKILLS`, not `SKILL`
+- Skill markdown: REST API uses `skillMarkdown` (string), CLI uses `skillMd` (`{inlineContent: "..."}` structure)
+
+```bash title="Terminal"
+aws bedrock-agentcore-control create-registry-record \
+  --cli-input-json '{
+    "registryId": "<registry-id>",
+    "name": "my-skill",
+    "description": "My skill description",
+    "recordVersion": "1.0.0",
+    "descriptorType": "AGENT_SKILLS",
+    "descriptors": {
+      "agentSkills": {
+        "skillMd": {
+          "inlineContent": "---\nname: my-skill\ndescription: My skill\n---\n\n# My Skill\n\nSkill description here."
+        }
+      }
+    }
+  }' \
+  --region ap-northeast-1
+```
+
+The correct structure is in the JSON Syntax section of `aws bedrock-agentcore-control create-registry-record help`. Writing CLI commands from REST API docs will trip you up.
+
+Full verification in [Hands-on with AWS Agent Registry](/en/blog/2026/04/10/aws-agent-registry-verification).

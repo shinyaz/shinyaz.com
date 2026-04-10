@@ -1,0 +1,38 @@
+---
+title: "Agent Registry の MCP レコード作成は server.json スキーマの制約に注意"
+description: "AWS Agent Registry で MCP レコードを作成する際、name の reverse-DNS 形式、description の 100 文字制限、schemaVersion の必須指定でバリデーションエラーになる。ドキュメントの Minimal example だけでは分からない。"
+date: "2026-04-10"
+published: true
+tags: ["aws", "agentcore", "agent-registry", "mcp"]
+---
+
+AWS Agent Registry で MCP サーバーレコードを作成しようとしたら、`Schema validation failed: content is not in compliance with schema version` で何度もエラーになった。ドキュメントの [Minimal valid example](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/registry-supported-record-types.html) 通りに書いているのに通らない。
+
+原因は、Agent Registry が [MCP Registry の server.json スキーマ](https://static.modelcontextprotocol.io/schemas/2025-07-09/server.schema.json)でバリデーションしており、そのスキーマに以下の制約があるためだった。
+
+- `name` は reverse-DNS 形式が必須（パターン: `^[a-zA-Z0-9.-]+/[a-zA-Z0-9._-]+$`）。`weather-api` は NG、`io.example/weather-api` は OK
+- `description` は 100 文字以内（`maxLength: 100`）。超えると無言でバリデーションエラー
+- `schemaVersion` の指定が必須。省略すると `does not match any supported version` エラー
+
+動くコマンド:
+
+```bash title="Terminal"
+aws bedrock-agentcore-control create-registry-record \
+  --registry-id "<registry-id>" \
+  --name "weather-api" \
+  --record-version "1.0.0" \
+  --descriptor-type MCP \
+  --descriptors '{
+    "mcp": {
+      "server": {
+        "schemaVersion": "2025-07-09",
+        "inlineContent": "{\"name\": \"io.example/weather-api\", \"description\": \"Weather data and forecast service\", \"version\": \"1.0.0\"}"
+      }
+    }
+  }' \
+  --region ap-northeast-1
+```
+
+エラーメッセージが `content is not in compliance with schema version` としか言わず、どのフィールドが問題かを教えてくれないのが厄介。スキーマの JSON を直接読んで制約を確認するのが確実である。
+
+詳しい検証は [AWS Agent Registry を実機検証](/ja/blog/2026/04/10/aws-agent-registry-verification) を参照。

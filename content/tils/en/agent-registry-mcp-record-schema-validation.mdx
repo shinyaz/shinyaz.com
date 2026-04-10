@@ -1,0 +1,38 @@
+---
+title: "Agent Registry MCP record creation fails silently on server.json schema constraints"
+description: "AWS Agent Registry MCP records require reverse-DNS name format, 100-char description limit, and explicit schemaVersion. The error message doesn't tell you which field is wrong."
+date: "2026-04-10"
+published: true
+tags: ["aws", "agentcore", "agent-registry", "mcp"]
+---
+
+Tried creating an MCP server record in AWS Agent Registry and kept getting `Schema validation failed: content is not in compliance with schema version`. The [Minimal valid example](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/registry-supported-record-types.html) in the docs looked right, but it wouldn't pass.
+
+The issue is that Agent Registry validates against the [MCP Registry server.json schema](https://static.modelcontextprotocol.io/schemas/2025-07-09/server.schema.json), which has constraints not mentioned in the Agent Registry docs:
+
+- `name` must be reverse-DNS format (pattern: `^[a-zA-Z0-9.-]+/[a-zA-Z0-9._-]+$`). `weather-api` fails, `io.example/weather-api` works
+- `description` is limited to 100 characters (`maxLength: 100`). Exceeding it silently fails validation
+- `schemaVersion` is required. Omitting it gives `does not match any supported version`
+
+Working command:
+
+```bash title="Terminal"
+aws bedrock-agentcore-control create-registry-record \
+  --registry-id "<registry-id>" \
+  --name "weather-api" \
+  --record-version "1.0.0" \
+  --descriptor-type MCP \
+  --descriptors '{
+    "mcp": {
+      "server": {
+        "schemaVersion": "2025-07-09",
+        "inlineContent": "{\"name\": \"io.example/weather-api\", \"description\": \"Weather data and forecast service\", \"version\": \"1.0.0\"}"
+      }
+    }
+  }' \
+  --region ap-northeast-1
+```
+
+The error message only says `content is not in compliance with schema version` without indicating which field is wrong. Reading the schema JSON directly is the most reliable way to debug.
+
+Full verification in [Hands-on with AWS Agent Registry](/en/blog/2026/04/10/aws-agent-registry-verification).

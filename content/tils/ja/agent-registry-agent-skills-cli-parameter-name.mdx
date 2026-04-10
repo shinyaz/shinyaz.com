@@ -1,0 +1,37 @@
+---
+title: "Agent Registry の AGENT_SKILLS レコードは CLI と REST API でパラメータ名が異なる"
+description: "AWS Agent Registry で AGENT_SKILLS レコードを作成する際、CLI では skillMd（dict 型）、REST API では skillMarkdown（文字列型）。descriptorType も SKILL ではなく AGENT_SKILLS。"
+date: "2026-04-10"
+published: true
+tags: ["aws", "agentcore", "agent-registry"]
+---
+
+Agent Registry で AGENT_SKILLS レコードを CLI で作成しようとして、ドキュメントの REST API 例をそのまま使ったらエラーになった。
+
+CLI と REST API でパラメータ名と構造が異なる:
+
+- `descriptorType`: `SKILL` ではなく `AGENT_SKILLS`
+- スキルマークダウン: REST API は `skillMarkdown`（文字列）、CLI は `skillMd`（`{inlineContent: "..."}` 構造）
+
+```bash title="Terminal"
+aws bedrock-agentcore-control create-registry-record \
+  --cli-input-json '{
+    "registryId": "<registry-id>",
+    "name": "my-skill",
+    "description": "My skill description",
+    "recordVersion": "1.0.0",
+    "descriptorType": "AGENT_SKILLS",
+    "descriptors": {
+      "agentSkills": {
+        "skillMd": {
+          "inlineContent": "---\nname: my-skill\ndescription: My skill\n---\n\n# My Skill\n\nSkill description here."
+        }
+      }
+    }
+  }' \
+  --region ap-northeast-1
+```
+
+`aws bedrock-agentcore-control create-registry-record help` の JSON Syntax セクションに正しい構造が書いてある。REST API のドキュメントを見て CLI コマンドを書くとハマる。
+
+詳しい検証は [AWS Agent Registry を実機検証](/ja/blog/2026/04/10/aws-agent-registry-verification) を参照。
