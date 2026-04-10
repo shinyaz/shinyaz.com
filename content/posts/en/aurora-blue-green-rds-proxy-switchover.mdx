@@ -62,17 +62,15 @@ Additionally, RDS Proxy with Blue/Green Deployments is not supported for Aurora 
 
 Replace the following placeholders with your own values throughout the commands.
 
-| Placeholder | Description |
-| --- | --- |
-| `<account-id>` | AWS account ID |
-| `<vpc-id>` | VPC ID |
-| `<sg-id>` | Security group ID (created below) |
-| `<subnet-1>`, `<subnet-2>`, `<subnet-3>` | Subnet IDs in different AZs (3 required) |
-| `<subnet-id>` | Subnet ID for the EC2 instance |
-| `<password>` | Database master password |
-| `<secret-arn>` | Secrets Manager secret ARN |
-| `<al2023-ami-id>` | Amazon Linux 2023 AMI ID |
-| `<id>` | Identifier portion of the RDS Proxy endpoint |
+- `ACCOUNT_ID` — AWS account ID
+- `VPC_ID` — VPC ID
+- `SG_ID` — Security group ID (created below)
+- `SUBNET_1`, `SUBNET_2`, `SUBNET_3` — Subnet IDs in different AZs (3 required)
+- `SUBNET_ID` — Subnet ID for the EC2 instance
+- `PASSWORD` — Database master password
+- `SECRET_ARN` — Secrets Manager secret ARN
+- `AL2023_AMI_ID` — Amazon Linux 2023 AMI ID
+- `PROXY_ENDPOINT` — RDS Proxy endpoint
 
 ### Security Group
 
@@ -80,14 +78,14 @@ Replace the following placeholders with your own values throughout the commands.
 aws ec2 create-security-group \
   --description "SG for Blue/Green + RDS Proxy verification" \
   --group-name bg-proxy-verify-sg \
-  --vpc-id <vpc-id>
+  --vpc-id $VPC_ID
 
 # Self-referencing rule (Proxy ↔ Aurora ↔ EC2 PostgreSQL traffic)
 aws ec2 authorize-security-group-ingress \
-  --group-id <sg-id> \
+  --group-id $SG_ID \
   --port 5432 \
   --protocol tcp \
-  --source-group <sg-id>
+  --source-group $SG_ID
 ```
 
 ### DB Subnet Group
@@ -96,7 +94,7 @@ aws ec2 authorize-security-group-ingress \
 aws rds create-db-subnet-group \
   --db-subnet-group-name bg-proxy-verify-subnet \
   --db-subnet-group-description "Subnet group for BG Proxy verification" \
-  --subnet-ids '["<subnet-1>","<subnet-2>","<subnet-3>"]'
+  --subnet-ids '["$SUBNET_1","$SUBNET_2","$SUBNET_3"]'
 ```
 
 ### Secrets Manager Secret
@@ -106,7 +104,7 @@ RDS Proxy retrieves database credentials from Secrets Manager.
 ```bash title="Terminal"
 aws secretsmanager create-secret \
   --name bg-proxy-verify-secret \
-  --secret-string '{"username":"postgres","password":"<password>"}'
+  --secret-string '{"username":"postgres","password":"$PASSWORD"}'
 ```
 
 ### Custom Cluster Parameter Group
@@ -134,8 +132,8 @@ aws rds create-db-cluster \
   --engine aurora-postgresql \
   --engine-version 16.9 \
   --master-username postgres \
-  --master-user-password '<password>' \
-  --vpc-security-group-ids '["<sg-id>"]'
+  --master-user-password $PASSWORD \
+  --vpc-security-group-ids '["$SG_ID"]'
 
 aws rds create-db-instance \
   --db-cluster-identifier bg-proxy-verify \
@@ -174,7 +172,7 @@ aws iam put-role-policy \
     "Statement":[{
       "Effect":"Allow",
       "Action":["secretsmanager:GetSecretValue","secretsmanager:DescribeSecret"],
-      "Resource":"<secret-arn>"
+      "Resource":"$SECRET_ARN"
     }]
   }'
 ```
@@ -185,10 +183,10 @@ Create the proxy and register the Aurora cluster as a target.
 aws rds create-db-proxy \
   --db-proxy-name bg-proxy-verify \
   --engine-family POSTGRESQL \
-  --auth '[{"AuthScheme":"SECRETS","SecretArn":"<secret-arn>","IAMAuth":"DISABLED"}]' \
-  --role-arn arn:aws:iam::<account-id>:role/bg-proxy-verify-role \
-  --vpc-subnet-ids '["<subnet-1>","<subnet-2>","<subnet-3>"]' \
-  --vpc-security-group-ids '["<sg-id>"]'
+  --auth '[{"AuthScheme":"SECRETS","SecretArn":"$SECRET_ARN","IAMAuth":"DISABLED"}]' \
+  --role-arn arn:aws:iam::$ACCOUNT_ID:role/bg-proxy-verify-role \
+  --vpc-subnet-ids '["$SUBNET_1","$SUBNET_2","$SUBNET_3"]' \
+  --vpc-security-group-ids '["$SG_ID"]'
 
 # After proxy becomes available, register the target
 aws rds register-db-proxy-targets \
@@ -210,7 +208,7 @@ aws rds create-db-cluster-parameter-group \
 
 aws rds create-blue-green-deployment \
   --blue-green-deployment-name bg-proxy-verify-bgd \
-  --source arn:aws:rds:ap-northeast-1:<account-id>:cluster:bg-proxy-verify \
+  --source arn:aws:rds:ap-northeast-1:$ACCOUNT_ID:cluster:bg-proxy-verify \
   --target-engine-version 17.6 \
   --target-db-cluster-parameter-group-name bg-proxy-verify-cpg-17
 ```
@@ -249,10 +247,10 @@ aws iam add-role-to-instance-profile \
 sleep 10
 
 aws ec2 run-instances \
-  --image-id <al2023-ami-id> \
+  --image-id $AL2023_AMI_ID \
   --instance-type t3.medium \
-  --security-group-ids '["<sg-id>"]' \
-  --subnet-id <subnet-id> \
+  --security-group-ids '["$SG_ID"]' \
+  --subnet-id $SUBNET_ID \
   --iam-instance-profile '{"Name":"bg-proxy-verify-ec2-profile"}'
 
 # Install psql via SSM
@@ -262,8 +260,8 @@ dnf install -y postgresql16
 ### Test Table
 
 ```bash title="Terminal"
-PGPASSWORD='<password>' psql \
-  -h bg-proxy-verify.proxy-<id>.ap-northeast-1.rds.amazonaws.com \
+PGPASSWORD=$PASSWORD psql \
+  -h $PROXY_ENDPOINT.ap-northeast-1.rds.amazonaws.com \
   -p 5432 -U postgres -d postgres \
   -c "CREATE TABLE IF NOT EXISTS switchover_test (
     id SERIAL PRIMARY KEY,
@@ -317,7 +315,7 @@ done
 Started the measurement script in the background, confirmed writes were stable, then triggered the switchover.
 
 ```bash title="Terminal (start measurement)"
-nohup ./measure.sh bg-proxy-verify.proxy-<id>.ap-northeast-1.rds.amazonaws.com '<password>' 200 &
+nohup ./measure.sh $PROXY_ENDPOINT.ap-northeast-1.rds.amazonaws.com $PASSWORD 200 &
 ```
 
 After ~30 seconds of stable writes, executed the switchover.
@@ -328,7 +326,7 @@ aws rds switchover-blue-green-deployment \
   --switchover-timeout 300
 ```
 
-### Results {#results}
+### Results
 
 Out of 200 writes, **only 1 connection failure** occurred.
 
@@ -451,7 +449,7 @@ aws rds delete-db-cluster-parameter-group --db-cluster-parameter-group-name bg-p
 aws rds delete-db-subnet-group --db-subnet-group-name bg-proxy-verify-subnet
 
 # Delete security group
-aws ec2 delete-security-group --group-id <sg-id>
+aws ec2 delete-security-group --group-id $SG_ID
 ```
 
 </details>
