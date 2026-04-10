@@ -1,0 +1,301 @@
+---
+title: "AWS DevOps Agent 検証 — EKS ナレッジグラフで Kubernetes 障害の根本原因を自動特定する"
+description: "DevOps Agent の EKS 統合を検証。Learned Topology による Kubernetes オブジェクトの自動検出、アプリ障害とインフラ障害での調査プロセスの違い、audit ログからの操作者特定能力を実測データで評価する。"
+date: "2026-04-10"
+published: true
+featured: false
+categories: [infrastructure]
+tags: ["aws", "devops-agent", "eks", "kubernetes", "incident-response", "sre"]
+series: "aws-devops-agent"
+seriesOrder: 6
+---
+
+## はじめに
+
+2026年4月9日、AWS は [Building intelligent knowledge graphs for Amazon EKS operations using AWS DevOps Agent](https://aws.amazon.com/blogs/containers/building-intelligent-knowledge-graphs-for-amazon-eks-operations-using-aws-devops-agent/) を公開した。DevOps Agent が EKS クラスターの Kubernetes オブジェクト間の関係を「ナレッジグラフ（Learned Topology）」として自動構築し、インシデント発生時に依存関係チェーンを辿って根本原因を特定する仕組みの解説である。
+
+[シリーズ第1回](/ja/blog/2026/04/01/aws-devops-agent-ga-verification)では EC2 インスタンスの CPU 高負荷を、[第5回](/ja/blog/2026/04/01/aws-devops-agent-webhook-auto-trigger)では Generic Webhook による自動調査パイプラインを検証した。いずれも対象は EC2 インスタンスだった。EKS 環境では Pod-to-Pod の通信が動的なネットワークトポロジーを形成するため、障害の根本原因特定は EC2 単体よりも難しい。DevOps Agent の EKS 統合は、この課題をナレッジグラフで解決すると謳っている。
+
+本記事では、DevOps Agent に EKS クラスターへのアクセスを設定し、マイクロサービスアプリケーションに対して2パターンの障害を注入する。**アプリケーション障害（UI Deployment のスケールダウン）とインフラ障害（CoreDNS のスケールダウン）で、Agent の調査プロセスと根本原因特定の精度に差があるか**を実測で明らかにする。公式ドキュメントは [AWS DevOps Agent User Guide — AWS EKS access setup](https://docs.aws.amazon.com/devopsagent/latest/userguide/configuring-capabilities-for-aws-devops-agent-aws-eks-access-setup.html)。
+
+前提条件:
+
+- AWS CLI v2（`devops-agent` サブコマンド対応版）
+- kubectl、EKS クラスター（Control Plane ログ有効）
+- DevOps Agent Agent Space（[第1回](/ja/blog/2026/04/01/aws-devops-agent-ga-verification)で作成済み）
+- Generic Webhook パイプライン（[第5回](/ja/blog/2026/04/01/aws-devops-agent-webhook-auto-trigger)で構築済み）
+- 検証リージョン: ap-northeast-1（東京）
+
+結果だけ見たい場合は[比較分析](#比較分析)に進んでほしい。
+
+## 検証環境のセットアップ
+
+EKS クラスター `eks-sandbox`（v1.35、Auto Mode）に対して、DevOps Agent のアクセスエントリを設定し、サンプルアプリケーションをデプロイする。所要時間は約30分（アプリの起動待ち含む）。
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">セットアップ手順（EKS アクセスエントリ + サンプルアプリ + Webhook パイプライン）</summary>
+
+### Control Plane ログの有効化
+
+DevOps Agent が EKS の audit ログを分析するために必要である。
+
+```bash title="Terminal"
+aws eks update-cluster-config \
+  --name eks-sandbox \
+  --logging '{"clusterLogging":[{"types":["api","audit","authenticator","controllerManager","scheduler"],"enabled":true}]}' \
+  --region ap-northeast-1
+```
+
+### EKS アクセスエントリの作成
+
+Agent Space のロール（`DevOpsAgentRole-AgentSpace`）に `AmazonAIOpsAssistantPolicy` を関連付ける。これにより DevOps Agent が read-only の `kubectl` コマンドを実行できるようになる。
+
+前提として、EKS クラスターの認証モードに EKS API が含まれている必要がある（`API` または `API_AND_CONFIG_MAP`）。EKS コンソールの Access タブで確認できる。`CONFIG_MAP` のみの場合は、先に認証モードを変更する。
+
+```bash title="Terminal"
+# アクセスエントリ作成
+aws eks create-access-entry \
+  --cluster-name eks-sandbox \
+  --principal-arn arn:aws:iam::<account-id>:role/DevOpsAgentRole-AgentSpace \
+  --region ap-northeast-1
+
+# AmazonAIOpsAssistantPolicy の関連付け
+aws eks associate-access-policy \
+  --cluster-name eks-sandbox \
+  --principal-arn arn:aws:iam::<account-id>:role/DevOpsAgentRole-AgentSpace \
+  --policy-arn arn:aws:eks::aws:cluster-access-policy/AmazonAIOpsAssistantPolicy \
+  --access-scope '{"type":"cluster"}' \
+  --region ap-northeast-1
+```
+
+ポイントは `AmazonAIOpsAssistantPolicy` というアクセスポリシーである。これは DevOps Agent 専用の read-only ポリシーで、リソースの describe、Pod ログの取得、クラスターイベントの確認が可能だが、リソースの作成・変更・削除はできない。
+
+### サンプルアプリケーションのデプロイ
+
+[Containers Retail Store Sample Application](https://github.com/aws-containers/retail-store-sample-app) を使用する。UI、Catalog、Cart、Orders、Checkout の5つのマイクロサービスで構成されている。
+
+```bash title="Terminal"
+kubectl apply -f https://github.com/aws-containers/retail-store-sample-app/releases/latest/download/kubernetes.yaml
+kubectl wait --for=condition=available deployments --all --timeout=180s
+kubectl annotate svc ui service.beta.kubernetes.io/aws-load-balancer-scheme=internet-facing --overwrite
+```
+
+### Webhook 自動調査パイプライン
+
+[第5回](/ja/blog/2026/04/01/aws-devops-agent-webhook-auto-trigger)で構築した Route 53 ヘルスチェック → CloudWatch Alarm → SNS → Lambda → Webhook のパイプラインを、UI サービスの NLB エンドポイントに対して設定した。HMAC 署名の実装詳細は第5回を参照。
+
+</details>
+
+### Learned Topology の確認
+
+セットアップ完了後、Operator App の Topology タブで Learned Topology を確認した。
+
+DevOps Agent は EKS クラスターに接続すると、Kubernetes オブジェクトを自動的に検出し、それらの関係をグラフとして構築する。今回の環境では以下のオブジェクトが検出された:
+
+- **Namespace**: default, kube-system
+- **Deployment**: ui, catalog, carts, checkout, orders, coredns など
+- **ReplicaSet**: 各 Deployment に対応
+- **Pod**: 各 ReplicaSet から生成
+- **Service**: ui (LoadBalancer), catalog, carts, checkout, orders (ClusterIP)
+- **StatefulSet**: catalog-mysql, orders-postgresql, orders-rabbitmq
+
+このグラフが障害調査時の依存関係チェーンの辿り方を決定する。検証 1 では Agent がこのグラフを Route 53 → NLB → Service → Deployment → Pod と辿る様子を確認できる。
+
+## 検証 1: アプリケーション障害の根本原因特定
+
+UI Deployment のレプリカを 0 にスケールダウンし、Route 53 ヘルスチェックの失敗から自動調査パイプラインを通じて DevOps Agent が調査を開始する流れを検証する。
+
+### 障害注入
+
+```bash title="Terminal"
+kubectl scale deployment ui --replicas=0
+```
+
+### タイムライン
+
+| イベント | 時刻 (JST) | 経過時間 |
+|---|---|---|
+| 障害注入 | 22:58:30 | 0:00 |
+| CloudWatch Alarm → ALARM | 23:02:27 | +3:57 |
+| Webhook 200 OK → 調査トリガー | 23:04:00 | +5:30 |
+| DevOps Agent 調査開始 | 23:05:02 | +6:32 |
+| DevOps Agent 調査完了 | 23:10:05 | +11:35 |
+
+障害注入から Alarm 遷移まで約4分（Route 53 ヘルスチェック間隔 30秒 × 失敗しきい値 2 + CloudWatch 評価期間 60秒 × 2）。なお、自動パイプライン（Alarm → SNS → Lambda）の初回実行は HMAC 署名の実装ミスで 403 エラーとなった。[公式ドキュメントの Webhook 署名仕様](https://docs.aws.amazon.com/devopsagent/latest/userguide/configuring-capabilities-for-aws-devops-agent-invoking-devops-agent-through-webhook.html)によると、正しい実装は以下の通りである:
+
+- ヘッダー名: `x-amzn-event-signature`（`x-webhook-signature` ではない）
+- 署名対象: `${timestamp}:${payload}` を結合した文字列
+- エンコード: base64（hex ではない）
+- タイムスタンプヘッダー: `x-amzn-event-timestamp` が必須
+
+修正後の手動テスト呼び出しで 200 OK を確認し、Agent の調査が開始された。Agent の調査自体は約5分で完了した。
+
+### Agent の調査プロセス
+
+Agent は **外部エンドポイントから内部リソースへ段階的に掘り下げる** アプローチを取った。
+
+| ステップ | Agent の行動 | 使用ツール |
+|---|---|---|
+| 1 | アラームの特定（us-east-1, us-west-2, ap-northeast-1 を横断検索） | `cloudwatch.describe_alarms` × 3 |
+| 2 | Route 53 ヘルスチェックの設定とステータスを確認 | `route53.get_health_check`, `get_health_check_status` |
+| 3 | NLB を特定し、EKS クラスターを発見 | `elbv2.describe_load_balancers`, `eks.list_clusters` |
+| 4 | EKS クラスター詳細、Namespace、Service 一覧を取得 | `eks.describe_cluster`, `kubectl get namespaces`, `kubectl get services -A` |
+| 5 | UI Service の詳細確認 → **Endpoints: \<none\> を検出** | `kubectl describe service ui`, `kubectl get pods` |
+| 6 | Deployment / ReplicaSet / Events を確認 | `kubectl get deployments,replicasets`, `kubectl get events` |
+| 7 | Deployment 詳細 → **レプリカ 0、スケールダウンイベント検出** | `kubectl describe deployment ui` |
+| 8 | NLB ターゲットグループのヘルス確認（ターゲット 0） | `elbv2.describe_target_health` |
+| 9 | **「誰がスケールダウンしたか」の調査タスクを作成・実行** | audit ログ分析 |
+| 10 | 最終レポート作成 | — |
+
+合計 10 ステップ、AWS API 8回 + kubectl 9回。
+
+ステップ 9 では、Agent が内部的にサブタスク（`investigate-scale-down-event`）を生成し、EKS Control Plane の audit ログ（CloudWatch Logs に保存される `/aws/eks/eks-sandbox/cluster` ロググループ）を分析した。audit ログには Kubernetes API サーバーへのすべてのリクエストが記録されており、Agent はここから `deployments/ui/scale` への PATCH 操作を抽出し、操作者の IAM ロール、送信元 IP、使用ツール（User-Agent）を特定した。
+
+### 根本原因の特定
+
+Agent は以下を正確に特定した:
+
+> **ユーザー "tahshiny"（AWS SSO、ConsoleAdministratorAccess ロール）が kubectl v1.35.3 を使用して、IP 114.148.251.28 から `deployments/ui/scale` に PATCH 操作を実行し、レプリカ数を 0 に設定した。**
+
+単に「レプリカが 0」という事実だけでなく、EKS Control Plane の audit ログから **操作者、使用ツール、送信元 IP、操作時刻** まで特定している。さらに、同じユーザーが数分前に carts Deployment にも同様の操作を実行していたことも検出した。
+
+## 検証 2: インフラ障害の根本原因特定
+
+CoreDNS のレプリカを 0 にスケールダウンし、クラスター全体の DNS 解決を停止させる。当初の計画では、DNS 障害がアプリケーションに波及し、外部ヘルスチェックの失敗を経由して自動調査パイプラインがトリガーされることを期待していた。しかし後述の通り、自動トリガーは発動しなかったため、手動 Webhook で Agent に障害情報を伝えて調査を開始した。結果として、**Agent に具体的な障害情報を渡した場合の調査プロセス**を検証 1 と比較する形になった。
+
+### 障害注入
+
+```bash title="Terminal"
+kubectl scale deployment coredns --replicas=0 -n kube-system
+```
+
+ここで想定外の事象が発生した。**CoreDNS を停止しても Route 53 ヘルスチェックが失敗しなかった**。理由は以下の通り:
+
+- Route 53 ヘルスチェックは NLB の IP アドレスに直接接続するため、クラスター内の DNS に依存しない
+- UI Pod は既に起動済みで、Readiness probe は `localhost:8080` への HTTP チェックのため DNS 不要
+- UI → バックエンドサービスの通信は DNS を使うが、既存の接続プールが維持されている間は影響が出にくい
+
+これは実運用でも起こりうるシナリオである。CoreDNS が停止しても、既存の Pod が即座にクラッシュするわけではない。新しい Pod の起動や、DNS キャッシュの期限切れ後に初めて影響が顕在化する。
+
+自動トリガーが発動しなかったため、手動で Webhook を呼び出して調査を開始した。ペイロードには以下の情報を含めた:
+
+```json title="Webhook ペイロード"
+{
+  "title": "EKS Health Alert: eks-coredns-down",
+  "description": "CoreDNS pods scaled to 0 in kube-system namespace. Multiple services experiencing DNS resolution failures in EKS cluster eks-sandbox (ap-northeast-1)."
+}
+```
+
+このペイロードに「CoreDNS」「kube-system」という具体的な情報を含めたことが、後述する Agent の調査戦略に大きく影響した。
+
+### タイムライン
+
+| イベント | 時刻 (JST) | 経過時間 |
+|---|---|---|
+| 障害注入 | 23:21:10 | — |
+| 手動 Webhook 呼び出し | 23:29:28 | — |
+| DevOps Agent 調査開始 | 23:29:42 | +0:14（Webhook から） |
+| DevOps Agent 調査完了 | 23:33:49 | +4:21（Webhook から） |
+
+### Agent の調査プロセス
+
+検証 1 とは対照的に、Agent は **直接 Kubernetes リソースを調査する** アプローチを取った。Webhook の説明に「CoreDNS」「kube-system」が含まれていたため、AWS インフラ層のスキャンをスキップしている。
+
+| ステップ | Agent の行動 | 使用ツール |
+|---|---|---|
+| 1 | CoreDNS の Deployment / Pod / 詳細を直接確認 | `kubectl get deployments`, `get pods`, `describe deployment` |
+| 2 | **レプリカ 2→0 のスケールダウンを検出**、イベント確認 | `kubectl get events` × 2 |
+| 3 | ReplicaSet を確認 | `kubectl get replicaset` |
+| 4 | **「誰がスケールダウンしたか」の調査タスクを作成・実行** | audit ログ分析 |
+| 5 | 根本原因特定 + **RBAC/PDB の欠如を指摘** | — |
+| 6 | 最終レポート作成 | — |
+
+合計 6 ステップ、AWS API 0回 + kubectl 7回。検証 1 と同様に、ステップ 4 では Agent がサブタスクを生成して EKS audit ログを分析し、操作者を特定した。
+
+### 根本原因の特定
+
+Agent は2つの finding を出力した:
+
+**Finding 1（直接原因）:**
+> ユーザー tahshiny が kubectl v1.35.3 で CoreDNS を 2 レプリカから 0 レプリカに手動スケールダウン。操作前に default namespace の Pod 一覧取得 → CoreDNS Deployment の詳細を2回取得 → scale サブリソースに PATCH という行動パターンも検出。
+
+**Finding 2（構造的原因）:**
+> EKS クラスターに CoreDNS などのクリティカルなシステムコンポーネントに対する変更を制限する RBAC ポリシー、Admission Controller、Pod Disruption Budget (PDB) が設定されていない。管理者権限を持つユーザーが重要なシステムコンポーネントを誤って削除またはスケールダウンできる状態。
+
+検証 1 では直接原因のみだったが、検証 2 では **予防的な改善提案** まで踏み込んでいる。Agent の finding には「クリティカルなシステムコンポーネント」という表現が含まれており、kube-system namespace のコンポーネントに対しては再発防止策まで提案する振る舞いが確認された。
+
+## 比較分析
+
+2つの検証結果を並べて、Agent の振る舞いの違いを整理する。
+
+| 観点 | 検証 1（UI スケールダウン） | 検証 2（CoreDNS スケールダウン） |
+|---|---|---|
+| 障害レイヤー | アプリケーション | インフラ（kube-system） |
+| 調査ステップ数 | 10 | 6 |
+| 調査時間 | 約5分 | 約4分 |
+| AWS API 呼び出し | 8回 | 0回 |
+| kubectl 呼び出し | 9回 | 7回 |
+| 調査アプローチ | 外部→内部（トップダウン） | 直接対象（ボトムアップ） |
+| audit ログ分析 | ✅ 操作者特定 | ✅ 操作者特定 + 操作前の行動パターン |
+| 予防的改善提案 | なし | RBAC, PDB, Admission Controller |
+
+### 調査戦略の適応
+
+最も興味深い発見は、**2つの検証で Agent の調査パスが大きく異なった**点である。
+
+検証 1 では「エンドポイントがダウン」という曖昧な情報から、CloudWatch → Route 53 → NLB → EKS → Service → Deployment と外部から内部へ段階的に掘り下げた。10 ステップかかったが、これは情報が少ない状態から正しい調査パスを見つけるための合理的なアプローチである。
+
+検証 2 では「CoreDNS が kube-system で停止」という具体的な情報があったため、AWS インフラ層のスキャンを完全にスキップし、直接 Kubernetes リソースの調査に入った。6 ステップで完了し、調査時間も短い。
+
+これは Agent が単にルールベースで動いているのではなく、**入力情報の具体性に応じて調査戦略を変えている可能性**を示唆している。ただし、N=2 の検証であり、Webhook ペイロードの内容が異なるという条件の違いがあるため、断定はできない。Agent が「意図的に戦略を適応させている」のか、「入力に含まれるキーワードに反応して最初のツール呼び出しが変わった」だけなのかは、今回の検証だけでは区別できない。
+
+### インフラ障害での追加価値
+
+検証 2 で Agent が RBAC/PDB の欠如を指摘したのは、EC2 インスタンスの調査では見られなかった振る舞いである。Agent の finding テキストには kube-system namespace のコンポーネントを「クリティカルなシステムコンポーネント」と表現しており、それに対する保護機構の不在を構造的な問題として報告した。アプリケーション層の UI Deployment に対しては同様の指摘が出なかったことから、Agent はリソースの種類や namespace に応じて異なる分析を行っていると考えられる。
+
+この改善提案は、DevOps Agent の [Recommendations 機能](/ja/blog/2026/04/01/aws-devops-agent-proactive-prevention)（[第3回](/ja/blog/2026/04/01/aws-devops-agent-proactive-prevention)で検証）との関連が期待される。調査時の即時フィードバックとして finding に含まれるだけでなく、週次の Oncall Report で蓄積型の改善提案として反映される可能性がある。ただし、今回の検証では Recommendations への反映は確認していない。
+
+## まとめ
+
+- **audit ログの活用が EKS 統合の最大の強み** — 「レプリカが 0」という事実だけでなく、誰が・いつ・どこから・何のツールで操作したかまで特定する。Control Plane ログの有効化が前提条件だが、これだけで調査の質が大きく変わる
+- **調査戦略は入力情報の具体性で変わった** — 曖昧なアラートではトップダウン（10ステップ）、具体的な情報ではボトムアップ（6ステップ）と、調査パスが大きく異なった。Agent に渡すアラート情報の具体性が調査効率に影響するため、Webhook のペイロード設計が重要になる
+- **インフラ障害では予防的改善提案が出た** — kube-system の CoreDNS に対しては直接原因だけでなく構造的な問題（RBAC/PDB の欠如）まで指摘された。アプリケーション障害（UI Deployment）では同様の指摘は出なかった。リソースの種類や namespace に応じて分析内容が変わる可能性を示唆する結果である
+- **CoreDNS 停止は即座にヘルスチェック失敗にならない** — 既存 Pod の DNS キャッシュや localhost ベースの Readiness probe により、影響の顕在化にタイムラグがある。自動調査パイプラインの設計では、外部ヘルスチェックだけでなくクラスター内部の監視（kube-system の Pod 状態など）も組み合わせる必要がある
+
+## クリーンアップ
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">リソース削除コマンド</summary>
+
+```bash title="Terminal"
+# サンプルアプリケーション
+kubectl delete -f https://github.com/aws-containers/retail-store-sample-app/releases/latest/download/kubernetes.yaml
+
+# CloudWatch Alarm
+aws cloudwatch delete-alarms --alarm-names "retail-store-ui-endpoint-down" --region us-east-1
+
+# SNS トピック
+aws sns delete-topic --topic-arn arn:aws:sns:us-east-1:<account-id>:devops-agent-alarm-topic --region us-east-1
+
+# Lambda 関数（us-east-1 + ap-northeast-1）
+aws lambda delete-function --function-name devops-agent-webhook-invoker --region us-east-1
+aws lambda delete-function --function-name devops-agent-webhook-invoker --region ap-northeast-1
+
+# Route 53 ヘルスチェック
+aws route53 delete-health-check --health-check-id <health-check-id> --region us-east-1
+
+# IAM ロール
+aws iam detach-role-policy --role-name devops-agent-webhook-lambda-role --policy-arn arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+aws iam delete-role --role-name devops-agent-webhook-lambda-role
+
+# EKS アクセスエントリ
+aws eks delete-access-entry --cluster-name eks-sandbox --principal-arn arn:aws:iam::<account-id>:role/DevOpsAgentRole-AgentSpace --region ap-northeast-1
+
+# Control Plane ログの無効化（任意）
+aws eks update-cluster-config \
+  --name eks-sandbox \
+  --logging '{"clusterLogging":[{"types":["api","audit","authenticator","controllerManager","scheduler"],"enabled":false}]}' \
+  --region ap-northeast-1
+```
+
+</details>

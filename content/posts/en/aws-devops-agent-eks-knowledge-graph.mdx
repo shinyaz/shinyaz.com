@@ -1,0 +1,301 @@
+---
+title: "Verifying AWS DevOps Agent — Using EKS Knowledge Graphs to Automatically Identify Kubernetes Root Causes"
+description: "Verified DevOps Agent's EKS integration. Compared investigation processes for application vs. infrastructure failures, measured audit log-based operator identification, and evaluated preventive recommendations for critical system components."
+date: "2026-04-10"
+published: true
+featured: false
+categories: [infrastructure]
+tags: ["aws", "devops-agent", "eks", "kubernetes", "incident-response", "sre"]
+series: "aws-devops-agent"
+seriesOrder: 6
+---
+
+## Introduction
+
+On April 9, 2026, AWS published [Building intelligent knowledge graphs for Amazon EKS operations using AWS DevOps Agent](https://aws.amazon.com/blogs/containers/building-intelligent-knowledge-graphs-for-amazon-eks-operations-using-aws-devops-agent/). The post describes how DevOps Agent automatically builds "knowledge graphs" (Learned Topology) mapping relationships between Kubernetes objects in EKS clusters, then traverses dependency chains to identify root causes during incidents.
+
+[Part 1](/en/blog/2026/04/01/aws-devops-agent-ga-verification) of this series verified EC2 instance CPU spikes, and [Part 5](/en/blog/2026/04/01/aws-devops-agent-webhook-auto-trigger) built a Generic Webhook auto-trigger pipeline — both targeting EC2 instances. In EKS environments, pod-to-pod communication creates dynamic network topologies that make root cause identification harder than with standalone EC2 instances. DevOps Agent's EKS integration claims to solve this with knowledge graphs.
+
+This article configures DevOps Agent with EKS cluster access and injects two failure patterns into a microservices application. **Does the agent's investigation process and root cause accuracy differ between application failures (UI Deployment scale-down) and infrastructure failures (CoreDNS scale-down)?** We measure the difference with real data. Official documentation: [AWS DevOps Agent User Guide — AWS EKS access setup](https://docs.aws.amazon.com/devopsagent/latest/userguide/configuring-capabilities-for-aws-devops-agent-aws-eks-access-setup.html).
+
+Prerequisites:
+
+- AWS CLI v2 (with `devops-agent` subcommand support)
+- kubectl, EKS cluster (Control Plane logging enabled)
+- DevOps Agent Agent Space (created in [Part 1](/en/blog/2026/04/01/aws-devops-agent-ga-verification))
+- Generic Webhook pipeline (built in [Part 5](/en/blog/2026/04/01/aws-devops-agent-webhook-auto-trigger))
+- Test region: ap-northeast-1 (Tokyo)
+
+Skip to [Comparison Analysis](#comparison-analysis) if you only want the findings.
+
+## Environment Setup
+
+We configure DevOps Agent access entries for EKS cluster `eks-sandbox` (v1.35, Auto Mode) and deploy a sample application. Total setup time is approximately 30 minutes including application startup.
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">Setup steps (EKS access entry + sample app + Webhook pipeline)</summary>
+
+### Enable Control Plane Logging
+
+Required for DevOps Agent to analyze EKS audit logs.
+
+```bash title="Terminal"
+aws eks update-cluster-config \
+  --name eks-sandbox \
+  --logging '{"clusterLogging":[{"types":["api","audit","authenticator","controllerManager","scheduler"],"enabled":true}]}' \
+  --region ap-northeast-1
+```
+
+### Create EKS Access Entry
+
+Associate the Agent Space role (`DevOpsAgentRole-AgentSpace`) with `AmazonAIOpsAssistantPolicy`. This grants DevOps Agent read-only kubectl access.
+
+Prerequisite: the EKS cluster's authentication mode must include the EKS API (`API` or `API_AND_CONFIG_MAP`). Check the Access tab in the EKS console. If the mode is `CONFIG_MAP` only, change it before proceeding.
+
+```bash title="Terminal"
+# Create access entry
+aws eks create-access-entry \
+  --cluster-name eks-sandbox \
+  --principal-arn arn:aws:iam::<account-id>:role/DevOpsAgentRole-AgentSpace \
+  --region ap-northeast-1
+
+# Associate AmazonAIOpsAssistantPolicy
+aws eks associate-access-policy \
+  --cluster-name eks-sandbox \
+  --principal-arn arn:aws:iam::<account-id>:role/DevOpsAgentRole-AgentSpace \
+  --policy-arn arn:aws:eks::aws:cluster-access-policy/AmazonAIOpsAssistantPolicy \
+  --access-scope '{"type":"cluster"}' \
+  --region ap-northeast-1
+```
+
+The key is `AmazonAIOpsAssistantPolicy` — a DevOps Agent-specific read-only access policy that allows describing resources, retrieving pod logs, and inspecting cluster events, but cannot create, modify, or delete any resources.
+
+### Deploy Sample Application
+
+Using the [Containers Retail Store Sample Application](https://github.com/aws-containers/retail-store-sample-app) with five microservices: UI, Catalog, Cart, Orders, and Checkout.
+
+```bash title="Terminal"
+kubectl apply -f https://github.com/aws-containers/retail-store-sample-app/releases/latest/download/kubernetes.yaml
+kubectl wait --for=condition=available deployments --all --timeout=180s
+kubectl annotate svc ui service.beta.kubernetes.io/aws-load-balancer-scheme=internet-facing --overwrite
+```
+
+### Webhook Auto-Investigation Pipeline
+
+We configured the Route 53 health check → CloudWatch Alarm → SNS → Lambda → Webhook pipeline from [Part 5](/en/blog/2026/04/01/aws-devops-agent-webhook-auto-trigger) against the UI service's NLB endpoint. See Part 5 for HMAC signature implementation details.
+
+</details>
+
+### Learned Topology
+
+After setup, we checked the Learned Topology in the Operator App's Topology tab.
+
+DevOps Agent automatically discovers Kubernetes objects and builds a graph of their relationships. In our environment, the following objects were detected:
+
+- **Namespace**: default, kube-system
+- **Deployment**: ui, catalog, carts, checkout, orders, coredns, etc.
+- **ReplicaSet**: corresponding to each Deployment
+- **Pod**: created by each ReplicaSet
+- **Service**: ui (LoadBalancer), catalog, carts, checkout, orders (ClusterIP)
+- **StatefulSet**: catalog-mysql, orders-postgresql, orders-rabbitmq
+
+This graph determines how the agent traverses dependency chains during incident investigation. In Verification 1, we can observe the agent following this graph from Route 53 → NLB → Service → Deployment → Pod.
+
+## Verification 1: Application Failure Root Cause Identification
+
+Scale the UI Deployment to 0 replicas and verify the end-to-end flow from Route 53 health check failure through the auto-investigation pipeline.
+
+### Fault Injection
+
+```bash title="Terminal"
+kubectl scale deployment ui --replicas=0
+```
+
+### Timeline
+
+| Event | Time (JST) | Elapsed |
+|---|---|---|
+| Fault injection | 22:58:30 | 0:00 |
+| CloudWatch Alarm → ALARM | 23:02:27 | +3:57 |
+| Webhook 200 OK → investigation triggered | 23:04:00 | +5:30 |
+| DevOps Agent investigation started | 23:05:02 | +6:32 |
+| DevOps Agent investigation completed | 23:10:05 | +11:35 |
+
+About 4 minutes from fault injection to alarm transition (Route 53 health check interval 30s × failure threshold 2 + CloudWatch evaluation period 60s × 2). The auto-pipeline's first execution (Alarm → SNS → Lambda) returned 403 due to an HMAC signature implementation error. Per the [official Webhook signature specification](https://docs.aws.amazon.com/devopsagent/latest/userguide/configuring-capabilities-for-aws-devops-agent-invoking-devops-agent-through-webhook.html), the correct implementation requires:
+
+- Header name: `x-amzn-event-signature` (not `x-webhook-signature`)
+- Signature input: `${timestamp}:${payload}` concatenated string
+- Encoding: base64 (not hex)
+- Timestamp header: `x-amzn-event-timestamp` is required
+
+After fixing the Lambda, a manual test invocation returned 200 OK and triggered the agent's investigation. The investigation itself completed in about 5 minutes.
+
+### Agent's Investigation Process
+
+The agent took a **top-down approach, drilling from external endpoints to internal resources**.
+
+| Step | Agent Action | Tools Used |
+|---|---|---|
+| 1 | Locate alarm (cross-region search: us-east-1, us-west-2, ap-northeast-1) | `cloudwatch.describe_alarms` × 3 |
+| 2 | Check Route 53 health check config and status | `route53.get_health_check`, `get_health_check_status` |
+| 3 | Identify NLB and discover EKS cluster | `elbv2.describe_load_balancers`, `eks.list_clusters` |
+| 4 | Get EKS cluster details, namespaces, services | `eks.describe_cluster`, `kubectl get namespaces`, `kubectl get services -A` |
+| 5 | Check UI Service details → **Endpoints: \<none\> detected** | `kubectl describe service ui`, `kubectl get pods` |
+| 6 | Check Deployment / ReplicaSet / Events | `kubectl get deployments,replicasets`, `kubectl get events` |
+| 7 | Deployment details → **Replicas 0, scale-down event detected** | `kubectl describe deployment ui` |
+| 8 | Check NLB target group health (0 targets) | `elbv2.describe_target_health` |
+| 9 | **Create and execute "who scaled down" investigation task** | Audit log analysis |
+| 10 | Generate final report | — |
+
+Total: 10 steps, 8 AWS API calls + 9 kubectl calls.
+
+In step 9, the agent internally spawned a subtask (`investigate-scale-down-event`) and analyzed EKS Control Plane audit logs (stored in CloudWatch Logs under the `/aws/eks/eks-sandbox/cluster` log group). Audit logs record every request to the Kubernetes API server. The agent extracted the PATCH operation on `deployments/ui/scale` and identified the operator's IAM role, source IP, and tool (User-Agent).
+
+### Root Cause Identified
+
+The agent accurately identified:
+
+> **User "tahshiny" (AWS SSO, ConsoleAdministratorAccess role) used kubectl v1.35.3 from IP 114.148.251.28 to execute a PATCH operation on `deployments/ui/scale`, setting replicas to 0.**
+
+Beyond just "replicas are 0," the agent extracted **the operator, tool, source IP, and exact timestamp** from EKS Control Plane audit logs. It also detected that the same user had performed a similar operation on the carts Deployment minutes earlier.
+
+## Verification 2: Infrastructure Failure Root Cause Identification
+
+Scale CoreDNS to 0 replicas to shut down DNS resolution across the cluster. The original plan expected DNS failures to cascade to applications, causing external health check failures that would trigger the auto-investigation pipeline. However, as described below, the auto-trigger didn't fire. We instead used a manual Webhook to provide the agent with failure information, effectively comparing **how the agent investigates when given specific failure context** versus the vague alert in Verification 1.
+
+### Fault Injection
+
+```bash title="Terminal"
+kubectl scale deployment coredns --replicas=0 -n kube-system
+```
+
+An unexpected finding: **stopping CoreDNS did not cause the Route 53 health check to fail**. The reasons:
+
+- Route 53 health checks connect directly to the NLB's IP address, independent of in-cluster DNS
+- The UI Pod was already running, and its readiness probe checks `localhost:8080` — no DNS needed
+- UI-to-backend communication uses DNS, but existing connection pools mask the impact until DNS cache expires
+
+This is a realistic production scenario. Stopping CoreDNS doesn't immediately crash existing Pods. Impact only materializes when new Pods start or DNS cache entries expire.
+
+Since the auto-trigger didn't fire, we invoked the Webhook manually to start the investigation. The payload included specific information:
+
+```json title="Webhook payload"
+{
+  "title": "EKS Health Alert: eks-coredns-down",
+  "description": "CoreDNS pods scaled to 0 in kube-system namespace. Multiple services experiencing DNS resolution failures in EKS cluster eks-sandbox (ap-northeast-1)."
+}
+```
+
+Including "CoreDNS" and "kube-system" in the payload significantly influenced the agent's investigation strategy, as discussed below.
+
+### Timeline
+
+| Event | Time (JST) | Elapsed |
+|---|---|---|
+| Fault injection | 23:21:10 | — |
+| Manual Webhook invocation | 23:29:28 | — |
+| DevOps Agent investigation started | 23:29:42 | +0:14 (from Webhook) |
+| DevOps Agent investigation completed | 23:33:49 | +4:21 (from Webhook) |
+
+### Agent's Investigation Process
+
+In contrast to Verification 1, the agent took a **bottom-up approach, going directly to Kubernetes resources**. Because the Webhook payload mentioned "CoreDNS" and "kube-system," it skipped the AWS infrastructure layer entirely.
+
+| Step | Agent Action | Tools Used |
+|---|---|---|
+| 1 | Check CoreDNS Deployment / Pods / details directly | `kubectl get deployments`, `get pods`, `describe deployment` |
+| 2 | **Detect replica 2→0 scale-down**, check events | `kubectl get events` × 2 |
+| 3 | Check ReplicaSet | `kubectl get replicaset` |
+| 4 | **Create and execute "who scaled down" investigation task** | Audit log analysis |
+| 5 | Identify root cause + **flag RBAC/PDB gaps** | — |
+| 6 | Generate final report | — |
+
+Total: 6 steps, 0 AWS API calls + 7 kubectl calls. As in Verification 1, step 4 involved the agent spawning a subtask to analyze EKS audit logs and identify the operator.
+
+### Root Cause Identified
+
+The agent produced two findings:
+
+**Finding 1 (Direct cause):**
+> User tahshiny used kubectl v1.35.3 to manually scale CoreDNS from 2 to 0 replicas. The agent also detected the pre-operation behavior pattern: listing pods in default namespace → retrieving CoreDNS Deployment details twice → PATCH to scale subresource.
+
+**Finding 2 (Structural cause):**
+> The EKS cluster lacks RBAC policies, Admission Controllers, or Pod Disruption Budgets (PDB) to restrict changes to critical system components like CoreDNS. Users with admin privileges can accidentally delete or scale down essential system components.
+
+Verification 1 only identified the direct cause. Verification 2 went further with **preventive improvement recommendations**. The agent's finding text described kube-system components as "critical system components" and flagged the absence of protective mechanisms — a behavior not observed for the application-layer UI Deployment.
+
+## Comparison Analysis
+
+Placing the two verification results side by side to examine how the agent's behavior differs.
+
+| Aspect | Verification 1 (UI scale-down) | Verification 2 (CoreDNS scale-down) |
+|---|---|---|
+| Failure layer | Application | Infrastructure (kube-system) |
+| Investigation steps | 10 | 6 |
+| Investigation time | ~5 min | ~4 min |
+| AWS API calls | 8 | 0 |
+| kubectl calls | 9 | 7 |
+| Investigation approach | Outside-in (top-down) | Direct target (bottom-up) |
+| Audit log analysis | ✅ Operator identified | ✅ Operator + pre-operation behavior |
+| Preventive recommendations | None | RBAC, PDB, Admission Controller |
+
+### Adaptive Investigation Strategy
+
+The most interesting finding is that **the agent's investigation paths differed significantly between the two verifications**.
+
+In Verification 1, starting from the vague information "endpoint is down," the agent drilled from CloudWatch → Route 53 → NLB → EKS → Service → Deployment. The 10 steps were a rational approach to finding the correct investigation path from limited information.
+
+In Verification 2, with specific information "CoreDNS is down in kube-system," the agent completely skipped the AWS infrastructure scan and went straight to Kubernetes resources. It completed in 6 steps with shorter investigation time.
+
+This suggests the agent **may adapt its investigation strategy based on input specificity**, rather than operating on fixed rules. However, with N=2 verifications and different Webhook payload content, we cannot be definitive. Whether the agent "intentionally adapts strategy" or simply "reacts to keywords in the input that change the first tool call" cannot be distinguished from this verification alone.
+
+### Additional Value for Infrastructure Failures
+
+The agent flagging RBAC/PDB gaps in Verification 2 is behavior not seen in EC2 instance investigations. The agent's finding text described kube-system namespace components as "critical system components" and reported the absence of protective mechanisms as a structural issue. Since no similar recommendation appeared for the application-layer UI Deployment, the agent appears to perform different analysis depending on resource type or namespace.
+
+These improvement recommendations are expected to relate to DevOps Agent's [Recommendations feature](/en/blog/2026/04/01/aws-devops-agent-proactive-prevention) (verified in [Part 3](/en/blog/2026/04/01/aws-devops-agent-proactive-prevention)). Beyond immediate feedback in investigation findings, they may be reflected in weekly Oncall Reports as accumulated improvement proposals. However, we did not confirm Recommendations reflection in this verification.
+
+## Summary
+
+- **Audit log utilization is the EKS integration's greatest strength** — Beyond "replicas are 0," it identifies who, when, from where, and with what tool. Control Plane logging is a prerequisite, but this alone dramatically improves investigation quality
+- **Investigation strategy varied with input specificity** — Vague alerts led to top-down investigation (10 steps), specific information led to bottom-up (6 steps), with significantly different investigation paths. The specificity of alert information passed to the agent impacts investigation efficiency, making Webhook payload design important
+- **Infrastructure failures triggered preventive recommendations** — For kube-system CoreDNS, the agent flagged structural issues (RBAC/PDB gaps) beyond just the direct cause. This behavior didn't appear for the application-layer UI Deployment, suggesting the agent may perform different analysis depending on resource type or namespace
+- **CoreDNS shutdown doesn't immediately fail health checks** — Existing Pod DNS caches and localhost-based readiness probes create a lag before impact materializes. Auto-investigation pipeline design should combine external health checks with in-cluster monitoring (kube-system Pod status, etc.)
+
+## Cleanup
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">Resource deletion commands</summary>
+
+```bash title="Terminal"
+# Sample application
+kubectl delete -f https://github.com/aws-containers/retail-store-sample-app/releases/latest/download/kubernetes.yaml
+
+# CloudWatch Alarm
+aws cloudwatch delete-alarms --alarm-names "retail-store-ui-endpoint-down" --region us-east-1
+
+# SNS topic
+aws sns delete-topic --topic-arn arn:aws:sns:us-east-1:<account-id>:devops-agent-alarm-topic --region us-east-1
+
+# Lambda functions (us-east-1 + ap-northeast-1)
+aws lambda delete-function --function-name devops-agent-webhook-invoker --region us-east-1
+aws lambda delete-function --function-name devops-agent-webhook-invoker --region ap-northeast-1
+
+# Route 53 health check
+aws route53 delete-health-check --health-check-id <health-check-id> --region us-east-1
+
+# IAM role
+aws iam detach-role-policy --role-name devops-agent-webhook-lambda-role --policy-arn arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+aws iam delete-role --role-name devops-agent-webhook-lambda-role
+
+# EKS access entry
+aws eks delete-access-entry --cluster-name eks-sandbox --principal-arn arn:aws:iam::<account-id>:role/DevOpsAgentRole-AgentSpace --region ap-northeast-1
+
+# Disable Control Plane logging (optional)
+aws eks update-cluster-config \
+  --name eks-sandbox \
+  --logging '{"clusterLogging":[{"types":["api","audit","authenticator","controllerManager","scheduler"],"enabled":false}]}' \
+  --region ap-northeast-1
+```
+
+</details>
