@@ -12,7 +12,7 @@ seriesOrder: 2
 
 ## Introduction
 
-In the [previous article](/en/blog/2026/04/05/strands-agents-swarm), we learned how agents autonomously hand off tasks in a Swarm. But since Swarm agents decide autonomously, execution order is unpredictable. Sometimes you need explicit control: "research → analysis → report."
+In the [previous article](/en/blog/2026/04/11/strands-agents-swarm), we learned how agents autonomously hand off tasks in a Swarm. But since Swarm agents decide autonomously, execution order is unpredictable. Sometimes you need explicit control: "research → analysis → report."
 
 Just define nodes and edges with `GraphBuilder` and a deterministic workflow based on dependencies runs automatically.
 
@@ -27,7 +27,7 @@ See the official documentation at [Graph](https://strandsagents.com/docs/user-gu
 
 ## Setup
 
-Use the same environment from [Part 1](/en/blog/2026/04/05/strands-agents-swarm). All examples use the same model configuration and can be run as independent `.py` files. Write the common setup at the top, then add each example's code below it.
+Use the same environment from [Part 1](/en/blog/2026/04/11/strands-agents-swarm). All examples use the same model configuration and can be run as independent `.py` files. Write the common setup at the top, then add each example's code below it.
 
 ```python title="Python (common setup)"
 from strands import Agent

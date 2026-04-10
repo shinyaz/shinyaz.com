@@ -1,7 +1,7 @@
 ---
 title: "Strands Agents SDK デプロイ — AgentCore CLI でマネージドデプロイする"
 description: "AgentCore CLI（Node.js）を使い、agentcore create + deploy の 2 コマンドで Strands エージェントを Bedrock AgentCore にデプロイする。セッション分離による会話継続も検証する。"
-date: 2026-04-12
+date: 2026-04-18
 published: false
 featured: false
 categories: [ai-agents]
@@ -12,7 +12,7 @@ seriesOrder: 3
 
 ## はじめに
 
-[前回の記事](/ja/blog/2026/04/12/strands-agents-lambda)では Lambda にサーバーレスデプロイした。Lambda は手軽だが、ステートレスなのでリクエスト間で会話を継続できない。[実践第 2 回](/ja/blog/2026/04/03/strands-agents-session-management)では `FileSessionManager` で会話を手動で永続化したが、本番環境ではインフラ側でセッションを管理したい。
+[前回の記事](/ja/blog/2026/04/18/strands-agents-lambda)では Lambda にサーバーレスデプロイした。Lambda は手軽だが、ステートレスなのでリクエスト間で会話を継続できない。[実践第 2 回](/ja/blog/2026/04/03/strands-agents-session-management)では `FileSessionManager` で会話を手動で永続化したが、本番環境ではインフラ側でセッションを管理したい。
 
 [Amazon Bedrock AgentCore Runtime](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/what-is-bedrock-agentcore.html) は、AI エージェント向けに設計されたマネージドランタイムだ。セッション分離（専用 microVM）、オートスケーリング、オブザーバビリティが組み込まれている。[AgentCore CLI](https://github.com/aws/agentcore-cli) を使えば、`create` + `deploy` の 2 コマンドで CDK の知識なしにデプロイが完了する。
 
@@ -63,7 +63,7 @@ cd MyAgent
 Project created successfully!
 ```
 
-エージェントコード（`app/MyAgent/main.py`）、CDK インフラコード（`agentcore/cdk/`）、プロジェクト設定（`agentcore/agentcore.json`）がすべて自動生成される。[第 1 回](/ja/blog/2026/04/12/strands-agents-docker)では FastAPI のコードを手動で書き、[第 2 回](/ja/blog/2026/04/12/strands-agents-lambda)では Lambda ハンドラーを手動で書いたが、AgentCore CLI ではコードの記述が不要だ。
+エージェントコード（`app/MyAgent/main.py`）、CDK インフラコード（`agentcore/cdk/`）、プロジェクト設定（`agentcore/agentcore.json`）がすべて自動生成される。[第 1 回](/ja/blog/2026/04/18/strands-agents-docker)では FastAPI のコードを手動で書き、[第 2 回](/ja/blog/2026/04/18/strands-agents-lambda)では Lambda ハンドラーを手動で書いたが、AgentCore CLI ではコードの記述が不要だ。
 
 ### デプロイ
 
@@ -92,7 +92,7 @@ Target: ap-northeast-1:123456789012
 Deployed 1 stack(s): AgentCore-MyAgent-default
 ```
 
-内部では CDK が CloudFormation スタックを作成し、IAM ロール、ポリシー、AgentCore Runtime がすべて自動でプロビジョニングされる。CDK Bootstrap が未実施のアカウント/リージョンでも、CLI が自動で Bootstrap を実行する。[第 2 回](/ja/blog/2026/04/12/strands-agents-lambda)の Lambda では IAM ロールを手動で作成したが、AgentCore CLI はこれを自動化する。
+内部では CDK が CloudFormation スタックを作成し、IAM ロール、ポリシー、AgentCore Runtime がすべて自動でプロビジョニングされる。CDK Bootstrap が未実施のアカウント/リージョンでも、CLI が自動で Bootstrap を実行する。[第 2 回](/ja/blog/2026/04/18/strands-agents-lambda)の Lambda では IAM ロールを手動で作成したが、AgentCore CLI はこれを自動化する。
 
 ### 動作確認
 

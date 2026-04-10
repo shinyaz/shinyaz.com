@@ -25,7 +25,7 @@ See the official documentation at [Multi-agent Patterns](https://strandsagents.c
 
 ## Setup
 
-Use the same environment from [Part 1](/en/blog/2026/04/05/strands-agents-swarm). All examples use the same model configuration. Write the common setup at the top, then add each example's code below it.
+Use the same environment from [Part 1](/en/blog/2026/04/11/strands-agents-swarm). All examples use the same model configuration. Write the common setup at the top, then add each example's code below it.
 
 ```python title="Python (common setup)"
 from strands import Agent, tool
@@ -95,7 +95,7 @@ def translator(text: str, target_language: str) -> str:
 
 ### Swarm
 
-The pattern from [Part 1](/en/blog/2026/04/05/strands-agents-swarm). Agents autonomously hand off to each other.
+The pattern from [Part 1](/en/blog/2026/04/11/strands-agents-swarm). Agents autonomously hand off to each other.
 
 ```python title="Python"
 summarizer_agent = Agent(
@@ -117,7 +117,7 @@ In Swarm, there's no orchestrator. When the summarizer finishes, it autonomously
 
 ### Graph
 
-The pattern from [Part 2](/en/blog/2026/04/05/strands-agents-graph). Execution order explicitly defined by edges.
+The pattern from [Part 2](/en/blog/2026/04/11/strands-agents-graph). Execution order explicitly defined by edges.
 
 ```python title="Python"
 summarizer_agent2 = Agent(
@@ -283,7 +283,7 @@ Across the intro, practical, and multi-agent series (14 articles total), we cove
 |---|---|---|
 | [Intro](/en/blog/2026/03/03/strands-agents-quickstart) (5 parts) | Fundamentals | Agent loop, tools, MCP, conversation, Agents as Tools |
 | [Practical](/en/blog/2026/04/03/strands-agents-structured-output) (5 parts) | Quality | Structured Output, sessions, Hooks, Guardrails, metrics |
-| [Multi-Agent](/en/blog/2026/04/05/strands-agents-swarm) (4 parts) | Collaboration | Swarm, Graph, nesting+Hooks+shared state, pattern comparison |
+| [Multi-Agent](/en/blog/2026/04/11/strands-agents-swarm) (4 parts) | Collaboration | Swarm, Graph, nesting+Hooks+shared state, pattern comparison |
 
 Knowledge from all 3 series compounds rather than standing alone:
 

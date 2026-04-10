@@ -1,7 +1,7 @@
 ---
 title: "Strands Agents SDK Deploy — Turn Your Agent into an HTTP API with Docker"
 description: "Wrap a Strands Agents SDK agent with FastAPI to create an HTTP API, then package it as a Docker container. Covers the async def hang pitfall and SSO credential issues encountered during verification."
-date: 2026-04-12
+date: 2026-04-18
 published: false
 featured: false
 categories: [ai-agents]
@@ -12,7 +12,7 @@ seriesOrder: 1
 
 ## Introduction
 
-From the [introductory series](/en/blog/2026/03/03/strands-agents-quickstart) through the [multi-agent series](/en/blog/2026/04/05/strands-agents-swarm), every agent ran as a local Python script. `python agent.py` works, but other systems can't call it.
+From the [introductory series](/en/blog/2026/03/03/strands-agents-quickstart) through the [multi-agent series](/en/blog/2026/04/11/strands-agents-swarm), every agent ran as a local Python script. `python agent.py` works, but other systems can't call it.
 
 For production use, you need to expose the agent as an HTTP API and package it into a container. Just wrapping the agent with FastAPI gives you a container that can be deployed anywhere.
 

@@ -1,7 +1,7 @@
 ---
 title: "Strands Agents SDK Deploy — Managed Deployment with AgentCore CLI"
 description: "Use the AgentCore CLI (Node.js) to deploy a Strands agent to Bedrock AgentCore with just agentcore create + deploy. Verified that session isolation enables conversation continuity across invocations."
-date: 2026-04-12
+date: 2026-04-18
 published: false
 featured: false
 categories: [ai-agents]
@@ -12,7 +12,7 @@ seriesOrder: 3
 
 ## Introduction
 
-In the [previous article](/en/blog/2026/04/12/strands-agents-lambda), we deployed to Lambda serverlessly. Lambda is convenient but stateless — conversations can't continue across requests. In [practical part 2](/en/blog/2026/04/03/strands-agents-session-management), we manually persisted conversations with `FileSessionManager`, but in production you want the infrastructure to handle session management.
+In the [previous article](/en/blog/2026/04/18/strands-agents-lambda), we deployed to Lambda serverlessly. Lambda is convenient but stateless — conversations can't continue across requests. In [practical part 2](/en/blog/2026/04/03/strands-agents-session-management), we manually persisted conversations with `FileSessionManager`, but in production you want the infrastructure to handle session management.
 
 [Amazon Bedrock AgentCore Runtime](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/what-is-bedrock-agentcore.html) is a managed runtime purpose-built for AI agents. It includes session isolation (dedicated microVMs), auto-scaling, and built-in observability. With the [AgentCore CLI](https://github.com/aws/agentcore-cli), `create` + `deploy` completes the deployment with no CDK knowledge required.
 
@@ -63,7 +63,7 @@ cd MyAgent
 Project created successfully!
 ```
 
-Agent code (`app/MyAgent/main.py`), CDK infrastructure code (`agentcore/cdk/`), and project configuration (`agentcore/agentcore.json`) are all auto-generated. In [part 1](/en/blog/2026/04/12/strands-agents-docker) we wrote FastAPI code manually, and in [part 2](/en/blog/2026/04/12/strands-agents-lambda) we wrote the Lambda handler manually — with AgentCore CLI, no code writing is needed.
+Agent code (`app/MyAgent/main.py`), CDK infrastructure code (`agentcore/cdk/`), and project configuration (`agentcore/agentcore.json`) are all auto-generated. In [part 1](/en/blog/2026/04/18/strands-agents-docker) we wrote FastAPI code manually, and in [part 2](/en/blog/2026/04/18/strands-agents-lambda) we wrote the Lambda handler manually — with AgentCore CLI, no code writing is needed.
 
 ### Deploying
 
@@ -92,7 +92,7 @@ Target: ap-northeast-1:123456789012
 Deployed 1 stack(s): AgentCore-MyAgent-default
 ```
 
-Internally, CDK creates a CloudFormation stack that auto-provisions IAM roles, policies, and the AgentCore Runtime. If CDK Bootstrap hasn't been run for the account/region, the CLI handles it automatically. In [part 2](/en/blog/2026/04/12/strands-agents-lambda), we created the IAM role manually for Lambda — the AgentCore CLI automates this.
+Internally, CDK creates a CloudFormation stack that auto-provisions IAM roles, policies, and the AgentCore Runtime. If CDK Bootstrap hasn't been run for the account/region, the CLI handles it automatically. In [part 2](/en/blog/2026/04/18/strands-agents-lambda), we created the IAM role manually for Lambda — the AgentCore CLI automates this.
 
 ### Basic Verification
 
