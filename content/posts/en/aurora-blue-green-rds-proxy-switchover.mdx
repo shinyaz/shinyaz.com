@@ -1,0 +1,457 @@
+---
+title: "Aurora Blue/Green in Practice — How RDS Proxy Changes Switchover Downtime"
+description: "Measured Blue/Green Switchover downtime through RDS Proxy with psql. Compared against direct connection (26s) and JDBC BG plugin (0s) to quantify RDS Proxy's effect and constraints."
+date: "2026-04-10"
+published: true
+featured: false
+categories: [infrastructure]
+tags: ["aws", "aurora", "postgresql", "rds", "blue-green-deployment", "rds-proxy", "database"]
+series: "aurora-blue-green"
+seriesOrder: 5
+---
+
+## Introduction
+
+In [Part 1](/en/blog/2026/03/25/aurora-blue-green-downtime-measurement), we observed 26 seconds of downtime and 6 connection failures during an Aurora PostgreSQL Blue/Green Switchover using psql. DNS TTL of 60 seconds was the primary bottleneck. In [Part 2](/en/blog/2026/03/25/aurora-blue-green-jdbc-plugin-comparison), the AWS JDBC Driver's BG plugin achieved zero connection failures — but it's limited to Java (JDBC).
+
+What about Python, Go, Node.js, and other non-Java languages? On April 9, 2026, AWS [announced RDS Proxy support for Blue/Green Deployments](https://aws.amazon.com/about-aws/whats-new/2026/04/rds-proxy-blue-green/). With RDS Proxy, applications always connect to the proxy endpoint, so when the database endpoint's DNS changes during switchover, the application's DNS cache is unaffected. The proxy internally detects the switchover and redirects connections to the Green environment. It works regardless of language or driver.
+
+This article measures RDS Proxy switchover downtime using the same psql-based approach from Part 1:
+
+1. **How much downtime** does RDS Proxy switchover produce?
+2. **What error patterns** occur during switchover?
+3. **Where does it rank** compared to direct connection and the JDBC BG plugin?
+
+See [Using RDS Proxy with Blue/Green Deployments](https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/rds-proxy-blue-green.html) for official documentation.
+
+## Test Environment
+
+| Item | Value |
+| --- | --- |
+| Region | ap-northeast-1 (Tokyo) |
+| Engine | Aurora PostgreSQL 16.9 (Blue) → 17.6 (Green) |
+| Instance class | db.r6g.large |
+| Configuration | Writer × 1 (no Reader) |
+| RDS Proxy | PostgreSQL engine family, no TLS |
+| VPC | Default VPC (3 AZs) |
+| Client | EC2 (Amazon Linux 2023, t3.medium) + psql 16.12 |
+| Test interval | 1 second (`INSERT` + `inet_server_addr()`, 200 iterations) |
+| Switchover timeout | 300 seconds (default) |
+
+Prerequisites:
+
+- AWS CLI configured (`rds:*`, `ec2:*`, `iam:*`, `secretsmanager:*` permissions)
+- psql (PostgreSQL client)
+
+Skip to [results](#results) if you only want the findings.
+
+Before diving into setup, there's a critical constraint to be aware of when combining RDS Proxy with Blue/Green Deployments.
+
+## Proxy Target Must Be Registered Before Blue/Green Creation
+
+There's a critical constraint when combining RDS Proxy with Blue/Green Deployments: **the Blue cluster must already be a target of the proxy before creating the Blue/Green Deployment**. You cannot add a Blue cluster to an RDS Proxy after a Blue/Green Deployment has been created for that cluster.
+
+This is documented in the [official docs](https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/rds-proxy-blue-green.html). If you already have an RDS Proxy setup, this isn't an issue. But when building both from scratch, pay attention to resource creation order.
+
+Additionally, RDS Proxy with Blue/Green Deployments is not supported for Aurora Global Databases.
+
+## Environment Setup
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">Aurora cluster, RDS Proxy, and EC2 creation steps</summary>
+
+Replace the following placeholders with your own values throughout the commands.
+
+| Placeholder | Description |
+| --- | --- |
+| `<account-id>` | AWS account ID |
+| `<vpc-id>` | VPC ID |
+| `<sg-id>` | Security group ID (created below) |
+| `<subnet-1>`, `<subnet-2>`, `<subnet-3>` | Subnet IDs in different AZs (3 required) |
+| `<subnet-id>` | Subnet ID for the EC2 instance |
+| `<password>` | Database master password |
+| `<secret-arn>` | Secrets Manager secret ARN |
+| `<al2023-ami-id>` | Amazon Linux 2023 AMI ID |
+| `<id>` | Identifier portion of the RDS Proxy endpoint |
+
+### Security Group
+
+```bash title="Terminal"
+aws ec2 create-security-group \
+  --description "SG for Blue/Green + RDS Proxy verification" \
+  --group-name bg-proxy-verify-sg \
+  --vpc-id <vpc-id>
+
+# Self-referencing rule (Proxy ↔ Aurora ↔ EC2 PostgreSQL traffic)
+aws ec2 authorize-security-group-ingress \
+  --group-id <sg-id> \
+  --port 5432 \
+  --protocol tcp \
+  --source-group <sg-id>
+```
+
+### DB Subnet Group
+
+```bash title="Terminal"
+aws rds create-db-subnet-group \
+  --db-subnet-group-name bg-proxy-verify-subnet \
+  --db-subnet-group-description "Subnet group for BG Proxy verification" \
+  --subnet-ids '["<subnet-1>","<subnet-2>","<subnet-3>"]'
+```
+
+### Secrets Manager Secret
+
+RDS Proxy retrieves database credentials from Secrets Manager.
+
+```bash title="Terminal"
+aws secretsmanager create-secret \
+  --name bg-proxy-verify-secret \
+  --secret-string '{"username":"postgres","password":"<password>"}'
+```
+
+### Custom Cluster Parameter Group
+
+Blue/Green Deployments require logical replication.
+
+```bash title="Terminal"
+aws rds create-db-cluster-parameter-group \
+  --db-cluster-parameter-group-name bg-proxy-verify-cpg \
+  --db-parameter-group-family aurora-postgresql16 \
+  --description "Cluster PG with logical replication"
+
+aws rds modify-db-cluster-parameter-group \
+  --db-cluster-parameter-group-name bg-proxy-verify-cpg \
+  --parameters '[{"ParameterName":"rds.logical_replication","ParameterValue":"1","ApplyMethod":"pending-reboot"}]'
+```
+
+### Aurora Cluster and Instance
+
+```bash title="Terminal"
+aws rds create-db-cluster \
+  --db-cluster-identifier bg-proxy-verify \
+  --db-cluster-parameter-group-name bg-proxy-verify-cpg \
+  --db-subnet-group-name bg-proxy-verify-subnet \
+  --engine aurora-postgresql \
+  --engine-version 16.9 \
+  --master-username postgres \
+  --master-user-password '<password>' \
+  --vpc-security-group-ids '["<sg-id>"]'
+
+aws rds create-db-instance \
+  --db-cluster-identifier bg-proxy-verify \
+  --db-instance-class db.r6g.large \
+  --db-instance-identifier bg-proxy-verify-w1 \
+  --engine aurora-postgresql
+```
+
+After the instance becomes `available`, reboot to apply the logical replication setting.
+
+```bash title="Terminal"
+aws rds reboot-db-instance --db-instance-identifier bg-proxy-verify-w1
+```
+
+### RDS Proxy Creation and Target Registration
+
+Create an IAM role with Secrets Manager access.
+
+```bash title="Terminal"
+aws iam create-role \
+  --role-name bg-proxy-verify-role \
+  --assume-role-policy-document '{
+    "Version":"2012-10-17",
+    "Statement":[{
+      "Effect":"Allow",
+      "Principal":{"Service":"rds.amazonaws.com"},
+      "Action":"sts:AssumeRole"
+    }]
+  }'
+
+aws iam put-role-policy \
+  --role-name bg-proxy-verify-role \
+  --policy-name SecretsManagerAccess \
+  --policy-document '{
+    "Version":"2012-10-17",
+    "Statement":[{
+      "Effect":"Allow",
+      "Action":["secretsmanager:GetSecretValue","secretsmanager:DescribeSecret"],
+      "Resource":"<secret-arn>"
+    }]
+  }'
+```
+
+Create the proxy and register the Aurora cluster as a target.
+
+```bash title="Terminal"
+aws rds create-db-proxy \
+  --db-proxy-name bg-proxy-verify \
+  --engine-family POSTGRESQL \
+  --auth '[{"AuthScheme":"SECRETS","SecretArn":"<secret-arn>","IAMAuth":"DISABLED"}]' \
+  --role-arn arn:aws:iam::<account-id>:role/bg-proxy-verify-role \
+  --vpc-subnet-ids '["<subnet-1>","<subnet-2>","<subnet-3>"]' \
+  --vpc-security-group-ids '["<sg-id>"]'
+
+# After proxy becomes available, register the target
+aws rds register-db-proxy-targets \
+  --db-proxy-name bg-proxy-verify \
+  --db-cluster-identifiers '["bg-proxy-verify"]'
+```
+
+Wait for `TargetHealth.State` to become `AVAILABLE` (~5 minutes).
+
+### Blue/Green Deployment
+
+Create a parameter group for the Green environment and create the deployment.
+
+```bash title="Terminal"
+aws rds create-db-cluster-parameter-group \
+  --db-cluster-parameter-group-name bg-proxy-verify-cpg-17 \
+  --db-parameter-group-family aurora-postgresql17 \
+  --description "Cluster PG for PG17"
+
+aws rds create-blue-green-deployment \
+  --blue-green-deployment-name bg-proxy-verify-bgd \
+  --source arn:aws:rds:ap-northeast-1:<account-id>:cluster:bg-proxy-verify \
+  --target-engine-version 17.6 \
+  --target-db-cluster-parameter-group-name bg-proxy-verify-cpg-17
+```
+
+Green environment provisioning took ~32 minutes. Wait for status to become `AVAILABLE`.
+
+### EC2 Instance
+
+Create an SSM-accessible EC2 instance and install psql.
+
+```bash title="Terminal"
+# Create IAM role and instance profile for EC2
+aws iam create-role \
+  --role-name bg-proxy-verify-ec2-role \
+  --assume-role-policy-document '{
+    "Version":"2012-10-17",
+    "Statement":[{
+      "Effect":"Allow",
+      "Principal":{"Service":"ec2.amazonaws.com"},
+      "Action":"sts:AssumeRole"
+    }]
+  }'
+
+aws iam attach-role-policy \
+  --role-name bg-proxy-verify-ec2-role \
+  --policy-arn arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+
+aws iam create-instance-profile \
+  --instance-profile-name bg-proxy-verify-ec2-profile
+
+aws iam add-role-to-instance-profile \
+  --instance-profile-name bg-proxy-verify-ec2-profile \
+  --role-name bg-proxy-verify-ec2-role
+
+# Wait for IAM propagation
+sleep 10
+
+aws ec2 run-instances \
+  --image-id <al2023-ami-id> \
+  --instance-type t3.medium \
+  --security-group-ids '["<sg-id>"]' \
+  --subnet-id <subnet-id> \
+  --iam-instance-profile '{"Name":"bg-proxy-verify-ec2-profile"}'
+
+# Install psql via SSM
+dnf install -y postgresql16
+```
+
+### Test Table
+
+```bash title="Terminal"
+PGPASSWORD='<password>' psql \
+  -h bg-proxy-verify.proxy-<id>.ap-northeast-1.rds.amazonaws.com \
+  -p 5432 -U postgres -d postgres \
+  -c "CREATE TABLE IF NOT EXISTS switchover_test (
+    id SERIAL PRIMARY KEY,
+    ts TIMESTAMPTZ DEFAULT now(),
+    msg TEXT
+  );"
+```
+
+</details>
+
+## Verification: RDS Proxy Switchover — Downtime Measurement
+
+### Measurement Script
+
+Same approach as Part 1: execute queries at 1-second intervals, recording success/failure, latency, and server IP. Unlike Part 1 which used `SELECT`, this test uses `INSERT ... RETURNING host(inet_server_addr())` to detect read-only errors during switchover.
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">measure.sh (full measurement script)</summary>
+
+```bash title="measure.sh"
+#!/bin/bash
+ENDPOINT="$1"
+PASSWORD="$2"
+COUNT=${3:-200}
+LOGFILE="/home/ec2-user/switchover_$(date +%Y%m%d_%H%M%S).csv"
+
+echo "seq,timestamp,status,latency_ms,server_ip,message" > "$LOGFILE"
+
+for i in $(seq 1 $COUNT); do
+  START_MS=$(date +%s%3N)
+  RESULT=$(PGPASSWORD="${PASSWORD}" psql -h "${ENDPOINT}" -p 5432 -U postgres -d postgres \
+    -t -A -c "INSERT INTO switchover_test (msg) VALUES ('seq=$i') RETURNING host(inet_server_addr());" 2>&1)
+  END_MS=$(date +%s%3N)
+  LATENCY=$((END_MS - START_MS))
+  TS=$(date -u +%Y-%m-%dT%H:%M:%S.%3NZ)
+
+  if echo "$RESULT" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$'; then
+    echo "$i,$TS,OK,$LATENCY,$RESULT," >> "$LOGFILE"
+  else
+    MSG=$(echo "$RESULT" | tr '\n' ' ' | cut -c1-120)
+    echo "$i,$TS,FAIL,$LATENCY,,$MSG" >> "$LOGFILE"
+  fi
+  sleep 1
+done
+```
+
+</details>
+
+### Execution
+
+Started the measurement script in the background, confirmed writes were stable, then triggered the switchover.
+
+```bash title="Terminal (start measurement)"
+nohup ./measure.sh bg-proxy-verify.proxy-<id>.ap-northeast-1.rds.amazonaws.com '<password>' 200 &
+```
+
+After ~30 seconds of stable writes, executed the switchover.
+
+```bash title="Terminal (trigger switchover)"
+aws rds switchover-blue-green-deployment \
+  --blue-green-deployment-identifier bgd-wmrsads60kvsah4c \
+  --switchover-timeout 300
+```
+
+### Results {#results}
+
+Out of 200 writes, **only 1 connection failure** occurred.
+
+```text title="Output (excerpt around the failure)"
+seq,timestamp,status,latency_ms,server_ip,message
+...
+57,2026-04-10T01:59:58.077Z,OK,65,172.31.19.95,
+58,2026-04-10T02:00:11.432Z,FAIL,12349,,SSL connection has been closed unexpectedly connection to server was lost
+59,2026-04-10T02:00:12.553Z,OK,113,172.31.28.214,
+60,2026-04-10T02:00:13.646Z,OK,87,172.31.28.214,
+...
+```
+
+| Metric | Value |
+| --- | --- |
+| Connection failures | **1** |
+| Write unavailability | **~14 seconds** (01:59:58 → 02:00:12) |
+| Failure latency | 12,349ms (~12s) |
+| Error message | `SSL connection has been closed unexpectedly` |
+| IP switch | 172.31.19.95 (Blue) → 172.31.28.214 (Green) |
+
+### Analysis
+
+1. **Only 1 failure** — Part 1's direct connection had 6 failures (all timeouts). RDS Proxy had just one. Per the documentation, the proxy detects the switchover and automatically redirects to the Green environment, which likely explains the reduced failure count.
+
+2. **Different error pattern** — Direct connection produced timeouts (server unresponsive). RDS Proxy produced `SSL connection has been closed unexpectedly`. The documentation states that "existing connections to the proxy are dropped" when the Green environment is promoted, so this SSL disconnect is likely the proxy dropping the connection. Note that the docs also mention `AdminShutdown: terminating connection due to administrator command` as an Aurora PostgreSQL error during switchover — this occurs after Blue enters read-only mode. The fact that we observed an SSL disconnect rather than AdminShutdown suggests the proxy maintained the client connection during Blue's read-only transition and dropped it upon detecting switchover completion.
+
+3. **~14 seconds of write unavailability** — Down from 26 seconds with direct connection (~46% reduction). Of those 14 seconds, ~12 seconds was the latency of seq 58. That query connected to Blue through the proxy, then received the SSL disconnect during the switchover process. Per the documentation, the proxy continues routing to Blue during the transitional period and drops connections upon detecting the switchover. The next query (seq 59) connected to Green immediately, showing the proxy's redirect is fast once the drop occurs.
+
+4. **No DNS propagation delay** — In Part 1, DNS TTL of 60 seconds was the bottleneck. With RDS Proxy, the application always connects to the proxy endpoint, so there's no DNS switchover to wait for. The proxy handles routing internally.
+
+5. **Proxy API timing** — Per the docs, Proxy APIs like `describe-db-proxy-targets` reflect updated targets only after switchover is fully complete, even though traffic routing switches earlier.
+
+## Summary
+
+### Cross-Series Comparison
+
+| Metric | Direct (Part 1) | JDBC BG Plugin (Part 2) | RDS Proxy (this article) |
+| --- | --- | --- | --- |
+| Measurement method | psql, 1s interval | Java app, 1s interval | psql, 1s interval |
+| Engine | Aurora PostgreSQL 16.9 → 17.6 | Aurora PostgreSQL 16.9 → 17.6 | Aurora PostgreSQL 16.9 → 17.6 |
+| Connection failures | 6 | **0** | 1 |
+| Downtime | ~26s | **0s** (36s pause) | ~14s |
+| Failure pattern | Timeout (3s × 6) | None | SSL disconnect (12s × 1) |
+| Language constraint | None | Java only | None |
+| DNS dependency | Yes (TTL 60s) | No (IP-based) | No (proxy detects) |
+| Setup complexity | None | Medium (deps + config) | Medium (Proxy + IAM + Secrets Manager) |
+| Additional cost | None | None | RDS Proxy pricing |
+| Reconnection required | Yes | No (plugin handles it) | Yes (proxy drops connections) |
+
+### Key Takeaways
+
+- **RDS Proxy cut downtime from 26s to 14s** — A ~46% reduction compared to direct connection. In Part 1, DNS TTL of 60 seconds was the primary cause of downtime. Since RDS Proxy is unaffected by DNS propagation, this likely accounts for the improvement. However, the proxy continues routing to Blue during the switchover process and drops connections only after detecting completion, which took ~12 seconds in our test. This means it can't match the JDBC BG plugin's zero failures.
+
+- **Single failure, easily handled with retry** — Down from 6 failures with direct connection. A single retry in the application layer can further reduce effective downtime. The error message (`SSL connection has been closed unexpectedly`) is detectable by connection pool health checks.
+
+- **Choose based on language and cost tolerance** — Java apps needing minimal downtime: JDBC BG plugin (0 failures, but 36s query pause). Language-agnostic DNS delay elimination: RDS Proxy (additional cost). Already using RDS Proxy: no extra setup needed (but register the proxy target before creating the Blue/Green Deployment). Minimizing cost: direct connection + app-level retry (accept 26s downtime).
+
+- **RDS Proxy's biggest advantage is ease of adoption** — The JDBC BG plugin requires driver changes. If your application already connects through RDS Proxy, you get the benefit simply by using Blue/Green Deployments. For new Proxy setups, the only application change is the connection endpoint.
+
+## Cleanup
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">Resource deletion commands</summary>
+
+```bash title="Terminal"
+# Delete Blue/Green Deployment
+aws rds delete-blue-green-deployment \
+  --blue-green-deployment-identifier bgd-wmrsads60kvsah4c \
+  --delete-target \
+  --region ap-northeast-1
+
+# Delete old Blue environment (renamed to -old1 after switchover)
+aws rds delete-db-instance \
+  --db-instance-identifier bg-proxy-verify-w1-old1 \
+  --skip-final-snapshot
+aws rds delete-db-cluster \
+  --db-cluster-identifier bg-proxy-verify-old1 \
+  --skip-final-snapshot
+
+# Delete RDS Proxy
+aws rds deregister-db-proxy-targets \
+  --db-proxy-name bg-proxy-verify \
+  --db-cluster-identifiers '["bg-proxy-verify"]'
+aws rds delete-db-proxy --db-proxy-name bg-proxy-verify
+
+# Delete Aurora cluster
+aws rds delete-db-instance \
+  --db-instance-identifier bg-proxy-verify-w1 \
+  --skip-final-snapshot
+aws rds delete-db-cluster \
+  --db-cluster-identifier bg-proxy-verify \
+  --skip-final-snapshot
+
+# Delete EC2 instance
+aws ec2 terminate-instances --instance-ids i-0478189b7d8e3aea9
+
+# Delete IAM roles and policies
+aws iam delete-role-policy --role-name bg-proxy-verify-role --policy-name SecretsManagerAccess
+aws iam delete-role --role-name bg-proxy-verify-role
+aws iam remove-role-from-instance-profile \
+  --instance-profile-name bg-proxy-verify-ec2-profile \
+  --role-name bg-proxy-verify-ec2-role
+aws iam detach-role-policy \
+  --role-name bg-proxy-verify-ec2-role \
+  --policy-arn arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+aws iam delete-role --role-name bg-proxy-verify-ec2-role
+aws iam delete-instance-profile --instance-profile-name bg-proxy-verify-ec2-profile
+
+# Delete Secrets Manager secret
+aws secretsmanager delete-secret \
+  --secret-id bg-proxy-verify-secret \
+  --force-delete-without-recovery
+
+# Delete parameter groups
+aws rds delete-db-cluster-parameter-group --db-cluster-parameter-group-name bg-proxy-verify-cpg
+aws rds delete-db-cluster-parameter-group --db-cluster-parameter-group-name bg-proxy-verify-cpg-17
+
+# Delete subnet group
+aws rds delete-db-subnet-group --db-subnet-group-name bg-proxy-verify-subnet
+
+# Delete security group
+aws ec2 delete-security-group --group-id <sg-id>
+```
+
+</details>

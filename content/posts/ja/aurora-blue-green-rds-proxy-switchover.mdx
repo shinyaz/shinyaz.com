@@ -1,0 +1,457 @@
+---
+title: "Aurora Blue/Green 実践検証 — RDS Proxy 経由の Switchover でダウンタイムはどう変わるか"
+description: "Blue/Green Switchover に RDS Proxy を組み合わせた場合のダウンタイムを psql で計測。直接接続の26秒・JDBC BG プラグインの0秒と比較し、RDS Proxy の効果と制約を明らかにする。"
+date: "2026-04-10"
+published: true
+featured: false
+categories: [infrastructure]
+tags: ["aws", "aurora", "postgresql", "rds", "blue-green-deployment", "rds-proxy", "database"]
+series: "aurora-blue-green"
+seriesOrder: 5
+---
+
+## はじめに
+
+[第1回](/ja/blog/2026/03/25/aurora-blue-green-downtime-measurement)では、Aurora PostgreSQL の Blue/Green Switchover 中に psql で26秒・6回の接続失敗を観測した。DNS TTL 60秒がダウンタイムの主要因だった。[第2回](/ja/blog/2026/03/25/aurora-blue-green-jdbc-plugin-comparison)では、AWS JDBC Driver の BG プラグインで接続失敗0回を達成したが、Java（JDBC）限定という制約があった。
+
+Python、Go、Node.js など Java 以外の言語で Blue/Green Switchover のダウンタイムを短縮する方法はないか。2026年4月9日、AWS は [RDS Blue/Green Deployments が RDS Proxy をサポート](https://aws.amazon.com/about-aws/whats-new/2026/04/rds-proxy-blue-green/)したことを発表した。RDS Proxy を経由すると、アプリケーションは常に Proxy エンドポイントに接続するため、Switchover 時にデータベースエンドポイントの DNS が切り替わってもアプリケーション側の DNS キャッシュは影響しない。Proxy が内部的に Switchover を検知して Green 環境へ接続をリダイレクトする。言語やドライバーに依存しない。
+
+本記事では、第1回と同じ psql ベースの計測手法で RDS Proxy 経由の Switchover ダウンタイムを計測し、以下を明らかにする。
+
+1. **RDS Proxy 経由のダウンタイム**はどの程度か
+2. **Switchover 中のエラーパターン**はどうなるか
+3. **直接接続・JDBC BG プラグインとの比較**でどこに位置づけられるか
+
+公式ドキュメントは [Using RDS Proxy with Blue/Green Deployments](https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/rds-proxy-blue-green.html) を参照。
+
+## 検証環境
+
+| 項目 | 値 |
+| --- | --- |
+| リージョン | ap-northeast-1（東京） |
+| エンジン | Aurora PostgreSQL 16.9（Blue）→ 17.6（Green） |
+| インスタンスクラス | db.r6g.large |
+| 構成 | Writer × 1（Reader なし） |
+| RDS Proxy | PostgreSQL エンジンファミリー、TLS なし |
+| VPC | デフォルト VPC（3 AZ） |
+| クライアント | EC2（Amazon Linux 2023、t3.medium）+ psql 16.12 |
+| 接続テスト間隔 | 1秒（`INSERT` + `inet_server_addr()` を200回実行） |
+| Switchover タイムアウト | 300秒（デフォルト） |
+
+前提条件:
+
+- AWS CLI セットアップ済み（`rds:*`、`ec2:*`、`iam:*`、`secretsmanager:*` の操作権限）
+- psql（PostgreSQL クライアント）
+
+結果だけ知りたい場合は[検証結果](#結果)にスキップできる。
+
+セットアップに入る前に、RDS Proxy と Blue/Green Deployments を組み合わせる際の重要な制約を確認しておく。
+
+## RDS Proxy のターゲット登録は Blue/Green 作成前に必要
+
+RDS Proxy と Blue/Green Deployments を組み合わせる際の重要な制約がある。**Blue クラスターは Blue/Green Deployment を作成する前に RDS Proxy のターゲットとして登録されている必要がある**。Blue/Green Deployment を作成した後に Proxy にターゲットを追加することはできない。
+
+この制約は [公式ドキュメント](https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/rds-proxy-blue-green.html) に明記されている。既存の RDS Proxy 環境に Blue/Green Deployments を導入する場合は問題ないが、新規に両方を構築する場合はリソースの作成順序に注意が必要だ。
+
+また、Aurora Global Databases では RDS Proxy と Blue/Green Deployments の組み合わせはサポートされていない。
+
+## 検証環境のセットアップ
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">Aurora クラスター・RDS Proxy・EC2 の作成手順</summary>
+
+以降のコマンドでは以下のプレースホルダーを自身の環境に合わせて置き換えること。
+
+| プレースホルダー | 説明 |
+| --- | --- |
+| `<account-id>` | AWS アカウント ID |
+| `<vpc-id>` | VPC ID |
+| `<sg-id>` | 作成したセキュリティグループ ID |
+| `<subnet-1>`, `<subnet-2>`, `<subnet-3>` | 異なる AZ のサブネット ID（3つ） |
+| `<subnet-id>` | EC2 を起動するサブネット ID |
+| `<password>` | データベースのマスターパスワード |
+| `<secret-arn>` | Secrets Manager シークレットの ARN |
+| `<al2023-ami-id>` | Amazon Linux 2023 の AMI ID |
+| `<id>` | RDS Proxy エンドポイントの識別子部分 |
+
+### セキュリティグループの作成
+
+```bash title="Terminal"
+aws ec2 create-security-group \
+  --description "SG for Blue/Green + RDS Proxy verification" \
+  --group-name bg-proxy-verify-sg \
+  --vpc-id <vpc-id>
+
+# 自己参照ルール（Proxy ↔ Aurora ↔ EC2 間の PostgreSQL 通信）
+aws ec2 authorize-security-group-ingress \
+  --group-id <sg-id> \
+  --port 5432 \
+  --protocol tcp \
+  --source-group <sg-id>
+```
+
+### DB サブネットグループの作成
+
+```bash title="Terminal"
+aws rds create-db-subnet-group \
+  --db-subnet-group-name bg-proxy-verify-subnet \
+  --db-subnet-group-description "Subnet group for BG Proxy verification" \
+  --subnet-ids '["<subnet-1>","<subnet-2>","<subnet-3>"]'
+```
+
+### Secrets Manager シークレットの作成
+
+RDS Proxy は Secrets Manager からデータベースの認証情報を取得する。
+
+```bash title="Terminal"
+aws secretsmanager create-secret \
+  --name bg-proxy-verify-secret \
+  --secret-string '{"username":"postgres","password":"<password>"}'
+```
+
+### カスタムクラスターパラメータグループの作成
+
+Blue/Green Deployments には論理レプリケーションが必要だ。
+
+```bash title="Terminal"
+aws rds create-db-cluster-parameter-group \
+  --db-cluster-parameter-group-name bg-proxy-verify-cpg \
+  --db-parameter-group-family aurora-postgresql16 \
+  --description "Cluster PG with logical replication"
+
+aws rds modify-db-cluster-parameter-group \
+  --db-cluster-parameter-group-name bg-proxy-verify-cpg \
+  --parameters '[{"ParameterName":"rds.logical_replication","ParameterValue":"1","ApplyMethod":"pending-reboot"}]'
+```
+
+### Aurora クラスターとインスタンスの作成
+
+```bash title="Terminal"
+aws rds create-db-cluster \
+  --db-cluster-identifier bg-proxy-verify \
+  --db-cluster-parameter-group-name bg-proxy-verify-cpg \
+  --db-subnet-group-name bg-proxy-verify-subnet \
+  --engine aurora-postgresql \
+  --engine-version 16.9 \
+  --master-username postgres \
+  --master-user-password '<password>' \
+  --vpc-security-group-ids '["<sg-id>"]'
+
+aws rds create-db-instance \
+  --db-cluster-identifier bg-proxy-verify \
+  --db-instance-class db.r6g.large \
+  --db-instance-identifier bg-proxy-verify-w1 \
+  --engine aurora-postgresql
+```
+
+インスタンスが `available` になったら、論理レプリケーション設定を反映するためにリブートする。
+
+```bash title="Terminal"
+aws rds reboot-db-instance --db-instance-identifier bg-proxy-verify-w1
+```
+
+### RDS Proxy の作成とターゲット登録
+
+IAM ロールを作成し、Secrets Manager へのアクセス権限を付与する。
+
+```bash title="Terminal"
+aws iam create-role \
+  --role-name bg-proxy-verify-role \
+  --assume-role-policy-document '{
+    "Version":"2012-10-17",
+    "Statement":[{
+      "Effect":"Allow",
+      "Principal":{"Service":"rds.amazonaws.com"},
+      "Action":"sts:AssumeRole"
+    }]
+  }'
+
+aws iam put-role-policy \
+  --role-name bg-proxy-verify-role \
+  --policy-name SecretsManagerAccess \
+  --policy-document '{
+    "Version":"2012-10-17",
+    "Statement":[{
+      "Effect":"Allow",
+      "Action":["secretsmanager:GetSecretValue","secretsmanager:DescribeSecret"],
+      "Resource":"<secret-arn>"
+    }]
+  }'
+```
+
+RDS Proxy を作成し、Aurora クラスターをターゲットとして登録する。
+
+```bash title="Terminal"
+aws rds create-db-proxy \
+  --db-proxy-name bg-proxy-verify \
+  --engine-family POSTGRESQL \
+  --auth '[{"AuthScheme":"SECRETS","SecretArn":"<secret-arn>","IAMAuth":"DISABLED"}]' \
+  --role-arn arn:aws:iam::<account-id>:role/bg-proxy-verify-role \
+  --vpc-subnet-ids '["<subnet-1>","<subnet-2>","<subnet-3>"]' \
+  --vpc-security-group-ids '["<sg-id>"]'
+
+# Proxy が available になったらターゲットを登録
+aws rds register-db-proxy-targets \
+  --db-proxy-name bg-proxy-verify \
+  --db-cluster-identifiers '["bg-proxy-verify"]'
+```
+
+ターゲットの `TargetHealth.State` が `AVAILABLE` になるまで待つ。今回は約5分かかった。
+
+### Blue/Green Deployment の作成
+
+Green 環境用のパラメータグループを作成し、Blue/Green Deployment を作成する。
+
+```bash title="Terminal"
+aws rds create-db-cluster-parameter-group \
+  --db-cluster-parameter-group-name bg-proxy-verify-cpg-17 \
+  --db-parameter-group-family aurora-postgresql17 \
+  --description "Cluster PG for PG17"
+
+aws rds create-blue-green-deployment \
+  --blue-green-deployment-name bg-proxy-verify-bgd \
+  --source arn:aws:rds:ap-northeast-1:<account-id>:cluster:bg-proxy-verify \
+  --target-engine-version 17.6 \
+  --target-db-cluster-parameter-group-name bg-proxy-verify-cpg-17
+```
+
+Green 環境の構築には約32分かかった。ステータスが `AVAILABLE` になるまで待つ。
+
+### EC2 インスタンスの作成
+
+SSM 接続可能な EC2 インスタンスを作成し、psql をインストールする。
+
+```bash title="Terminal"
+# EC2 用 IAM ロールとインスタンスプロファイルの作成
+aws iam create-role \
+  --role-name bg-proxy-verify-ec2-role \
+  --assume-role-policy-document '{
+    "Version":"2012-10-17",
+    "Statement":[{
+      "Effect":"Allow",
+      "Principal":{"Service":"ec2.amazonaws.com"},
+      "Action":"sts:AssumeRole"
+    }]
+  }'
+
+aws iam attach-role-policy \
+  --role-name bg-proxy-verify-ec2-role \
+  --policy-arn arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+
+aws iam create-instance-profile \
+  --instance-profile-name bg-proxy-verify-ec2-profile
+
+aws iam add-role-to-instance-profile \
+  --instance-profile-name bg-proxy-verify-ec2-profile \
+  --role-name bg-proxy-verify-ec2-role
+
+# IAM の伝播を待つ
+sleep 10
+
+aws ec2 run-instances \
+  --image-id <al2023-ami-id> \
+  --instance-type t3.medium \
+  --security-group-ids '["<sg-id>"]' \
+  --subnet-id <subnet-id> \
+  --iam-instance-profile '{"Name":"bg-proxy-verify-ec2-profile"}'
+
+# SSM 経由で psql をインストール
+dnf install -y postgresql16
+```
+
+### テスト用テーブルの作成
+
+```bash title="Terminal"
+PGPASSWORD='<password>' psql \
+  -h bg-proxy-verify.proxy-<id>.ap-northeast-1.rds.amazonaws.com \
+  -p 5432 -U postgres -d postgres \
+  -c "CREATE TABLE IF NOT EXISTS switchover_test (
+    id SERIAL PRIMARY KEY,
+    ts TIMESTAMPTZ DEFAULT now(),
+    msg TEXT
+  );"
+```
+
+</details>
+
+## 検証: RDS Proxy 経由の Switchover — ダウンタイム計測
+
+### 計測スクリプト
+
+第1回と同じアプローチで、1秒間隔で INSERT を実行し、成功/失敗・レイテンシ・接続先 IP を記録する。第1回では `SELECT inet_server_addr()` で読み取りテストだったが、今回は `INSERT ... RETURNING host(inet_server_addr())` で書き込みテストにした。Switchover 中の read-only エラーも検出できるようにするためだ。
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">measure.sh（計測スクリプト全文）</summary>
+
+```bash title="measure.sh"
+#!/bin/bash
+ENDPOINT="$1"
+PASSWORD="$2"
+COUNT=${3:-200}
+LOGFILE="/home/ec2-user/switchover_$(date +%Y%m%d_%H%M%S).csv"
+
+echo "seq,timestamp,status,latency_ms,server_ip,message" > "$LOGFILE"
+
+for i in $(seq 1 $COUNT); do
+  START_MS=$(date +%s%3N)
+  RESULT=$(PGPASSWORD="${PASSWORD}" psql -h "${ENDPOINT}" -p 5432 -U postgres -d postgres \
+    -t -A -c "INSERT INTO switchover_test (msg) VALUES ('seq=$i') RETURNING host(inet_server_addr());" 2>&1)
+  END_MS=$(date +%s%3N)
+  LATENCY=$((END_MS - START_MS))
+  TS=$(date -u +%Y-%m-%dT%H:%M:%S.%3NZ)
+
+  if echo "$RESULT" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$'; then
+    echo "$i,$TS,OK,$LATENCY,$RESULT," >> "$LOGFILE"
+  else
+    MSG=$(echo "$RESULT" | tr '\n' ' ' | cut -c1-120)
+    echo "$i,$TS,FAIL,$LATENCY,,$MSG" >> "$LOGFILE"
+  fi
+  sleep 1
+done
+```
+
+</details>
+
+### 計測の実行
+
+計測スクリプトをバックグラウンドで開始し、書き込みが安定していることを確認してから Switchover を実行した。
+
+```bash title="Terminal (計測開始)"
+nohup ./measure.sh bg-proxy-verify.proxy-<id>.ap-northeast-1.rds.amazonaws.com '<password>' 200 &
+```
+
+約30秒後、書き込みが安定していることを確認して Switchover を実行。
+
+```bash title="Terminal (Switchover 実行)"
+aws rds switchover-blue-green-deployment \
+  --blue-green-deployment-identifier bgd-wmrsads60kvsah4c \
+  --switchover-timeout 300
+```
+
+### 結果 {#結果}
+
+200回の書き込みのうち、**接続失敗は1回のみ**だった。
+
+```text title="Output (障害発生前後を抜粋)"
+seq,timestamp,status,latency_ms,server_ip,message
+...
+57,2026-04-10T01:59:58.077Z,OK,65,172.31.19.95,
+58,2026-04-10T02:00:11.432Z,FAIL,12349,,SSL connection has been closed unexpectedly connection to server was lost
+59,2026-04-10T02:00:12.553Z,OK,113,172.31.28.214,
+60,2026-04-10T02:00:13.646Z,OK,87,172.31.28.214,
+...
+```
+
+| 指標 | 値 |
+| --- | --- |
+| 接続失敗回数 | **1回** |
+| 書き込み不可時間 | **約14秒**（01:59:58 → 02:00:12） |
+| 失敗時のレイテンシ | 12,349ms（約12秒） |
+| エラーメッセージ | `SSL connection has been closed unexpectedly` |
+| IP 切り替え | 172.31.19.95（Blue）→ 172.31.28.214（Green） |
+
+### 分析
+
+1. **接続失敗は1回のみ** — 第1回の直接接続では6回の接続失敗（すべてタイムアウト）が発生したが、RDS Proxy 経由では1回だけだった。ドキュメントの記載通り、Proxy が Switchover を検知して Green 環境への接続リダイレクトを自動的に行った結果と考えられる。
+
+2. **エラーパターンが異なる** — 第1回の直接接続ではタイムアウト（接続先が応答しない）だったが、RDS Proxy 経由では `SSL connection has been closed unexpectedly` だった。ドキュメントには「Green 環境が新しい Writer に昇格した時点で、Proxy への既存接続はドロップされる」と記載されており、この SSL 切断は Proxy による接続ドロップと考えられる。なお、ドキュメントでは Aurora PostgreSQL の Switchover 中のエラーとして `AdminShutdown: terminating connection due to administrator command` も記載されている。これは Blue が read-only モードに入った後に発生するエラーだ。今回は AdminShutdown ではなく SSL 切断が観測されたことから、Proxy が Blue の read-only 移行中はクライアントへの接続を維持し、Switchover 完了を検知した時点で接続をドロップしたと推測される。
+
+3. **書き込み不可時間は約14秒** — 直接接続の26秒から約12秒短縮された。ただし、この14秒のうち約12秒は seq 58 のレイテンシだ。seq 58 は Proxy 経由で Blue に接続した後、Switchover プロセス中に SSL 切断を受けている。ドキュメントによると、Proxy は過渡期に Blue へのルーティングを継続し、Switchover を検知した時点で接続をドロップする。次の seq 59 は即座に Green 環境に接続成功しており、ドロップ後の Proxy のリダイレクトは高速に動作している。
+
+4. **DNS 伝播遅延は発生しない** — 第1回では DNS TTL 60秒がボトルネックだったが、RDS Proxy 経由ではアプリケーションは常に Proxy エンドポイントに接続するため、DNS の切り替えを待つ必要がない。Proxy が内部的に接続先を切り替える。
+
+5. **Proxy API の反映タイミング** — ドキュメントによると、`describe-db-proxy-targets` などの Proxy API は Switchover が完全に完了した後にターゲット情報を更新する。トラフィックルーティングはそれより早く切り替わる。
+
+## まとめ
+
+### シリーズ横断の比較
+
+| 指標 | 直接接続 (第1回) | JDBC BG プラグイン (第2回) | RDS Proxy (今回) |
+| --- | --- | --- | --- |
+| 計測手法 | psql 1秒間隔 | Java アプリ 1秒間隔 | psql 1秒間隔 |
+| エンジン | Aurora PostgreSQL 16.9 → 17.6 | Aurora PostgreSQL 16.9 → 17.6 | Aurora PostgreSQL 16.9 → 17.6 |
+| 接続失敗回数 | 6回 | **0回** | 1回 |
+| ダウンタイム | 約26秒 | **0秒**（36秒の一時停止あり） | 約14秒 |
+| 失敗パターン | タイムアウト（3秒 × 6回） | なし | SSL 接続切断（12秒 × 1回） |
+| 言語制約 | なし | Java のみ | なし |
+| DNS 依存 | あり（TTL 60秒） | なし（IP ベース） | なし（Proxy が検知） |
+| 導入の複雑さ | なし | 中（依存追加 + 設定） | 中（Proxy 構築 + IAM + Secrets Manager） |
+| 追加コスト | なし | なし | RDS Proxy 料金 |
+| 接続再確立 | 必要 | 不要（プラグインが処理） | 必要（Proxy がドロップ） |
+
+### 得られた知見
+
+- **RDS Proxy はダウンタイムを26秒から14秒に短縮した** — 直接接続と比較して約46%の短縮。第1回では DNS TTL 60秒がダウンタイムの主要因だったが、RDS Proxy 経由では DNS 伝播の影響を受けないため、この差が生まれたと考えられる。ただし、Switchover プロセス中に Proxy が Blue へのルーティングを継続し、完了検知後に接続をドロップするまでに約12秒かかるため、JDBC BG プラグインの0秒には及ばない。
+
+- **接続失敗は1回のみで、リトライで対処可能** — 直接接続の6回と比較して大幅に減少。アプリケーション側で1回のリトライを実装すれば、実質的なダウンタイムをさらに短縮できる。エラーメッセージは `SSL connection has been closed unexpectedly` で、接続プールのヘルスチェックで検出可能だ。
+
+- **アプローチの選択は言語とコスト許容度で決まる** — Java アプリで最小ダウンタイムが必要なら JDBC BG プラグイン（0秒、ただし36秒の一時停止に注意）。言語を問わず DNS 遅延を排除したいなら RDS Proxy（追加コストあり）。既に RDS Proxy を使っているなら追加設定不要で恩恵を受けられる（ただし Blue/Green 作成前に Proxy ターゲット登録が必要）。コストを最小化したいなら直接接続 + アプリ側リトライ（26秒のダウンタイムを許容）。
+
+- **RDS Proxy の最大の利点は「既存環境への追加が容易」な点** — JDBC BG プラグインはドライバーの変更が必要だが、RDS Proxy は既にアプリケーションが Proxy 経由で接続していれば、Blue/Green Deployments を追加するだけで恩恵を受けられる。新規に Proxy を導入する場合でも、アプリケーションコードの変更は接続先エンドポイントの変更のみだ。
+
+## クリーンアップ
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">リソース削除コマンド</summary>
+
+```bash title="Terminal"
+# Blue/Green Deployment の削除
+aws rds delete-blue-green-deployment \
+  --blue-green-deployment-identifier bgd-wmrsads60kvsah4c \
+  --delete-target \
+  --region ap-northeast-1
+
+# Switchover 後の旧 Blue 環境（-old1 にリネーム済み）の削除
+aws rds delete-db-instance \
+  --db-instance-identifier bg-proxy-verify-w1-old1 \
+  --skip-final-snapshot
+aws rds delete-db-cluster \
+  --db-cluster-identifier bg-proxy-verify-old1 \
+  --skip-final-snapshot
+
+# RDS Proxy の削除
+aws rds deregister-db-proxy-targets \
+  --db-proxy-name bg-proxy-verify \
+  --db-cluster-identifiers '["bg-proxy-verify"]'
+aws rds delete-db-proxy --db-proxy-name bg-proxy-verify
+
+# Aurora クラスターの削除
+aws rds delete-db-instance \
+  --db-instance-identifier bg-proxy-verify-w1 \
+  --skip-final-snapshot
+aws rds delete-db-cluster \
+  --db-cluster-identifier bg-proxy-verify \
+  --skip-final-snapshot
+
+# EC2 インスタンスの削除
+aws ec2 terminate-instances --instance-ids i-0478189b7d8e3aea9
+
+# IAM ロール・ポリシーの削除
+aws iam delete-role-policy --role-name bg-proxy-verify-role --policy-name SecretsManagerAccess
+aws iam delete-role --role-name bg-proxy-verify-role
+aws iam remove-role-from-instance-profile \
+  --instance-profile-name bg-proxy-verify-ec2-profile \
+  --role-name bg-proxy-verify-ec2-role
+aws iam detach-role-policy \
+  --role-name bg-proxy-verify-ec2-role \
+  --policy-arn arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+aws iam delete-role --role-name bg-proxy-verify-ec2-role
+aws iam delete-instance-profile --instance-profile-name bg-proxy-verify-ec2-profile
+
+# Secrets Manager シークレットの削除
+aws secretsmanager delete-secret \
+  --secret-id bg-proxy-verify-secret \
+  --force-delete-without-recovery
+
+# パラメータグループの削除
+aws rds delete-db-cluster-parameter-group --db-cluster-parameter-group-name bg-proxy-verify-cpg
+aws rds delete-db-cluster-parameter-group --db-cluster-parameter-group-name bg-proxy-verify-cpg-17
+
+# サブネットグループの削除
+aws rds delete-db-subnet-group --db-subnet-group-name bg-proxy-verify-subnet
+
+# セキュリティグループの削除
+aws ec2 delete-security-group --group-id <sg-id>
+```
+
+</details>
