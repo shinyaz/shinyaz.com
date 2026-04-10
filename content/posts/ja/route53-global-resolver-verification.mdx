@@ -460,6 +460,15 @@ doh_query "blocked-test.example.com" "$TOKEN" -o blocked.bin
 
 検証中に判明した重要な挙動がある。**IP ACL とトークン認証は OR 条件で評価される**。同じ DNS View に Do53 の IP ACL と DoH のトークンを設定した場合、DoH の IP ACL Access Source が存在すると、トークンなしでも DoH クエリが通過する。
 
+```mermaid
+flowchart TD
+    Q[DNS クエリ] --> C1{IP ACL に<br/>マッチ?}
+    C1 -->|Yes| OK[✅ 許可]
+    C1 -->|No| C2{有効なトークン<br/>あり?}
+    C2 -->|Yes| OK
+    C2 -->|No| NG[❌ REFUSED]
+```
+
 トークン認証を厳密に運用するには、DoH プロトコルの IP ACL Access Source を作成しないか、作成する場合は意図した IP 範囲に限定する必要がある。
 
 ## まとめ

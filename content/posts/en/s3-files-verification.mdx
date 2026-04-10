@@ -426,6 +426,15 @@ The 1KB file took 60 seconds to import, longer than the 30 seconds for 1MB/10MB.
 
 S3 Files uses a two-tier read architecture. Inside the file system is a "high-performance storage" layer — a low-latency storage tier where actively used file data is cached. By default, files of 128KB or smaller are automatically imported to high-performance storage for low-latency reads. Reads of 1MB or larger are served directly from the S3 bucket for high throughput.
 
+```mermaid
+flowchart LR
+    R[Read request] --> C{File size}
+    C -->|≤ 128KB| H[High-performance storage<br/>Low latency ⚡]
+    C -->|≥ 1MB| S[Direct from S3 bucket<br/>High throughput 📦]
+    H --> CL[NFS client]
+    S --> CL
+```
+
 To measure how this two-tier routing affects actual latency, files of various sizes were uploaded via the S3 API. After waiting 30 seconds for import (based on the 30–60 second import delay measured in Verification 2), cold reads and warm reads were compared.
 
 - **Cold read**: OS page cache cleared via `drop_caches` before reading. This eliminates NFS client cache and OS cache effects, measuring S3 Files' read routing performance

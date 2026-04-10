@@ -196,6 +196,14 @@ aws bedrock-agentcore-control update-registry-record-status \
 
 Agent Registry records follow a Draft → Pending Approval → Approved lifecycle. Only approved records appear in search results.
 
+```mermaid
+flowchart LR
+    D[🔒 DRAFT] -->|Submit| P[🔒 PENDING_APPROVAL]
+    P -->|Approve| A[🔍 APPROVED]
+    P -->|Reject| D
+    A -->|Update record| D
+```
+
 ### Status Transition Verification
 
 After creating 4 records, all start in `DRAFT` status.

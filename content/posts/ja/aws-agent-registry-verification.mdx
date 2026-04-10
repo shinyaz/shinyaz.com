@@ -221,6 +221,14 @@ aws bedrock-agentcore-control update-registry-record-status \
 
 Agent Registry のレコードは Draft → Pending Approval → Approved のライフサイクルを持つ。承認されたレコードのみが検索結果に表示される。
 
+```mermaid
+flowchart LR
+    D[🔒 DRAFT] -->|承認申請| P[🔒 PENDING_APPROVAL]
+    P -->|承認| A[🔍 APPROVED]
+    P -->|却下| D
+    A -->|レコード更新| D
+```
+
 ### ステータス遷移の確認
 
 レジストリ作成後、4 つのレコードを登録した。初期ステータスは `DRAFT` である。

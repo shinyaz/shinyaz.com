@@ -453,6 +453,15 @@ The DNS response flags are `8503` (**NXDOMAIN**). DNS filtering works correctly 
 
 An important behavior discovered during verification: **IP ACL and token authentication are evaluated as OR conditions.** If a DoH IP ACL Access Source exists on the same DNS View alongside token authentication, DoH queries pass through without a token as long as the source IP matches the ACL.
 
+```mermaid
+flowchart TD
+    Q[DNS query] --> C1{IP ACL<br/>match?}
+    C1 -->|Yes| OK[✅ Allow]
+    C1 -->|No| C2{Valid token<br/>present?}
+    C2 -->|Yes| OK
+    C2 -->|No| NG[❌ REFUSED]
+```
+
 To enforce strict token authentication, either don't create a DoH IP ACL Access Source, or restrict it to intended IP ranges only.
 
 ## Summary
