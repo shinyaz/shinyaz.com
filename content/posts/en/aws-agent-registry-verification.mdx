@@ -1,0 +1,463 @@
+---
+title: "Hands-on with AWS Agent Registry — Semantic Search Accuracy and Japanese Query Workaround"
+description: "Verified Agent Registry end-to-end: registry creation, record registration, approval workflow, and hybrid search via CLI. Measured semantic search accuracy, Japanese vs English query differences, and MCP endpoint consistency."
+date: "2026-04-10"
+published: true
+featured: false
+categories: [ai-agents]
+tags: ["aws", "bedrock", "agentcore", "agent-registry", "mcp", "a2a"]
+---
+
+## Introduction
+
+On April 9, 2026, AWS [announced the preview of AWS Agent Registry](https://aws.amazon.com/about-aws/whats-new/2026/04/aws-agent-registry-in-agentcore-preview/), available through Amazon Bedrock AgentCore. It is a managed service for centrally cataloging, discovering, and governing AI agents, tools, MCP servers, and skills across an organization.
+
+As the number of agents grows, organizations face the challenge of not knowing what exists and rebuilding capabilities that already exist. Agent Registry addresses this with an approval-workflow-backed catalog and hybrid semantic/keyword search. Notably, each registry functions as an MCP server, enabling IDEs and agents to search directly.
+
+This article walks through the basic Agent Registry workflow via CLI, then evaluates hybrid search accuracy (including Japanese queries) and MCP endpoint usability with real data. See the official documentation at [AWS Agent Registry](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/registry.html).
+
+Prerequisites:
+
+- AWS CLI v2.34.28+ (with `bedrock-agentcore:*` permissions)
+- Test region: ap-northeast-1 (Tokyo)
+
+Skip to [Verification 1](#verification-1-approval-workflow-and-status-transitions) if you only want the results.
+
+## Environment Setup
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">IAM policy, registry creation, record registration, and approval steps</summary>
+
+### IAM Policy
+
+Both Administrator persona (registry/record management + approval) and Consumer persona (search + MCP invocation) permissions are required.
+
+```json title="IAM Policy"
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": [
+        "bedrock-agentcore:CreateRegistry",
+        "bedrock-agentcore:GetRegistry",
+        "bedrock-agentcore:DeleteRegistry",
+        "bedrock-agentcore:ListRegistries"
+      ],
+      "Resource": "arn:aws:bedrock-agentcore:*:<account-id>:*"
+    },
+    {
+      "Effect": "Allow",
+      "Action": [
+        "bedrock-agentcore:CreateRegistryRecord",
+        "bedrock-agentcore:GetRegistryRecord",
+        "bedrock-agentcore:UpdateRegistryRecord",
+        "bedrock-agentcore:DeleteRegistryRecord",
+        "bedrock-agentcore:ListRegistryRecords",
+        "bedrock-agentcore:SubmitRegistryRecordForApproval",
+        "bedrock-agentcore:UpdateRegistryRecordStatus"
+      ],
+      "Resource": "arn:aws:bedrock-agentcore:*:<account-id>:registry/*"
+    },
+    {
+      "Effect": "Allow",
+      "Action": [
+        "bedrock-agentcore:SearchRegistryRecords",
+        "bedrock-agentcore:InvokeRegistryMcp"
+      ],
+      "Resource": "arn:aws:bedrock-agentcore:*:<account-id>:registry/*"
+    }
+  ]
+}
+```
+
+### Registry Creation
+
+Create a registry with IAM authentication and manual approval.
+
+```bash title="Terminal"
+aws bedrock-agentcore-control create-registry \
+  --name "agent-registry-verification" \
+  --description "Registry for verifying Agent Registry features" \
+  --region ap-northeast-1
+```
+
+The status transitions from `CREATING` to `READY` in about 90 seconds. By default, IAM authentication and manual approval (`autoApproval: false`) are configured.
+
+### Record Registration
+
+Register 4 records for search accuracy verification.
+
+| Record Name | Type | Description | Verification Role |
+|---|---|---|---|
+| weather-api | MCP | Weather data and forecast service | Keyword search target |
+| travel-booking-agent | A2A | Flight and hotel booking agent | Semantic search target |
+| data-analysis-skill | AGENT_SKILLS | CSV/JSON data analysis skill | Filter search target |
+| notification-service | MCP | Email, Slack, SMS notification service | Type filter verification |
+
+**MCP server record:**
+
+The MCP server `name` field requires reverse-DNS format (e.g., `io.example/weather-api`), and `description` is limited to 100 characters. These constraints come from the [MCP Registry server.json schema](https://static.modelcontextprotocol.io/schemas/2025-07-09/server.schema.json).
+
+```bash title="Terminal"
+aws bedrock-agentcore-control create-registry-record \
+  --registry-id "<registry-id>" \
+  --name "weather-api" \
+  --description "Weather data and forecast service via OpenWeatherMap API" \
+  --record-version "1.0.0" \
+  --descriptor-type MCP \
+  --descriptors '{
+    "mcp": {
+      "server": {
+        "schemaVersion": "2025-07-09",
+        "inlineContent": "{\"name\": \"io.example/weather-api\", \"description\": \"Weather data and forecast service via OpenWeatherMap API\", \"version\": \"1.0.0\"}"
+      },
+      "tools": {
+        "protocolVersion": "2024-11-05",
+        "inlineContent": "{\"tools\": [{\"name\": \"get_weather\", \"description\": \"Get current weather conditions for a specified location\", \"inputSchema\": {\"type\": \"object\", \"properties\": {\"location\": {\"type\": \"string\", \"description\": \"City name or coordinates\"}}, \"required\": [\"location\"]}}, {\"name\": \"get_forecast\", \"description\": \"Get weather forecast for the next 7 days\", \"inputSchema\": {\"type\": \"object\", \"properties\": {\"location\": {\"type\": \"string\", \"description\": \"City name or coordinates\"}, \"days\": {\"type\": \"integer\", \"description\": \"Number of forecast days\"}}, \"required\": [\"location\"]}}]}"
+      }
+    }
+  }' \
+  --region ap-northeast-1
+```
+
+**A2A agent record:**
+
+A2A records require an agent card conforming to the A2A protocol specification, including `protocolVersion`, `url`, `capabilities`, `defaultInputModes`, `defaultOutputModes`, and `skills`.
+
+```bash title="Terminal"
+aws bedrock-agentcore-control create-registry-record \
+  --registry-id "<registry-id>" \
+  --name "travel-booking-agent" \
+  --description "Books flights and hotels for business trips and manages itineraries" \
+  --record-version "1.0.0" \
+  --descriptor-type A2A \
+  --descriptors '{
+    "a2a": {
+      "agentCard": {
+        "schemaVersion": "0.3",
+        "inlineContent": "{\"name\": \"travel-booking-agent\", \"description\": \"Books flights and hotels for business trips\", \"version\": \"1.0.0\", \"protocolVersion\": \"0.3.0\", \"url\": \"https://example.com/agents/travel-booking\", \"capabilities\": {}, \"defaultInputModes\": [\"text/plain\"], \"defaultOutputModes\": [\"text/plain\"], \"skills\": [{\"id\": \"book-flight\", \"name\": \"Book Flight\", \"description\": \"Search and book flights\", \"tags\": [\"travel\"]}, {\"id\": \"book-hotel\", \"name\": \"Book Hotel\", \"description\": \"Search and book hotels\", \"tags\": [\"travel\"]}]}"
+      }
+    }
+  }' \
+  --region ap-northeast-1
+```
+
+**AGENT_SKILLS record:**
+
+For AGENT_SKILLS, the CLI parameter name is `skillMd` (not `skillMarkdown` as in the REST API), and it must be wrapped in an `{inlineContent: "..."}` structure.
+
+```bash title="Terminal"
+aws bedrock-agentcore-control create-registry-record \
+  --cli-input-json '{
+    "registryId": "<registry-id>",
+    "name": "data-analysis-skill",
+    "description": "Analyzes CSV and JSON datasets and generates summary reports",
+    "recordVersion": "1.0.0",
+    "descriptorType": "AGENT_SKILLS",
+    "descriptors": {
+      "agentSkills": {
+        "skillMd": {
+          "inlineContent": "---\nname: data-analysis-skill\ndescription: Analyzes CSV and JSON datasets\n---\n\n# Data Analysis Skill\n\nAnalyzes structured data files and produces summary reports."
+        },
+        "skillDefinition": {
+          "schemaVersion": "0.1.0",
+          "inlineContent": "{\"websiteUrl\": \"https://example.com/data-analysis-skill\", \"repository\": {\"url\": \"https://github.com/example/data-analysis-skill\", \"source\": \"github\"}}"
+        }
+      }
+    }
+  }' \
+  --region ap-northeast-1
+```
+
+### Approval Workflow
+
+Submit all 4 records for approval, then approve them.
+
+```bash title="Terminal"
+# Submit for approval
+aws bedrock-agentcore-control submit-registry-record-for-approval \
+  --registry-id "<registry-id>" \
+  --record-id "<record-id>" \
+  --region ap-northeast-1
+
+# Approve
+aws bedrock-agentcore-control update-registry-record-status \
+  --registry-id "<registry-id>" \
+  --record-id "<record-id>" \
+  --status APPROVED \
+  --status-reason "Reviewed and approved for verification" \
+  --region ap-northeast-1
+```
+
+</details>
+
+## Verification 1: Approval Workflow and Status Transitions
+
+Agent Registry records follow a Draft → Pending Approval → Approved lifecycle. Only approved records appear in search results.
+
+### Status Transition Verification
+
+After creating 4 records, all start in `DRAFT` status.
+
+```bash title="Terminal"
+aws bedrock-agentcore-control list-registry-records \
+  --registry-id "<registry-id>" \
+  --region ap-northeast-1 \
+  --query 'registryRecords[].{name:name, type:descriptorType, status:status}' \
+  --output table
+```
+
+```text title="Output"
+----------------------------------------------------------------------
+|                         ListRegistryRecords                        |
++------------------------+---------+----------------+----------------+
+|          name          | status  |     type       |                |
++------------------------+---------+----------------+----------------+
+|  weather-api           |  DRAFT  |  MCP           |                |
+|  notification-service  |  DRAFT  |  MCP           |                |
+|  data-analysis-skill   |  DRAFT  |  AGENT_SKILLS  |                |
+|  travel-booking-agent  |  DRAFT  |  A2A           |                |
++------------------------+---------+----------------+----------------+
+```
+
+### Unapproved Records Are Not Searchable
+
+Searching while records are in DRAFT status returns empty results. Note that the search API (data plane) requires `--registry-ids` with the full ARN, unlike the control plane commands which use `--registry-id` with just the ID.
+
+```bash title="Terminal"
+aws bedrock-agentcore search-registry-records \
+  --search-query "weather" \
+  --registry-ids "<registry-arn>" \
+  --region ap-northeast-1
+```
+
+```json title="Output"
+{ "registryRecords": [] }
+```
+
+After submitting for approval (`PENDING_APPROVAL`), search results remain empty. Only after approval and about 60 seconds for index propagation do records become searchable.
+
+**Key finding:** Neither DRAFT nor PENDING_APPROVAL records appear in search results. The approval workflow functions as intended for governance. With all 4 records now approved and indexed, I moved on to testing search accuracy.
+
+## Verification 2: Hybrid Search Accuracy
+
+Agent Registry uses hybrid search: every query runs keyword matching (text match) and semantic search (conceptual similarity) simultaneously, merging scores into a single ranking.
+
+With all 4 records now approved, I tested search accuracy against them.
+
+| Record Name | Type | Description |
+|---|---|---|
+| weather-api | MCP | Weather data and forecast service |
+| travel-booking-agent | A2A | Flight and hotel booking agent |
+| data-analysis-skill | AGENT_SKILLS | CSV/JSON data analysis skill |
+| notification-service | MCP | Email, Slack, SMS notification service |
+
+### 2-1: Keyword Search vs Semantic Search
+
+The base search command is shown below. I varied `--search-query` and `--filters` across 3 patterns.
+
+**Keyword search with exact name:**
+
+```bash title="Terminal"
+aws bedrock-agentcore search-registry-records \
+  --search-query "weather-api" \
+  --registry-ids "<registry-arn>" \
+  --region ap-northeast-1
+```
+
+Result: Only `weather-api` returned. Exact name match works precisely.
+
+**Semantic search with natural language:**
+
+Changed `--search-query` to `"automate business trip arrangements"`.
+
+Result: `travel-booking-agent` returned. The record description contains "business trips" but not "arrangements", yet semantic search correctly identified the conceptual match.
+
+**Filtered search:**
+
+Used `--search-query "weather"` with `--filters '{"descriptorType": {"$eq": "MCP"}}'`.
+
+Result: Only `weather-api`. The `descriptorType` filter effectively narrows results to MCP servers only.
+
+I ran 2 additional semantic queries beyond the 3 above. Full results across all 5 queries:
+
+| Query | Type | Results |
+|---|---|---|
+| `weather-api` | Keyword | weather-api |
+| `a tool that fetches weather forecasts` | Semantic | weather-api, notification-service |
+| `automate business trip arrangements` | Semantic | travel-booking-agent |
+| `find a tool that sends notifications` | Semantic | notification-service, weather-api |
+| `weather` + filter:MCP | Filter | weather-api |
+
+Semantic search returns conceptually related records even when query terms don't appear in the metadata. However, records beyond the intended target may also appear (e.g., notification-service appearing for weather-related queries). Combining with `descriptorType` filters is recommended for precision.
+
+### 2-2: Japanese Queries vs English Queries
+
+All record metadata is in English. I tested whether Japanese queries can still find the right records.
+
+| Japanese Query | English Query | Japanese Result | English Result |
+|---|---|---|---|
+| 天気予報を取得するツール | a tool that fetches weather forecasts | weather-api | weather-api, notification-service |
+| 出張の手配を自動化したい | automate business trip arrangements | **(0 results)** | travel-booking-agent |
+| データを分析してレポートを作成 | analyze data and generate reports | data-analysis-skill | all 4 (data-analysis-skill ranked 1st) |
+
+**Key finding: The Japanese query "出張の手配を自動化したい" (I want to automate business trip arrangements) returned 0 results**, while the equivalent English query correctly found `travel-booking-agent`.
+
+This reveals limitations in cross-lingual semantic search against English metadata. In this verification, "天気予報" (weather forecast) matched weather-api, but "出張の手配" (business trip arrangements) did not match travel-booking-agent. With only 3 queries tested, this cannot be generalized, but Japanese query accuracy appeared lower than English.
+
+**Mitigation verified:** I updated the `travel-booking-agent` description to include Japanese: "Books flights and hotels for business trips / 出張の航空券・ホテル予約エージェント", re-approved the record, and ran the same Japanese query.
+
+```bash title="Terminal"
+aws bedrock-agentcore-control update-registry-record \
+  --cli-input-json '{
+    "registryId": "<registry-id>",
+    "recordId": "<record-id>",
+    "description": {
+      "optionalValue": "Books flights and hotels for business trips / 出張の航空券・ホテル予約エージェント"
+    }
+  }' \
+  --region ap-northeast-1
+```
+
+Note: Updating a record resets its status to DRAFT, requiring re-submission and re-approval.
+
+| Japanese Query | Before | After |
+|---|---|---|
+| 出張の手配を自動化したい | 0 results | **travel-booking-agent** ✓ |
+| 航空券の予約 | (not tested) | **travel-booking-agent** ✓ |
+
+**Adding Japanese text to the description made Japanese semantic search work.** For organizations with Japanese-speaking users, include both English and Japanese in record descriptions.
+
+### 2-3: Query Writing Patterns
+
+The documentation recommends not mixing filter-like constraints into query text. I verified how much this affects results.
+
+```bash title="Terminal (bad: constraint in query)"
+aws bedrock-agentcore search-registry-records \
+  --search-query "find all MCP servers for weather forecasts" \
+  --registry-ids "<registry-arn>" \
+  --region ap-northeast-1
+```
+
+```bash title="Terminal (good: filter separated)"
+aws bedrock-agentcore search-registry-records \
+  --search-query "weather forecasts" \
+  --registry-ids "<registry-arn>" \
+  --filters '{"descriptorType": {"$eq": "MCP"}}' \
+  --region ap-northeast-1
+```
+
+| Query Pattern | Results |
+|---|---|
+| `"find all MCP servers for weather forecasts"` (mixed) | weather-api, travel-booking-agent, notification-service, data-analysis-skill (**all 4**) |
+| `"weather forecasts"` + filter:MCP (separated) | weather-api (**1 only**) |
+
+Mixing constraints into the query returned all 4 records, while separating the filter returned only 1. The [documentation](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/registry-search-records.html) explains that longer queries lean toward semantic matching, causing attribute constraints to not function as intended. This verification confirms that recommendation.
+
+### 2-4: MCP Endpoint Search
+
+Each registry exposes an MCP-compatible endpoint for programmatic search.
+
+The MCP endpoint requires SigV4 signing. Export temporary credentials to environment variables before calling curl.
+
+```bash title="Terminal (export credentials)"
+eval $(aws configure export-credentials --format env)
+```
+
+**Listing available tools:**
+
+```bash title="Terminal"
+curl -s -X POST \
+  "https://bedrock-agentcore.ap-northeast-1.amazonaws.com/registry/<registry-id>/mcp" \
+  -H "Content-Type: application/json" \
+  -H "X-Amz-Security-Token: ${AWS_SESSION_TOKEN}" \
+  --aws-sigv4 "aws:amz:ap-northeast-1:bedrock-agentcore" \
+  --user "${AWS_ACCESS_KEY_ID}:${AWS_SECRET_ACCESS_KEY}" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
+```
+
+A single tool `search_registry_records` is returned, with parameters `searchQuery` (required), `maxResults`, and `filter` (optional).
+
+**Searching via MCP:**
+
+The curl command is the same structure — only the `-d` JSON body differs. For filtered search, add `"filter": {"descriptorType": {"$eq": "MCP"}}` inside `arguments`.
+
+```bash title="Terminal"
+curl -s -X POST \
+  "https://bedrock-agentcore.ap-northeast-1.amazonaws.com/registry/<registry-id>/mcp" \
+  -H "Content-Type: application/json" \
+  -H "X-Amz-Security-Token: ${AWS_SESSION_TOKEN}" \
+  --aws-sigv4 "aws:amz:ap-northeast-1:bedrock-agentcore" \
+  --user "${AWS_ACCESS_KEY_ID}:${AWS_SECRET_ACCESS_KEY}" \
+  -d '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"search_registry_records","arguments":{"searchQuery":"weather-api"}}}'
+```
+
+**API vs MCP result comparison:**
+
+| Query | API Result | MCP Result | Match |
+|---|---|---|---|
+| weather-api | weather-api | weather-api | ✓ |
+| automate business trip arrangements | travel-booking-agent | travel-booking-agent | ✓ |
+| weather + filter:MCP | weather-api | weather-api | ✓ |
+
+API and MCP endpoint returned identical results across all 3 queries tested, showing consistent behavior. For IAM-authenticated registries, SigV4 signing is required. MCP-compatible clients like Kiro and Claude Code can connect via [mcp-proxy-for-aws](https://github.com/aws/mcp-proxy-for-aws).
+
+## Summary
+
+Here are the key findings from verifying Agent Registry's basic workflow and search capabilities.
+
+**The approval workflow provides effective governance** — Neither DRAFT nor PENDING_APPROVAL records appear in search results. The "only approved resources are discoverable" control works reliably.
+
+**Semantic search is practically accurate with English queries** — It finds conceptually related records even when query terms don't appear in the metadata. However, records beyond the intended target may also appear, so combining with `descriptorType` filters is recommended.
+
+**Japanese query semantic search has limitations — but a mitigation exists** — Against English metadata, Japanese queries produced mixed results (1 out of 3 queries returned 0 results). However, adding Japanese text to the record description resolved this. Organizations with Japanese-speaking users should include bilingual descriptions when registering records.
+
+**Don't mix filter constraints into query text** — A query like "find all MCP servers for weather forecasts" returned all 4 records regardless of type. As the documentation recommends, use metadata filters for type/name constraints and keep the query focused on the topic.
+
+**The MCP endpoint works at the same quality as the API** — Search results are identical between API and MCP endpoint. Programmatic search from IDEs and agents is practically functional.
+
+### Record Creation Gotchas
+
+Issues encountered during setup that aren't obvious from documentation alone:
+
+- MCP server `name` must be in reverse-DNS format (e.g., `io.example/weather-api`), per the MCP Registry server.json schema
+- MCP server `description` is limited to 100 characters (for schema version `2025-07-09`)
+- AGENT_SKILLS CLI parameter is `skillMd` (not `skillMarkdown` as in REST API), wrapped in `{inlineContent: "..."}`
+- `schemaVersion` is required; omitting it causes a validation error
+- Updating a record (`update-registry-record`) resets its status to DRAFT, requiring re-approval
+
+### When Agent Registry Is Useful
+
+- Agents and tools span multiple teams and cross-team visibility is low
+- Approval workflow governance is needed (security/compliance requirements)
+- Programmatic resource discovery from IDEs and agents is desired (MCP endpoint)
+
+### Current Considerations
+
+- Preview stage; specifications may change before GA
+- Japanese query semantic search accuracy is limited against English metadata
+- CLI commands require AWS CLI v2.34.28+
+- Available in 5 regions: us-east-1, us-west-2, ap-northeast-1, ap-southeast-2, eu-west-1
+
+## Cleanup
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">Resource deletion steps</summary>
+
+Delete records first, then the registry.
+
+```bash title="Terminal"
+# Delete records
+aws bedrock-agentcore-control delete-registry-record \
+  --registry-id "<registry-id>" \
+  --record-id "<record-id>" \
+  --region ap-northeast-1
+
+# Delete registry
+aws bedrock-agentcore-control delete-registry \
+  --registry-id "<registry-id>" \
+  --region ap-northeast-1
+```
+
+</details>
