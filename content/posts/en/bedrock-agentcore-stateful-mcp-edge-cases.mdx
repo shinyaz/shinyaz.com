@@ -434,7 +434,7 @@ Called `add_expense_interactive` four times, each with a 4-step Elicitation sequ
   Result: Expense of $45.50 added for testuser
 ```
 
-All four expenses ($45.50 food, $120.00 bills, $15.99 entertainment, $85.30 food) were written to DynamoDB (the remaining 3 follow the same flow, so output is omitted). At each `ctx.elicit()`, the server sends an `elicitation/create` request to the client, pauses execution, and resumes when the client responds.
+All four expenses (\$45.50 food, \$120.00 bills, \$15.99 entertainment, \$85.30 food) were written to DynamoDB (the remaining 3 follow the same flow, so output is omitted). At each `ctx.elicit()`, the server sends an `elicitation/create` request to the client, pauses execution, and resumes when the client responds.
 
 ### Spending Analysis (Sampling)
 
@@ -454,7 +454,7 @@ Recommendations:
 3. Use energy-saving measures to lower electricity bills by 10-15%.
 ```
 
-The Prompt line shows FastMCP's internal object representation, but the content is the prompt string `"Here are the recent expenses...\n- Lunch at the office ($45.50, food)\n..."`. The server holds no LLM API keys or model selection logic. `ctx.sample()` sends a `sampling/createMessage` request to the client, which generates the response using its own LLM. MCP's separation of tools and models works in practice.
+The Prompt line shows FastMCP's internal object representation, but the content is the prompt string `"Here are the recent expenses...\n- Lunch at the office (\$45.50, food)\n..."`. The server holds no LLM API keys or model selection logic. `ctx.sample()` sends a `sampling/createMessage` request to the client, which generates the response using its own LLM. MCP's separation of tools and models works in practice.
 
 ### Monthly Report (Progress Notifications)
 
@@ -520,7 +520,7 @@ Answered the first question (amount) normally, then returned `decline` for the s
 
 When `decline` is returned, `ctx.elicit()` returns an object that is not `AcceptedElicitation`. The `isinstance` check catches it and the tool returns `"Expense entry cancelled."` immediately.
 
-Critically, **no data was written to DynamoDB**. The server design only calls `db.add_transaction()` after all 4 Elicitation steps complete and the final confirmation returns `"Yes"`. Data collected before the decline (the $99.99 amount) is discarded.
+Critically, **no data was written to DynamoDB**. The server design only calls `db.add_transaction()` after all 4 Elicitation steps complete and the final confirmation returns `"Yes"`. Data collected before the decline (the \$99.99 amount) is discarded.
 
 ### 2a-2. Elicitation Cancel — Difference from Decline
 

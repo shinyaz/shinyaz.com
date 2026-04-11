@@ -434,7 +434,7 @@ FastMCPの`Client`にサーバーの`mcp`オブジェクトを直接渡すこと
   Result: Expense of $45.50 added for testuser
 ```
 
-4件の経費（$45.50 food、$120.00 bills、$15.99 entertainment、$85.30 food）がすべてDynamoDBに書き込まれた（残り3件も同様のフローのため出力は省略）。Elicitationの各ステップでサーバーがクライアントに`elicitation/create`リクエストを送り、クライアント側の`elicitation_handler`が応答を返す。ツール実行は各`ctx.elicit()`で一時停止し、応答を受け取ると再開する。
+4件の経費（\$45.50 food、\$120.00 bills、\$15.99 entertainment、\$85.30 food）がすべてDynamoDBに書き込まれた（残り3件も同様のフローのため出力は省略）。Elicitationの各ステップでサーバーがクライアントに`elicitation/create`リクエストを送り、クライアント側の`elicitation_handler`が応答を返す。ツール実行は各`ctx.elicit()`で一時停止し、応答を受け取ると再開する。
 
 ### 支出分析（Sampling）
 
@@ -454,7 +454,7 @@ Recommendations:
 3. Use energy-saving measures to lower electricity bills by 10-15%.
 ```
 
-Prompt行はFastMCPの内部オブジェクト表現で出力されているが、中身は`"Here are the recent expenses...\n- Lunch at the office ($45.50, food)\n..."`というプロンプト文字列だ。サーバーはLLMのAPIキーもモデル選択も持たない。`ctx.sample()`はクライアントに`sampling/createMessage`リクエストを送り、クライアントが自身のLLMで応答を生成して返す。MCPの「ツールとモデルの分離」が実際に機能している。
+Prompt行はFastMCPの内部オブジェクト表現で出力されているが、中身は`"Here are the recent expenses...\n- Lunch at the office (\$45.50, food)\n..."`というプロンプト文字列だ。サーバーはLLMのAPIキーもモデル選択も持たない。`ctx.sample()`はクライアントに`sampling/createMessage`リクエストを送り、クライアントが自身のLLMで応答を生成して返す。MCPの「ツールとモデルの分離」が実際に機能している。
 
 ### 月次レポート（Progress Notifications）
 
@@ -520,7 +520,7 @@ flowchart TD
 
 `decline`を返すと、`ctx.elicit()`は`AcceptedElicitation`ではないオブジェクトを返す。サーバー側の`isinstance`チェックでキャッチされ、即座に`"Expense entry cancelled."`が返った。
 
-重要なのは**DynamoDBへの書き込みが発生しなかった**ことだ。このサーバーの設計では、4ステップすべてのElicitationが完了し、最終確認で`"Yes"`が返った場合にのみ`db.add_transaction()`が呼ばれる。途中でdeclineされた場合、それまでに収集したデータ（この場合は金額$99.99）は破棄される。
+重要なのは**DynamoDBへの書き込みが発生しなかった**ことだ。このサーバーの設計では、4ステップすべてのElicitationが完了し、最終確認で`"Yes"`が返った場合にのみ`db.add_transaction()`が呼ばれる。途中でdeclineされた場合、それまでに収集したデータ（この場合は金額\$99.99）は破棄される。
 
 ### 2a-2. Elicitationのcancel — declineとの違い
 
