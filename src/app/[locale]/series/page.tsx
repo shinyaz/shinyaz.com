@@ -2,7 +2,7 @@ import type { Metadata } from "next";
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { getAllSeries, getSeriesTitle, getPublishedPosts } from "@/lib/posts";
-import { locales, isValidLocale, getDictionary, type Locale } from "@/lib/i18n";
+import { locales, isValidLocale, getDictionary } from "@/lib/i18n";
 import { SITE_URL } from "@/lib/constants";
 import { buildAlternateLanguages } from "@/lib/seo";
 
