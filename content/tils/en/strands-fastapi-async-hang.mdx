@@ -1,8 +1,8 @@
 ---
 title: "Strands agent() hangs inside FastAPI async def endpoints"
 description: "Strands Agents SDK's agent() is a blocking call. Calling it inside an async def FastAPI endpoint blocks the event loop and hangs the request. Switching to def fixes it."
-date: 2026-04-18
-published: false
+date: 2026-04-19
+published: true
 tags: ["strands-agents", "fastapi", "python", "async"]
 ---
 
@@ -24,4 +24,4 @@ def invoke(request: InvokeRequest):
     return {"response": result.message["content"][0]["text"]}
 ```
 
-FastAPI automatically runs `def` endpoints in an external thread pool, so the main event loop is never blocked. Covered in detail in [deploy series part 1](/en/blog/2026/04/18/strands-agents-docker).
+FastAPI automatically runs `def` endpoints in an external thread pool, so the main event loop is never blocked. Covered in detail in [deploy series part 1](/en/blog/2026/04/19/strands-agents-docker).

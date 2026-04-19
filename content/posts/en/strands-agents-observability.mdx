@@ -1,8 +1,8 @@
 ---
 title: "Strands Agents SDK Deploy — Visualize Agent Traces with OpenTelemetry"
 description: "Enable the Strands Agents SDK's built-in OpenTelemetry support to visualize agent reasoning and tool calls as traces in Jaeger. Only 2 lines of code change required."
-date: 2026-04-18
-published: false
+date: 2026-04-19
+published: true
 featured: false
 categories: [ai-agents]
 tags: ["strands-agents", "bedrock", "python", "ai-agents", "opentelemetry", "observability"]
@@ -12,7 +12,7 @@ seriesOrder: 4
 
 ## Introduction
 
-From [part 1](/en/blog/2026/04/18/strands-agents-docker) through [part 3](/en/blog/2026/04/18/strands-agents-agentcore), we deployed agents to Docker, Lambda, and AgentCore. The deployment target is set, but production operation needs one more thing: a way to monitor agent behavior.
+From [part 1](/en/blog/2026/04/19/strands-agents-docker) through [part 3](/en/blog/2026/04/19/strands-agents-agentcore), we deployed agents to Docker, Lambda, and AgentCore. The deployment target is set, but production operation needs one more thing: a way to monitor agent behavior.
 
 In [practical part 5](/en/blog/2026/04/03/strands-agents-metrics), we used `result.metrics.get_summary()` to check cycle counts and token usage. But that was post-hoc analysis of a single request. In production, you need to analyze across multiple requests, identify bottlenecks, and detect anomalies.
 
@@ -34,7 +34,7 @@ See the official documentation at [Traces](https://strandsagents.com/docs/user-g
 
 Prerequisites:
 
-- The [part 1](/en/blog/2026/04/18/strands-agents-docker) environment (`strands-agents` installed)
+- The [part 1](/en/blog/2026/04/19/strands-agents-docker) environment (`strands-agents` installed)
 - Docker installed (used for Jaeger)
 
 Install the OTEL dependency extras:

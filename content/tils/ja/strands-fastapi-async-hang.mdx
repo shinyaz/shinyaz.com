@@ -1,8 +1,8 @@
 ---
 title: "FastAPI の async def で Strands agent() を呼ぶとハングする"
 description: "Strands Agents SDK の agent() はブロッキング呼び出しなので、FastAPI の async def エンドポイント内で呼ぶとイベントループがブロックされてリクエストがハングする。def に変えれば解決する。"
-date: 2026-04-18
-published: false
+date: 2026-04-19
+published: true
 tags: ["strands-agents", "fastapi", "python", "async"]
 ---
 
@@ -24,4 +24,4 @@ def invoke(request: InvokeRequest):
     return {"response": result.message["content"][0]["text"]}
 ```
 
-FastAPI は `def` で定義されたエンドポイントを外部のスレッドプールで自動実行するため、メインのイベントループをブロックしない。[デプロイ編 第 1 回](/ja/blog/2026/04/18/strands-agents-docker)で詳しく扱っている。
+FastAPI は `def` で定義されたエンドポイントを外部のスレッドプールで自動実行するため、メインのイベントループをブロックしない。[デプロイ編 第 1 回](/ja/blog/2026/04/19/strands-agents-docker)で詳しく扱っている。

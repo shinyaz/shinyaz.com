@@ -1,8 +1,8 @@
 ---
 title: "Strands Agents SDK Deploy — Serverless Deployment to AWS Lambda"
 description: "Deploy a Strands Agents SDK agent to AWS Lambda using the official Lambda Layer. Measured cold start Init Duration at ~1 second and warm start at under 1 second."
-date: 2026-04-18
-published: false
+date: 2026-04-19
+published: true
 featured: false
 categories: [ai-agents]
 tags: ["strands-agents", "bedrock", "python", "ai-agents", "lambda", "serverless"]
@@ -12,11 +12,11 @@ seriesOrder: 2
 
 ## Introduction
 
-In the [previous article](/en/blog/2026/04/18/strands-agents-docker), we containerized the agent with FastAPI + Docker. Containers are versatile but require always-on infrastructure.
+In the [previous article](/en/blog/2026/04/19/strands-agents-docker), we containerized the agent with FastAPI + Docker. Containers are versatile but require always-on infrastructure.
 
 With Lambda, the function only runs when invoked, and you pay only for compute time consumed. Using the official Lambda Layer, you just write a handler function and the serverless agent is ready.
 
-Note that Lambda does not support response streaming. If you need streaming, consider the Docker + Fargate approach from the [previous article](/en/blog/2026/04/18/strands-agents-docker).
+Note that Lambda does not support response streaming. If you need streaming, consider the Docker + Fargate approach from the [previous article](/en/blog/2026/04/19/strands-agents-docker).
 
 This article covers:
 
@@ -33,7 +33,7 @@ Prerequisites:
 
 - Python 3.12 (matching the Lambda runtime)
 - AWS CLI configured with Lambda and Bedrock permissions
-- The [part 1](/en/blog/2026/04/18/strands-agents-docker) environment (`strands-agents` installed) for local testing
+- The [part 1](/en/blog/2026/04/19/strands-agents-docker) environment (`strands-agents` installed) for local testing
 
 Create a working directory:
 
@@ -43,7 +43,7 @@ mkdir lambda_agent && cd lambda_agent
 
 ## Implementing the Lambda Handler
 
-In the [previous article](/en/blog/2026/04/18/strands-agents-docker), FastAPI used `def invoke(request)` to receive requests. In Lambda, `def handler(event, context)` is the entry point. The handler below supports both `aws lambda invoke` and Function URL (covered later).
+In the [previous article](/en/blog/2026/04/19/strands-agents-docker), FastAPI used `def invoke(request)` to receive requests. In Lambda, `def handler(event, context)` is the entry point. The handler below supports both `aws lambda invoke` and Function URL (covered later).
 
 ```python title="handler.py"
 import json
@@ -77,7 +77,7 @@ def handler(event, context):
 Three key points:
 
 - **`BedrockModel` at module level** — Lambda reuses module-level objects across warm invocations. Since `BedrockModel` is stateless, it doesn't need to be recreated each time
-- **`Agent` inside the handler** — Same reason as the [previous article](/en/blog/2026/04/18/strands-agents-docker): create a new instance per invocation to isolate conversation history
+- **`Agent` inside the handler** — Same reason as the [previous article](/en/blog/2026/04/19/strands-agents-docker): create a new instance per invocation to isolate conversation history
 - **Event format detection** — `aws lambda invoke` passes the payload directly as the event, but Function URL wraps it in `event.body` as a JSON string. `isinstance(event.get("body"), str)` detects the format and handles both
 
 ### Local Test
@@ -182,7 +182,7 @@ After creating the function, wait a few seconds for the State to become `Active`
 
 ## Adding an HTTP Endpoint with Function URL
 
-So far, the Lambda function can only be called via `aws lambda invoke`. To call it over HTTP like the FastAPI setup in [part 1](/en/blog/2026/04/18/strands-agents-docker), add a [Lambda Function URL](https://docs.aws.amazon.com/lambda/latest/dg/urls-configuration.html). This gives the function a dedicated HTTPS endpoint without needing API Gateway.
+So far, the Lambda function can only be called via `aws lambda invoke`. To call it over HTTP like the FastAPI setup in [part 1](/en/blog/2026/04/19/strands-agents-docker), add a [Lambda Function URL](https://docs.aws.amazon.com/lambda/latest/dg/urls-configuration.html). This gives the function a dedicated HTTPS endpoint without needing API Gateway.
 
 ```bash title="Terminal"
 aws lambda create-function-url-config \
@@ -219,7 +219,7 @@ awscurl --service lambda --region us-east-1 \
 {"response": "Tokyo"}
 ```
 
-The agent is now callable over HTTP, just like the FastAPI setup in [part 1](/en/blog/2026/04/18/strands-agents-docker).
+The agent is now callable over HTTP, just like the FastAPI setup in [part 1](/en/blog/2026/04/19/strands-agents-docker).
 
 ## Measuring Cold Start
 
@@ -278,7 +278,7 @@ Cold start adds Init Duration (937ms) for SDK import and `BedrockModel` initiali
 
 - **The official Lambda Layer makes deployment simple** — ZIP your `handler.py`, specify the Layer ARN, and you're done. No need to manage dependency packages yourself.
 - **Function URL adds an HTTP endpoint** — Get an HTTPS endpoint without API Gateway. With IAM auth, use `awscurl` for SigV4-signed requests. The handler needs to support both `aws lambda invoke` and Function URL event formats.
-- **`BedrockModel` at module level, `Agent` in the handler** — Reuse the model across warm invocations while isolating conversations per request. Same design principle as the [previous article](/en/blog/2026/04/18/strands-agents-docker).
+- **`BedrockModel` at module level, `Agent` in the handler** — Reuse the model across warm invocations while isolating conversations per request. Same design principle as the [previous article](/en/blog/2026/04/19/strands-agents-docker).
 - **Cold start Init Duration is about 1 second** — Primarily SDK import time. Warm start Duration drops to less than half. Recommend `--memory-size 256` or higher (111MB used).
 - **Set timeout to 60 seconds or more** — Agent responses (LLM inference + tool execution) exceed the default 3-second timeout.
 
