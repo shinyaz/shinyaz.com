@@ -1,0 +1,23 @@
+---
+title: "Swapping models mid-session in AgentCore harness made the new model impersonate the old one"
+description: "After overriding InvokeHarness's model from Claude to OpenAI gpt-oss, the gpt-oss model inherited the history and claimed to be Claude. Don't trust a model's self-report to tell which one is running."
+date: 2026-06-17
+published: true
+tags: ["agentcore", "bedrock", "aws"]
+---
+
+Amazon Bedrock AgentCore harness lets you swap model providers on the same session by overriding `model` on `InvokeHarness`. While testing Claude (default) → OpenAI `gpt-oss-120b`, I hit something odd. I asked "are you Claude or GPT?" in turn 1, then switched to gpt-oss in turn 2 and asked again — and it answered "I'm Claude," even though it was actually OpenAI under the hood.
+
+```python title="Python"
+sid = (uuid.uuid4().hex * 2)[:40]
+# Turn 1: ask the default Claude "Claude or GPT?" -> answers "I'm Claude"
+invoke(sid, "... by the way, are you Claude or GPT?")
+# Turn 2: override to gpt-oss on the same session
+invoke(sid, "Are you Claude or GPT?",
+       model={"bedrockModelConfig": {"modelId": "openai.gpt-oss-120b-1:0"}})
+# => "I am a Claude model."  <- but it's actually OpenAI
+```
+
+The harness reloads the conversation history each turn and replays it to the new model. So the gpt-oss model apparently inherited the persona from the earlier "I am Claude" assistant message in history. Indeed, if you don't ask for identity in turn 1 and only ask gpt-oss, it correctly says it was built by OpenAI.
+
+The takeaway: **don't rely on a model's self-report to tell which model is actually running** after a swap. To be sure, ask in a clean session, or pass a bogus modelId and let `ConverseStream` reject it with `The provided model identifier is invalid`. I wrote up the full hands-on verification in a [blog post](/en/blog/2026/06/17/bedrock-agentcore-harness-verification).

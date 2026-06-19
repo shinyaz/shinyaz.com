@@ -1,0 +1,23 @@
+---
+title: "AgentCore harness でモデルを途中切替したら、新モデルが旧モデルのふりをした"
+description: "InvokeHarness の model 上書きで Claude から OpenAI gpt-oss に切り替えたら、会話履歴を引き継いだ gpt-oss が「自分は Claude」と名乗った。動作中のモデルを自己申告で判定してはいけない。"
+date: 2026-06-17
+published: true
+tags: ["agentcore", "bedrock", "aws"]
+---
+
+Amazon Bedrock AgentCore harness は、同一セッションのまま `InvokeHarness` の `model` を上書きしてモデルプロバイダーを切り替えられる。Claude（既定）→ OpenAI `gpt-oss-120b` を試していて妙なことに気づいた。ターン1で「あなたは Claude か GPT か」と訊いてから、ターン2で gpt-oss に切り替えて同じことを訊くと——実体は OpenAI なのに——「自分は Claude だ」と答えたのだ。
+
+```python title="Python"
+sid = (uuid.uuid4().hex * 2)[:40]
+# ターン1: 既定 Claude に「Claude か GPT か」を含めて質問 → 「私は Claude」と回答
+invoke(sid, "... ところであなたは Claude と GPT のどちら？")
+# ターン2: 同一セッションのまま gpt-oss に上書き
+invoke(sid, "あなたは Claude と GPT のどちら？",
+       model={"bedrockModelConfig": {"modelId": "openai.gpt-oss-120b-1:0"}})
+# => "I am a Claude model."  ← 実体は OpenAI なのに
+```
+
+harness は毎ターン会話履歴を読み込んで新モデルへ再投入する。だから履歴に残った「私は Claude」というアシスタント発言を、切り替わった gpt-oss がペルソナごと引き継いだらしい。実際、ターン1で自己申告を訊かずに gpt-oss だけに尋ねると、ちゃんと「OpenAI 製」と答える。
+
+つまり、切替後にどのモデルが動いているかを**モデルの自己申告で判定するのは当てにならない**。確実に確かめたいなら、クリーンな新規セッションで訊くか、わざと存在しない modelId を渡して `ConverseStream` が `The provided model identifier is invalid` で弾くかで裏を取るのが早い。詳しい実機検証は[ブログ記事](/ja/blog/2026/06/17/bedrock-agentcore-harness-verification)に書いた。
