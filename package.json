@@ -21,14 +21,14 @@
     "react-dom": "^19.2.5",
     "rehype-slug": "^6.0.0",
     "tailwind-merge": "^3.5.0",
-    "velite": "^0.3.1"
+    "velite": "^0.4.0"
   },
   "devDependencies": {
     "@playwright/test": "^1.59.1",
     "@serwist/turbopack": "^9.5.7",
     "@tailwindcss/postcss": "^4.2.2",
     "@testing-library/react": "^16.3.2",
-    "@types/node": "^25.6.0",
+    "@types/node": "^26.0.0",
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "@vitejs/plugin-react": "^6.0.1",
