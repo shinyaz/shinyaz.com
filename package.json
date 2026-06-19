@@ -48,6 +48,7 @@
     "vitest": "^4.1.4"
   },
   "overrides": {
-    "lodash-es": "^4.18.0"
+    "lodash-es": "^4.18.0",
+    "postcss": "^8.5.10"
   }
 }
