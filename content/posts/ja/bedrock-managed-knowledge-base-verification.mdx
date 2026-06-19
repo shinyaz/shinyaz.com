@@ -1,0 +1,186 @@
+---
+title: "Amazon Bedrock Managed Knowledge Base のエージェント検索を実機検証する"
+description: "東京リージョンでベクトルDBを一切用意せずManaged KBを構築し、単発Retrieveとエージェント検索(AgenticRetrieveStream)を同一のマルチホップ質問で実測。多ホップ精度を左右する最大の要因はマネージドリランカーのON/OFFだった。"
+date: 2026-06-19
+published: true
+featured: false
+categories: [ai-agents]
+tags: ["aws", "bedrock", "knowledge-bases", "rag", "agentic-retrieval", "ai-agents"]
+---
+
+## はじめに
+
+2026年6月17日、AWS は [Amazon Bedrock Managed Knowledge Base の一般提供](https://aws.amazon.com/about-aws/whats-new/2026/06/amazon-bedrock-managed-knowledge-base/) を発表した。ベクトルデータベースも取り込みパイプラインも検索インフラも一切管理せずに、本番品質の RAG をフルマネージドで構築できるサービスである。
+
+従来の Customer-managed Knowledge Base が OpenSearch Serverless などのベクトルストアを自分で用意・運用する必要があったのに対し、Managed KB は埋め込み・リランク・基盤モデルをサービス側が既定で管理する。目玉は3つ——7種のネイティブコネクタ、Smart Parsing、そして最大の差別化要素である **Agentic Retriever（`AgenticRetrieveStream` API）** だ。エージェント検索は、1つの複合質問をサブクエリへ分解し、反復検索しながら十分性を評価して回答を合成する。
+
+**本記事は、東京リージョン（ap-northeast-1）でベクトル DB を一切プロビジョニングせずに Managed KB を構築し、同一のマルチホップ質問を単発 `Retrieve` とエージェント検索の両方で実測した結果を共有する。** 先に結論を述べると、多ホップ精度を決めた最大のレバーはサブクエリ分解そのものではなく、**マネージドリランカーを使うか否か**だった。公式ドキュメントは [Build a managed knowledge base](https://docs.aws.amazon.com/bedrock/latest/userguide/kb-build-managed.html) と [Use agentic retrieval to query a knowledge base](https://docs.aws.amazon.com/bedrock/latest/userguide/kb-test-agentic-retrieve.html) を参照。
+
+## 検証環境
+
+| 項目 | 値 |
+| --- | --- |
+| リージョン | ap-northeast-1（東京） |
+| KB タイプ | MANAGED（マネージド埋め込み・既定） |
+| データソース | Amazon S3 コネクタ + Smart Parsing |
+| SDK | **boto3 1.43.33** |
+| コーパス | 日本語プレーンテキスト3文書 |
+
+ここで最初の落とし穴がある。検証環境にプリインストールされていた AWS CLI 2.34.30 / boto3 1.42.80 では、`CreateKnowledgeBase` の `type` enum に `MANAGED` が存在せず（`VECTOR / KENDRA / SQL` のみ）、`bedrock-agent-runtime` にも `AgenticRetrieveStream` が無かった。GA 直後の新 API なので、**SDK を 1.43.x 系へ更新するのが事実上の前提条件**になる。本記事は boto3 1.43.33 を venv に入れて検証した。
+
+コーパスは、マルチホップを誘発するよう正解を設計時に既知にした合成3文書である。
+
+- `01-org.txt`（組織図）: ML プラットフォームチームの責任者は **田中花子**
+- `02-budget.txt`（予算）: ML プラットフォームチームの年間予算は **1,200万円**
+- `03-policy.txt`（経費規程）: 年間契約の前払いは**責任者の承認**が必要、上限は**予算の50%**
+
+質問「ML プラットフォームの予算を年間前払いする場合、誰の承認が必要で上限は何円か」は、3文書を横断して初めて「田中花子の承認・上限600万円」と確定する。結果だけ知りたい場合は[検証2](#検証2-単発-retrieve-vs-エージェント検索)へスキップできる。
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">環境構築の全手順（IAM・S3・KB作成・取り込み）</summary>
+
+```bash title="Terminal"
+# venv に新しい boto3 を用意（システムの 1.42.x は MANAGED 型 / AgenticRetrieveStream 未対応）
+python3 -m venv kbverify-venv && . kbverify-venv/bin/activate
+pip install -q boto3==1.43.33
+
+# S3 バケットとコーパス
+aws s3api create-bucket --bucket bedrock-mkb-verify-$ACCOUNT \
+  --create-bucket-configuration LocationConstraint=ap-northeast-1 --region ap-northeast-1
+aws s3 sync ./corpus/ s3://bedrock-mkb-verify-$ACCOUNT/corpus/
+```
+
+サービスロールは信頼ポリシーの Principal を `bedrock.amazonaws.com` とし、対象バケットへの `s3:ListBucket` / `s3:GetObject` を付与する（`aws:SourceAccount` と `aws:SourceArn` で KB に絞り込む）。KB とデータソースの作成は boto3 で行う。
+
+```python title="Python (setup)"
+import boto3, time
+ba = boto3.client("bedrock-agent", "ap-northeast-1")
+
+kb = ba.create_knowledge_base(
+    name="mkb-verify-tokyo", roleArn=ROLE_ARN,
+    knowledgeBaseConfiguration={
+        "type": "MANAGED",
+        "managedKnowledgeBaseConfiguration": {"embeddingModelType": "MANAGED"},
+    },
+)
+kb_id = kb["knowledgeBase"]["knowledgeBaseId"]
+
+ds = ba.create_data_source(
+    name="s3-corpus", knowledgeBaseId=kb_id, dataDeletionPolicy="DELETE",
+    dataSourceConfiguration={
+        "type": "MANAGED_KNOWLEDGE_BASE_CONNECTOR",
+        "managedKnowledgeBaseConnectorConfiguration": {
+            "connectorParameters": {
+                "type": "S3", "version": "1",
+                "connectionConfiguration": {"bucketName": BUCKET, "bucketOwnerAccountId": ACCOUNT},
+                "deletionProtectionConfiguration": {"enableDeletionProtection": False},
+            }
+        },
+    },
+    vectorIngestionConfiguration={"parsingConfiguration": {"parsingStrategy": "SMART_PARSING"}},
+)
+ds_id = ds["dataSource"]["dataSourceId"]
+ba.start_ingestion_job(knowledgeBaseId=kb_id, dataSourceId=ds_id)
+```
+
+</details>
+
+## 検証1: ゼロインフラでのKB構築と取り込み
+
+KB の作成からデータ取り込みまでを通して計測した。
+
+| ステップ | 所要時間 | 結果 |
+| --- | --- | --- |
+| KB 作成（CREATING → ACTIVE） | **64.4 秒** | — |
+| データソース作成 + 取り込み（3文書） | **160.0 秒** | 3 scanned / 3 indexed / 0 failed |
+
+注目すべきは、**ベクトルストアのプロビジョニング操作が一切無かった**点だ。Customer-managed KB なら OpenSearch Serverless コレクションの作成・インデックス定義・スケーリング設定が必要だが、Managed KB は `type: MANAGED` を指定するだけ。実際に発行したのは「KB 作成 → データソース作成 → 取り込みジョブ開始」の3 API のみで、ベクトル DB は最後まで一度も意識しなかった。「ゼロインフラ」は誇張ではない。
+
+## 検証2: 単発Retrieve vs エージェント検索
+
+取り込んだ同一 KB に、同じマルチホップ質問を2方式で投げる。まず単発 `Retrieve` を、マネージドリランカーの有無で比較した。
+
+```python title="Python"
+ar = boto3.client("bedrock-agent-runtime", "ap-northeast-1")
+r = ar.retrieve(
+    knowledgeBaseId=kb_id,
+    retrievalQuery={"text": QUERY},
+    retrievalConfiguration={"managedSearchConfiguration": {
+        "numberOfResults": 10, "rerankingModelType": "NONE",  # or "MANAGED"
+    }},
+)
+```
+
+結果は対照的だった。`rerankingModelType=NONE` では3文書6チャンクすべてが返るのに対し、`MANAGED` では**最上位1チャンク（経費規程のみ）に絞り込まれた**。
+
+```text title="Output"
+rerank=NONE   : 6 chunks  → 01-org.txt, 02-budget.txt, 03-policy.txt
+rerank=MANAGED: 1 chunk   → 03-policy.txt のみ
+```
+
+マネージドリランカーは「最も関連する1件」を返す精度特化の挙動で、ピンポイントな単一事実の検索には強い。しかし多ホップ質問では、承認者（組織図）や金額（予算）といった**支援文書を捨ててしまう**。しかも `Retrieve` はチャンクを返すだけで回答は合成しないため、リランカー ON のままでは多ホップに答える術がない。
+
+次にエージェント検索。`AgenticRetrieveStream` はイベントストリームを返し、トレースで内部の各ステップを観測できる。
+
+```python title="Python"
+resp = ar.agentic_retrieve_stream(
+    messages=[{"role": "user", "content": {"text": QUERY}}],
+    retrievers=[{"configuration": {"knowledgeBase": {"knowledgeBaseId": kb_id}}}],
+    agenticRetrieveConfiguration={
+        "foundationModelType": "MANAGED",
+        "rerankingModelType": "NONE",   # 検証で切り替え
+        "maxAgentIteration": 5,
+    },
+    generateResponse=True,
+)
+for ev in resp["stream"]:
+    if "traceEvent" in ev:
+        a = ev["traceEvent"]["attributes"]
+        print(a["step"], a["status"], a["message"])
+    elif "responseEvent" in ev:
+        print(ev["responseEvent"]["text"], end="")  # 回答が逐次ストリーム
+```
+
+トレースは `SpeculativeRetrieval`（計画前に走る先行検索）→ `Planning`（質問の分解と十分性評価）→ 必要なら `Retrieval`（サブクエリ実行）→ 回答生成、という順で流れる。`rerankingModelType` を切り替えると挙動がはっきり変わった。
+
+- **rerank=NONE**: 先行検索が3文書すべてを集めるため `Planning=2 / Retrieval=0` で十分と判断し、**承認者「田中花子」・予算「1,200万円」・上限「600万円（1,200万×50%）」を完全に正解**した。
+- **rerank=MANAGED**: 先行検索が絞り込まれるため、エージェントは `Planning=4 / Retrieval=2` と追加のサブクエリ検索を実行して金額は復元したが、**承認者名は最後まで取りこぼした**（リランカーが組織図を返し続けなかった）。
+
+エージェント検索の価値は「チャンクではなく引用付きの自然文回答を合成する」点と、「先行検索で足りなければ自分で追加検索する適応性」にある。ただしそれでも、リランカーが文脈を絞りすぎると完全には挽回できない。
+
+## 比較: Retrieve と AgenticRetrieveStream
+
+複数回実行しても安定した代表値を示す。
+
+| 観点 | Retrieve(NONE) | Retrieve(MANAGED) | Agentic(MANAGED) | Agentic(NONE) |
+| --- | --- | --- | --- | --- |
+| レイテンシ | 約0.5s | 約0.5s | 約8.5–9.8s | 約7.5–7.9s |
+| 取得文書 | 3文書 | 1文書 | 2文書 | 3文書 |
+| FM 駆動ステップ | 0 | 0 | Planning4 / Retrieval2 | Planning2 / Retrieval0 |
+| 回答生成 | なし(チャンクのみ) | なし | あり(引用4) | あり(引用4) |
+| 多ホップ正解 | 素材は揃う | 不能 | 3/4(承認者欠落) | **4/4 完全正解** |
+
+レイテンシはエージェント検索が単発 `Retrieve` の約15倍。基盤モデルを planning・評価・生成で複数回呼ぶためで、コストも FM 呼び出し回数に比例して増える。「速くて安いが回答は組み立ててくれない `Retrieve`」と「遅くて高いが引用付きで答えを合成するエージェント検索」という対比になる。
+
+## まとめ
+
+- **多ホップ精度の最大のレバーはリランカーの ON/OFF** — マネージドリランカーは単一事実検索には最適だが、最上位1件に絞り込むため文書横断の質問では支援文脈を捨てる。多ホップ用途では `rerankingModelType=NONE` で広い文脈を保つ方が正解率は高い。
+- **エージェント検索は「合成」と「適応的な追加検索」が本体** — `Retrieve` はチャンクを返すだけ。エージェント検索は引用付きの回答を生成し、先行検索で不足すれば自分でサブクエリを足す。ただしリランカーが絞りすぎると挽回しきれない。
+- **トレースが挙動の説明責任を与える** — `SpeculativeRetrieval → Planning → Retrieval → 生成` の流れと、どこで早期停止したかが可視化される。回答が不完全なとき「どの文書を取りこぼしたか」を後から検証できる。
+- **ゼロインフラは本当だが SDK は最新化が前提** — ベクトル DB は一切不要で KB 構築は数分。一方 GA 直後の新 API は boto3 1.43.x 以降でないと呼べない。
+
+## クリーンアップ
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">リソース削除コマンド（作成と逆順）</summary>
+
+```bash title="Terminal"
+# KB（データソースごと削除される）→ S3 → IAM の順
+aws bedrock-agent delete-knowledge-base --knowledge-base-id "$KB_ID" --region ap-northeast-1
+aws s3 rm s3://bedrock-mkb-verify-$ACCOUNT/ --recursive
+aws s3api delete-bucket --bucket bedrock-mkb-verify-$ACCOUNT --region ap-northeast-1
+aws iam delete-role-policy --role-name bedrock-mkb-verify-role --policy-name mkb-verify-perms
+aws iam delete-role --role-name bedrock-mkb-verify-role
+```
+
+</details>

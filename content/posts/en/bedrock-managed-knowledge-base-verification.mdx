@@ -1,0 +1,186 @@
+---
+title: "Hands-on with Amazon Bedrock Managed Knowledge Base agentic retrieval"
+description: "Built a Managed KB in Tokyo with zero vector-DB provisioning and measured single-pass Retrieve vs agentic retrieval (AgenticRetrieveStream) on the same multi-hop question. The biggest lever on multi-hop accuracy was the managed reranker, not query decomposition."
+date: 2026-06-19
+published: true
+featured: false
+categories: [ai-agents]
+tags: ["aws", "bedrock", "knowledge-bases", "rag", "agentic-retrieval", "ai-agents"]
+---
+
+## Introduction
+
+On 2026-06-17, AWS announced the [general availability of Amazon Bedrock Managed Knowledge Base](https://aws.amazon.com/about-aws/whats-new/2026/06/amazon-bedrock-managed-knowledge-base/) — a fully managed way to build production-grade RAG without managing a vector database, ingestion pipeline, or retrieval infrastructure.
+
+Where the older Customer-managed Knowledge Base requires you to provision and operate your own vector store (such as OpenSearch Serverless), Managed KB handles embeddings, re-ranking, and the foundation model with service-managed defaults. Three things stand out: seven native connectors, Smart Parsing, and the headline differentiator — the **Agentic Retriever (`AgenticRetrieveStream` API)**, which decomposes a complex query into sub-queries, retrieves iteratively while evaluating sufficiency, and synthesizes an answer.
+
+**This article shares the results of building a Managed KB in the Tokyo region (ap-northeast-1) with zero vector-DB provisioning, then running the same multi-hop question through both single-pass `Retrieve` and agentic retrieval.** The headline finding: the biggest lever on multi-hop accuracy was not query decomposition itself, but **whether the managed reranker was on or off**. See the official docs at [Build a managed knowledge base](https://docs.aws.amazon.com/bedrock/latest/userguide/kb-build-managed.html) and [Use agentic retrieval to query a knowledge base](https://docs.aws.amazon.com/bedrock/latest/userguide/kb-test-agentic-retrieve.html).
+
+## Test environment
+
+| Item | Value |
+| --- | --- |
+| Region | ap-northeast-1 (Tokyo) |
+| KB type | MANAGED (managed embedding, default) |
+| Data source | Amazon S3 connector + Smart Parsing |
+| SDK | **boto3 1.43.33** |
+| Corpus | 3 Japanese plain-text documents |
+
+There is a gotcha up front. The pre-installed AWS CLI 2.34.30 / boto3 1.42.80 did not expose `MANAGED` in the `CreateKnowledgeBase` `type` enum (only `VECTOR / KENDRA / SQL`), and `bedrock-agent-runtime` had no `AgenticRetrieveStream`. Since this is a brand-new GA API, **upgrading the SDK to the 1.43.x line is effectively a prerequisite**. I ran the verification with boto3 1.43.33 in a venv.
+
+The corpus is three synthetic documents designed so the ground truth is known and only resolvable by combining all three:
+
+- `01-org.txt` (org chart): the ML platform team lead is **Hanako Tanaka**
+- `02-budget.txt` (budget): the ML platform team's annual budget is **12,000,000 JPY**
+- `03-policy.txt` (expense policy): annual prepayment needs the **team lead's approval**, capped at **50% of the budget**
+
+The question "to prepay the ML platform budget annually, whose approval is needed and what is the cap?" only resolves to "Hanako Tanaka's approval, capped at 6,000,000 JPY" by crossing all three documents. If you only want the findings, skip to [Verification 2](#verification-2-single-pass-retrieve-vs-agentic-retrieval).
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">Full setup (IAM, S3, KB creation, ingestion)</summary>
+
+```bash title="Terminal"
+# Provision a newer boto3 in a venv (system 1.42.x lacks MANAGED type / AgenticRetrieveStream)
+python3 -m venv kbverify-venv && . kbverify-venv/bin/activate
+pip install -q boto3==1.43.33
+
+# S3 bucket and corpus
+aws s3api create-bucket --bucket bedrock-mkb-verify-$ACCOUNT \
+  --create-bucket-configuration LocationConstraint=ap-northeast-1 --region ap-northeast-1
+aws s3 sync ./corpus/ s3://bedrock-mkb-verify-$ACCOUNT/corpus/
+```
+
+The service role trusts `bedrock.amazonaws.com` and grants `s3:ListBucket` / `s3:GetObject` on the bucket (scoped with `aws:SourceAccount` and `aws:SourceArn`). The KB and data source are created with boto3.
+
+```python title="Python (setup)"
+import boto3
+ba = boto3.client("bedrock-agent", "ap-northeast-1")
+
+kb = ba.create_knowledge_base(
+    name="mkb-verify-tokyo", roleArn=ROLE_ARN,
+    knowledgeBaseConfiguration={
+        "type": "MANAGED",
+        "managedKnowledgeBaseConfiguration": {"embeddingModelType": "MANAGED"},
+    },
+)
+kb_id = kb["knowledgeBase"]["knowledgeBaseId"]
+
+ds = ba.create_data_source(
+    name="s3-corpus", knowledgeBaseId=kb_id, dataDeletionPolicy="DELETE",
+    dataSourceConfiguration={
+        "type": "MANAGED_KNOWLEDGE_BASE_CONNECTOR",
+        "managedKnowledgeBaseConnectorConfiguration": {
+            "connectorParameters": {
+                "type": "S3", "version": "1",
+                "connectionConfiguration": {"bucketName": BUCKET, "bucketOwnerAccountId": ACCOUNT},
+                "deletionProtectionConfiguration": {"enableDeletionProtection": False},
+            }
+        },
+    },
+    vectorIngestionConfiguration={"parsingConfiguration": {"parsingStrategy": "SMART_PARSING"}},
+)
+ds_id = ds["dataSource"]["dataSourceId"]
+ba.start_ingestion_job(knowledgeBaseId=kb_id, dataSourceId=ds_id)
+```
+
+</details>
+
+## Verification 1: zero-infra KB build and ingestion
+
+I timed everything from KB creation through ingestion.
+
+| Step | Duration | Result |
+| --- | --- | --- |
+| KB creation (CREATING → ACTIVE) | **64.4 s** | — |
+| Data source creation + ingestion (3 docs) | **160.0 s** | 3 scanned / 3 indexed / 0 failed |
+
+The striking part: there was **no vector-store provisioning step at all**. A Customer-managed KB would require creating an OpenSearch Serverless collection, defining an index, and configuring scaling. With Managed KB you just set `type: MANAGED`. The only calls I issued were "create KB → create data source → start ingestion," and I never once thought about a vector DB. "Zero infrastructure" is not an exaggeration.
+
+## Verification 2: single-pass Retrieve vs agentic retrieval
+
+Against the same KB, I sent the same multi-hop question two ways. First, single-pass `Retrieve`, comparing the managed reranker on and off.
+
+```python title="Python"
+ar = boto3.client("bedrock-agent-runtime", "ap-northeast-1")
+r = ar.retrieve(
+    knowledgeBaseId=kb_id,
+    retrievalQuery={"text": QUERY},
+    retrievalConfiguration={"managedSearchConfiguration": {
+        "numberOfResults": 10, "rerankingModelType": "NONE",  # or "MANAGED"
+    }},
+)
+```
+
+The contrast was sharp. With `rerankingModelType=NONE`, all six chunks across three documents came back; with `MANAGED`, it **collapsed to the single top chunk (the policy document only)**.
+
+```text title="Output"
+rerank=NONE   : 6 chunks  → 01-org.txt, 02-budget.txt, 03-policy.txt
+rerank=MANAGED: 1 chunk   → 03-policy.txt only
+```
+
+The managed reranker is a precision-first "return the single most relevant passage" behavior — excellent for pinpoint single-fact lookups. But for multi-hop questions it **discards the supporting documents** (the approver in the org chart, the amount in the budget). And since `Retrieve` only returns chunks without synthesizing an answer, with the reranker on there is no way to answer a multi-hop question downstream.
+
+Next, agentic retrieval. `AgenticRetrieveStream` returns an event stream, so you can observe each internal step via traces.
+
+```python title="Python"
+resp = ar.agentic_retrieve_stream(
+    messages=[{"role": "user", "content": {"text": QUERY}}],
+    retrievers=[{"configuration": {"knowledgeBase": {"knowledgeBaseId": kb_id}}}],
+    agenticRetrieveConfiguration={
+        "foundationModelType": "MANAGED",
+        "rerankingModelType": "NONE",   # toggled in the test
+        "maxAgentIteration": 5,
+    },
+    generateResponse=True,
+)
+for ev in resp["stream"]:
+    if "traceEvent" in ev:
+        a = ev["traceEvent"]["attributes"]
+        print(a["step"], a["status"], a["message"])
+    elif "responseEvent" in ev:
+        print(ev["responseEvent"]["text"], end="")  # answer streams incrementally
+```
+
+Traces flow as `SpeculativeRetrieval` (a probe that runs before planning) → `Planning` (decompose the query and evaluate sufficiency) → optional `Retrieval` (run sub-queries) → response generation. Toggling `rerankingModelType` changed the behavior clearly.
+
+- **rerank=NONE**: the speculative retrieval already gathered all three documents, so the agent decided `Planning=2 / Retrieval=0` was sufficient and **answered fully correctly** — approver "Hanako Tanaka", budget "12,000,000 JPY", cap "6,000,000 JPY (12M × 50%)".
+- **rerank=MANAGED**: with speculative retrieval narrowed, the agent ran extra sub-queries (`Planning=4 / Retrieval=2`) and recovered the amounts, but **never recovered the approver's name** (the reranker kept starving the org chart).
+
+The value of agentic retrieval is that it **synthesizes a cited, natural-language answer** (not just chunks) and adapts by running more retrieval when the probe falls short. Even so, when the reranker over-narrows the context, it cannot fully recover.
+
+## Comparison: Retrieve vs AgenticRetrieveStream
+
+Representative values, stable across repeated runs.
+
+| Dimension | Retrieve(NONE) | Retrieve(MANAGED) | Agentic(MANAGED) | Agentic(NONE) |
+| --- | --- | --- | --- | --- |
+| Latency | ~0.5s | ~0.5s | ~8.5–9.8s | ~7.5–7.9s |
+| Docs retrieved | 3 | 1 | 2 | 3 |
+| FM-driven steps | 0 | 0 | Planning4 / Retrieval2 | Planning2 / Retrieval0 |
+| Answer generation | none (chunks) | none | yes (4 citations) | yes (4 citations) |
+| Multi-hop correctness | raw material only | impossible | 3/4 (approver missing) | **4/4 fully correct** |
+
+Agentic retrieval is roughly 15× the latency of single-pass `Retrieve` — it calls the foundation model multiple times for planning, evaluation, and generation, so cost scales with the number of FM invocations. The trade-off is "fast and cheap but no answer assembly" (`Retrieve`) versus "slow and pricier but cited, synthesized answers" (agentic).
+
+## Summary
+
+- **The biggest lever on multi-hop accuracy is the reranker on/off** — the managed reranker is ideal for single-fact lookups but collapses to one passage, discarding cross-document context. For multi-hop use cases, keeping `rerankingModelType=NONE` preserves the context that drives correctness.
+- **Agentic retrieval is really about synthesis and adaptive follow-up** — `Retrieve` just returns chunks; agentic retrieval generates a cited answer and adds sub-queries when the probe is insufficient. But it cannot fully recover if the reranker over-narrows.
+- **Traces give the behavior accountability** — you can see `SpeculativeRetrieval → Planning → Retrieval → generation` and where it stopped early. When an answer is incomplete, you can verify after the fact which document it missed.
+- **Zero infrastructure is real, but a current SDK is a prerequisite** — no vector DB at all, and the KB builds in minutes. Yet a freshly GA'd API needs boto3 1.43.x or newer to call.
+
+## Cleanup
+
+<details className="my-4 rounded-lg border border-border bg-muted/30 p-4">
+<summary className="cursor-pointer font-medium">Resource deletion commands (reverse creation order)</summary>
+
+```bash title="Terminal"
+# KB (deletes its data sources) → S3 → IAM
+aws bedrock-agent delete-knowledge-base --knowledge-base-id "$KB_ID" --region ap-northeast-1
+aws s3 rm s3://bedrock-mkb-verify-$ACCOUNT/ --recursive
+aws s3api delete-bucket --bucket bedrock-mkb-verify-$ACCOUNT --region ap-northeast-1
+aws iam delete-role-policy --role-name bedrock-mkb-verify-role --policy-name mkb-verify-perms
+aws iam delete-role --role-name bedrock-mkb-verify-role
+```
+
+</details>
